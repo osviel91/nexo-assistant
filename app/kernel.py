@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from fastapi import FastAPI
 
 logger = logging.getLogger("nexo.kernel")
 KERNEL_API_VERSION = 1
 HookName = Literal["startup", "shutdown", "chat_before", "chat_after"]
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,41 @@ class InterfaceExtension:
     label: str
 
 
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    handler: ToolHandler
+
+
+class ToolRegistry:
+    def __init__(self) -> None:
+        self._tools: dict[str, ToolDefinition] = {}
+
+    def register(self, tool: ToolDefinition) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"duplicate tool: {tool.name}")
+        self._tools[tool.name] = tool
+
+    def definitions(self) -> list[dict[str, Any]]:
+        return [
+            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
+            for t in self._tools.values()
+        ]
+
+    async def invoke(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool = self._tools.get(name)
+        if not tool:
+            raise KeyError(name)
+        return await tool.handler(arguments)
+
+
 @dataclass
 class ModuleContext:
     app: FastAPI
     settings: dict[str, Any] = field(default_factory=dict)
+    tools: ToolRegistry = field(default_factory=ToolRegistry)
 
 
 class Module(Protocol):
@@ -96,6 +128,12 @@ class ModuleRegistry:
             }
             for module in self.modules.values()
         ]
+
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        return self.context.tools.definitions()
+
+    async def invoke_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self.context.tools.invoke(name, arguments)
 
     def _run_lifecycle(self, hook: Literal["startup", "shutdown"]) -> None:
         for module in self.modules.values():

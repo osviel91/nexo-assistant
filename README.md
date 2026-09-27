@@ -35,6 +35,41 @@ NEXO_MODULES= uvicorn app.main:app --host 0.0.0.0 --port 8787
 NEXO_MODULES=attachments docker compose up -d --build
 ```
 
+### SearXNG web search (Etapa 2)
+
+`web-search-searxng` is optional and disabled by default. It registers the
+`web_search` tool only when all of these conditions hold: the module is listed
+in `NEXO_MODULES`, `NEXO_SEARXNG_URL` is a reachable absolute HTTP(S) URL, and
+the selected model explicitly advertises `tool-calling` in its `/models`
+response (`capabilities`, `supports_tools`, or `tool_calling`). Unknown model
+capabilities do not enable the tool.
+
+Portainer environment example:
+
+```text
+NEXO_MODULES=attachments,web-search-searxng
+NEXO_SEARXNG_URL=http://searxng:8080
+NEXO_SEARXNG_LANGUAGE=all
+NEXO_SEARXNG_SAFESEARCH=1
+NEXO_SEARXNG_MAX_RESULTS=5
+NEXO_SEARXNG_TIMEOUT=10
+```
+
+Use the Docker-network hostname or address reachable by the Nexo container;
+`localhost` points to Nexo itself. The module sends only `q`, `format=json`,
+`language`, and `safesearch`, returns at most 10 validated results, does not
+download result pages, and stops tool execution after three rounds. Missing
+URL, timeout, HTTP errors, invalid JSON, and malformed responses are reported
+as search errors rather than empty results. No SearXNG instance or credential
+is deployed by this stack.
+
+Manual smoke test after deployment: set the variables above, rebuild, confirm
+`web-search-searxng` appears in `GET /api/modules`, refresh providers, and
+select a model whose `/models` entry advertises tool calling. Ask for a current
+fact and verify that the streamed answer shows only the sources it cites. Use
+the Docker-network address from Nexo; `localhost` works only when SearXNG is in
+the same network namespace.
+
 `GET /api/modules` exposes only active modules and their interface extensions.
 Modules declare an id, version, kernel API version, capabilities and optional
 dependencies. Lifecycle and chat hooks are finite and failures are isolated
