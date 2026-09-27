@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f5f2"><title>Nexo · AI Chat</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-row"><div class="brand-mark">n</div><span class="brand-name">nexo</span><button class="icon-button sidebar-close" id="close-sidebar" aria-label="Cerrar">×</button></div>
+      <button class="new-chat" id="new-chat"><span>＋</span> Nuevo chat <kbd>⌘ K</kbd></button>
+      <div class="side-label">TU ESPACIO</div>
+      <button class="side-link active"><span class="side-icon">◌</span> Chats</button>
+      <button class="side-link" id="open-library"><span class="side-icon">▤</span> Biblioteca <span class="soon">PRONTO</span></button>
+      <div class="history-head"><span class="side-label">RECIENTES</span><button class="tiny-icon" id="refresh-chats" title="Actualizar">↻</button></div>
+      <div id="conversation-list" class="conversation-list"></div>
+      <div class="sidebar-bottom"><button class="side-link" id="open-providers"><span class="side-icon">⚙</span> Proveedores y modelos</button><div class="profile"><div class="avatar">O</div><div><strong>Osvi</strong><span>Espacio personal</span></div><span class="online-dot"></span></div></div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar"><button class="icon-button menu-button" id="open-sidebar" aria-label="Menú">☰</button><div class="top-title">Chat <span class="beta-pill">BETA</span></div><div class="top-actions"><button class="icon-button" id="new-chat-top" title="Nuevo chat">＋</button><button class="icon-button" id="open-providers-top" title="Proveedores">⚙</button></div></header>
+      <section class="chat-view" id="chat-view">
+        <div class="welcome" id="welcome">
+          <div class="welcome-orbit"><div class="orbit-dot"></div><div class="welcome-logo">n</div></div>
+          <p class="eyebrow">TU ESPACIO DE IA</p><h1>¿En qué estás<br><em>pensando?</em></h1>
+          <p class="welcome-sub">Elige un modelo y empieza. Tus conversaciones<br class="desktop-only"> se quedan en tu servidor.</p>
+          <div class="suggestions"><button class="suggestion" data-prompt="Ayúdame a pensar una idea desde cero"><span>✳</span> Explorar una idea</button><button class="suggestion" data-prompt="Resume los puntos clave y dame una explicación clara"><span>≋</span> Entender algo mejor</button><button class="suggestion" data-prompt="Ayúdame a resolver este problema paso a paso"><span>⌁</span> Resolver un problema</button></div>
+        </div>
+        <div class="messages" id="messages"></div>
+      </section>
+      <footer class="composer-wrap">
+        <div class="attachment-tray" id="attachment-tray"></div>
+        <div class="composer">
+          <textarea id="prompt" rows="1" placeholder="Escribe lo que quieras..." aria-label="Mensaje"></textarea>
+          <div class="composer-tools"><div class="composer-left"><button class="tool-button" id="attach-button" title="Adjuntar imagen o documento">＋</button><input id="file-input" type="file" accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log" multiple hidden><span class="tool-divider"></span><div class="model-select-wrap"><span class="provider-dot"></span><select id="model-select" aria-label="Modelo"><option value="">Configura un proveedor</option></select><span class="select-chevron">⌄</span></div></div><div class="composer-right"><span class="enter-hint">↵ para enviar</span><button class="send-button" id="send-button" aria-label="Enviar">↑</button></div></div>
+        </div><div class="privacy-note"><span class="lock-icon">⌑</span> Tus datos se guardan en tu servidor <span class="note-dot">·</span> Las respuestas pueden contener errores</div>
+      </footer>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="provider-modal" hidden><section class="modal"><div class="modal-header"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Proveedores y modelos</h2><p class="modal-sub">Conecta tus servicios de IA. Una conexión puede ofrecer muchos modelos.</p></div><button class="icon-button" id="close-modal" aria-label="Cerrar">×</button></div><div class="provider-list" id="provider-list"></div><form id="provider-form" class="provider-form"><h3 id="form-title">Añadir proveedor</h3><input id="provider-id" type="hidden"><label>Nombre<input id="provider-name" required placeholder="oMLX · OpenAI · DeepSeek"></label><label>URL base compatible con OpenAI<input id="provider-url" type="url" required placeholder="https://servidor:1234/v1"></label><label>API key <span class="optional">(opcional para servidores locales)</span><input id="provider-key" type="password" autocomplete="new-password" placeholder="Se almacena en tu servidor"></label><label>Modelos <span class="optional">(uno por línea; también puedes detectarlos después)</span><textarea id="provider-models" rows="3" placeholder="model-id-1&#10;model-id-2"></textarea></label><div class="form-actions"><button type="button" class="text-button" id="cancel-edit" hidden>Cancelar</button><button type="submit" class="primary-button" id="save-provider">Guardar proveedor</button></div></form><div class="modal-foot">Para oMLX, usa la dirección accesible desde ZimaOS y termina en <code>/v1</code>. Las claves no se envían al navegador durante las consultas.</div></section></div>
+  <div class="toast" id="toast"></div>
+  <script src="/assets/app.js" defer></script>
+</body></html>

@@ -1,0 +1,17 @@
+services:
+  nexo-chat:
+    build: .
+    container_name: nexo-chat
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      NEXO_DATA_DIR: /data
+      NEXO_MAX_UPLOAD_MB: "15"
+    volumes:
+      - nexo-data:/data
+    mem_limit: 768m
+    cpus: 1.0
+
+volumes:
+  nexo-data:
