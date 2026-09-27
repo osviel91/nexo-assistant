@@ -1,22 +1,238 @@
-const $ = s => document.querySelector(s);
-const state = {providers:[], conversations:[], modules:[], conversationId:null, messages:[], attachments:[], busy:false};
-const escapeHtml = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path, options={}) { const res=await fetch('/api'+path,{...options,headers:{...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(options.headers||{})}}); if(!res.ok){let t=await res.text();try{t=JSON.parse(t).detail||t}catch{} throw Error(t)} return res.status===204?null:res.json(); }
-function toast(s){const t=$('#toast');t.textContent=s;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
-function allModels(){return state.providers.flatMap(p=>p.models.map(m=>({provider:p,model:m}))) }
-function selected(){const [pid,...mid]=$('#model-select').value.split('::');return {provider:state.providers.find(p=>p.id===pid),model:mid.join('::')} }
-function renderSelect(keep=true){const sel=$('#model-select'), old=keep?sel.value:''; const models=allModels();sel.innerHTML=models.length?models.map(({provider,model})=>`<option value="${escapeHtml(provider.id+'::'+model.id)}">${escapeHtml(model.id)} · ${escapeHtml(provider.name)}</option>`).join(''):'<option value="">Añade un proveedor y modelos</option>';if(models.some(x=>x.provider.id+'::'+x.model.id===old))sel.value=old;}
-async function loadProviders(){state.providers=await api('/providers');renderSelect();renderProviderList()}
-async function loadModules(){state.modules=await api('/modules');$('#attach-button').hidden=!state.modules.some(m=>m.interface_extensions.some(x=>x.id==='attach-files'))}
-async function loadChats(){state.conversations=await api('/conversations');$('#conversation-list').innerHTML=state.conversations.map(c=>`<button class="conversation-item ${c.id===state.conversationId?'selected':''}" data-id="${c.id}" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</button>`).join('')||'<div style="font-size:10px;color:#aaa;padding:8px">Tus chats aparecerán aquí</div>';document.querySelectorAll('.conversation-item').forEach(b=>b.onclick=()=>openChat(b.dataset.id));}
-function beginChat(){state.conversationId=null;state.messages=[];state.attachments=[];$('#messages').innerHTML='';$('#welcome').hidden=false;renderAttachments();loadChats();$('#prompt').focus();$('#sidebar').classList.remove('open')}
-function renderMessages(){const box=$('#messages');box.innerHTML=state.messages.map(m=>{const sources=(m.sources||[]).filter(s=>{try{return ['http:','https:'].includes(new URL(s.url).protocol)}catch{return false}});return `<div class="message ${m.role==='user'?'user':''}">${m.role==='assistant'?'<div class="avatar-small">n</div>':''}<div class="message-body">${m.role==='assistant'?`<div class="message-meta">NEXO <span class="message-model">${escapeHtml(m.model_id||'')}</span></div>`:''}${escapeHtml(m.content||'')}${(m.attachments||[]).map(a=>a.kind==='image'?`<img class="attachment-preview" src="${a.data_url}" alt="${escapeHtml(a.name)}">`:`<span class="message-model">Adjunto: ${escapeHtml(a.name)}</span>`).join('')}${sources.length?`<div class="message-sources"><strong>Fuentes</strong>${sources.map(s=>`<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}<span>${escapeHtml(s.url)}</span></a>`).join('')}</div>`:''}</div></div>`}).join('');box.scrollTop=box.scrollHeight;}
-async function openChat(id){try{const d=await api('/conversations/'+id);state.conversationId=id;state.messages=d.messages;$('#welcome').hidden=true;renderMessages();loadChats();$('#sidebar').classList.remove('open')}catch(e){toast(e.message)}}
-function renderAttachments(){$('#attachment-tray').innerHTML=state.attachments.map((a,i)=>`<span class="attachment-chip">${a.kind==='image'?'▧':'▤'} ${escapeHtml(a.name)}<button data-i="${i}" aria-label="Quitar">×</button></span>`).join('');document.querySelectorAll('.attachment-chip button').forEach(b=>b.onclick=()=>{state.attachments.splice(+b.dataset.i,1);renderAttachments()})}
-async function send(){if(state.busy)return;const text=$('#prompt').value.trim(), sel=selected();if(!text&&!state.attachments.length)return;if(!sel.provider){openProviders();toast('Configura un proveedor y selecciona un modelo');return}state.busy=true;$('#send-button').disabled=true;$('#welcome').hidden=true;const user={role:'user',content:text,attachments:state.attachments.slice(),model_id:sel.model};state.messages.push(user);renderMessages();$('#prompt').value='';$('#prompt').style.height='';const attachments=state.attachments.slice();state.attachments=[];renderAttachments();state.messages.push({role:'assistant',content:'',model_id:sel.model,sources:[]});renderMessages();let answer='';try{const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversation_id:state.conversationId,provider_id:sel.provider.id,model_id:sel.model,content:text,attachments})});if(!res.ok)throw Error((await res.text()).slice(0,350));const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const events=buffer.split('\n\n');buffer=events.pop();for(const event of events){const line=event.split('\n').find(x=>x.startsWith('data: '));if(!line)continue;const data=JSON.parse(line.slice(6));if(data.error)throw Error(data.error);if(data.status)toast(data.message);if(data.delta){answer+=data.delta;state.messages[state.messages.length-1].content=answer;renderMessages()}if(data.done){state.conversationId=data.conversation_id;state.messages[state.messages.length-1].content=answer;state.messages[state.messages.length-1].provider_id=data.provider_id;state.messages[state.messages.length-1].model_id=data.model_id;state.messages[state.messages.length-1].sources=data.sources||[];renderMessages();}}}if(!answer)state.messages.pop();await loadChats();}catch(e){state.messages[state.messages.length-1].content='No se pudo completar la respuesta. '+e.message;renderMessages()}finally{state.busy=false;$('#send-button').disabled=false;$('#prompt').focus()}}
-function openProviders(){renderProviderList();$('#provider-modal').hidden=false}
-function resetForm(){ $('#provider-id').value='';$('#provider-name').value='';$('#provider-url').value='';$('#provider-key').value='';$('#provider-models').value='';$('#form-title').textContent='Añadir proveedor';$('#save-provider').textContent='Guardar proveedor';$('#cancel-edit').hidden=true }
-function renderProviderList(){const list=$('#provider-list');if(!state.providers.length){list.innerHTML='<div class="empty-providers">Todavía no hay proveedores. Añade oMLX, OpenAI, DeepSeek o cualquier API compatible.</div>';return}list.innerHTML=state.providers.map(p=>`<div class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(p.name)}</strong><span class="provider-url">${escapeHtml(p.base_url)}</span><div class="card-actions"><button data-act="refresh" data-id="${p.id}">↻ Detectar</button><button data-act="edit" data-id="${p.id}">Editar</button><button data-act="delete" data-id="${p.id}">×</button></div></div><div class="model-pills">${p.models.map(m=>`<span class="model-pill">${escapeHtml(m.id)} <button title="Quitar modelo" data-act="model-delete" data-id="${p.id}" data-model="${escapeHtml(m.id)}">×</button></span>`).join('')||'<span class="optional">Sin modelos todavía</span>'}</div></div>`).join('');list.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{const p=state.providers.find(x=>x.id===b.dataset.id);try{if(b.dataset.act==='refresh'){b.textContent='…';await api(`/providers/${p.id}/refresh`,{method:'POST'});await loadProviders();toast('Modelos actualizados')}else if(b.dataset.act==='delete'){if(confirm(`¿Eliminar ${p.name} y sus modelos?`)){await api(`/providers/${p.id}`,{method:'DELETE'});await loadProviders()}}else if(b.dataset.act==='model-delete'){await api(`/providers/${p.id}/models/${encodeURIComponent(b.dataset.model)}`,{method:'DELETE'});await loadProviders()}else if(b.dataset.act==='edit'){ $('#provider-id').value=p.id;$('#provider-name').value=p.name;$('#provider-url').value=p.base_url;$('#provider-key').value='';$('#provider-models').value=p.models.map(m=>m.id).join('\n');$('#form-title').textContent='Editar proveedor';$('#save-provider').textContent='Guardar cambios';$('#cancel-edit').hidden=false;$('#provider-name').focus()}}catch(e){toast(e.message)}})}
-$('#provider-form').onsubmit=async e=>{e.preventDefault();const id=$('#provider-id').value;const body={name:$('#provider-name').value,base_url:$('#provider-url').value,api_key:$('#provider-key').value,models:$('#provider-models').value.split('\n').map(x=>x.trim()).filter(Boolean)};try{await api('/providers'+(id?'/'+id:''),{method:id?'PUT':'POST',body:JSON.stringify(body)});resetForm();await loadProviders();toast(id?'Proveedor actualizado':'Proveedor añadido')}catch(err){toast(err.message)}};
-$('#cancel-edit').onclick=resetForm;$('#open-providers').onclick=openProviders;$('#open-providers-top').onclick=openProviders;$('#close-modal').onclick=()=>$('#provider-modal').hidden=true;$('#provider-modal').onclick=e=>{if(e.target.id==='provider-modal')$('#provider-modal').hidden=true};$('#new-chat').onclick=beginChat;$('#new-chat-top').onclick=beginChat;$('#send-button').onclick=send;$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};$('#prompt').oninput=e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,180)+'px'};$('#attach-button').onclick=()=>$('#file-input').click();$('#file-input').onchange=async e=>{for(const f of e.target.files){try{const fd=new FormData();fd.append('file',f);state.attachments.push(await api('/files',{method:'POST',body:fd}))}catch(err){toast(err.message)}}renderAttachments();e.target.value=''};document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus()});$('#refresh-chats').onclick=loadChats;$('#open-sidebar').onclick=()=>$('#sidebar').classList.add('open');$('#close-sidebar').onclick=()=>$('#sidebar').classList.remove('open');$('#open-library').onclick=()=>toast('Biblioteca y RAG llegarán en la siguiente fase');document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();beginChat()}if(e.key==='Escape'){ $('#provider-modal').hidden=true;$('#sidebar').classList.remove('open')}});
-Promise.all([loadModules(),loadProviders(),loadChats()]).catch(e=>toast(e.message));
+const $ = (selector) => document.querySelector(selector);
+const state = { providers: [], conversations: [], modules: [], conversationId: null, messages: [], attachments: [], busy: false };
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+
+async function api(path, options = {}) {
+  const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  const response = await fetch(`/api${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } });
+  if (!response.ok) {
+    let detail = await response.text();
+    try { detail = JSON.parse(detail).detail || detail; } catch { /* plain error */ }
+    throw Error(typeof detail === 'string' ? detail : 'La operación no pudo completarse.');
+  }
+  return response.status === 204 ? null : response.json();
+}
+
+function toast(message) {
+  const element = $('#toast');
+  element.textContent = message;
+  element.classList.add('show');
+  setTimeout(() => element.classList.remove('show'), 2600);
+}
+
+function moduleEnabled(id) { return state.modules.some((module) => module.id === id); }
+function allModels() { return state.providers.flatMap((provider) => provider.models.map((model) => ({ provider, model }))); }
+function selected() {
+  const [providerId, ...modelParts] = $('#model-select').value.split('::');
+  return { provider: state.providers.find((provider) => provider.id === providerId), model: modelParts.join('::') };
+}
+
+function renderSelect(keep = true) {
+  const select = $('#model-select');
+  const oldValue = keep ? select.value : '';
+  select.innerHTML = state.providers.length
+    ? state.providers.map((provider) => `<optgroup label="${escapeHtml(provider.name)}">${provider.models.map((model) => `<option value="${escapeHtml(provider.id)}::${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('') || '<option disabled>Sin modelos</option>'}</optgroup>`).join('')
+    : '<option value="">Añade un proveedor</option>';
+  if (allModels().some(({ provider, model }) => `${provider.id}::${model.id}` === oldValue)) select.value = oldValue;
+  updateComposerModel();
+}
+
+function updateComposerModel() {
+  const choice = selected();
+  $('#composer-model').textContent = choice.provider ? choice.model : 'Selecciona un modelo';
+}
+
+async function loadProviders() {
+  state.providers = await api('/providers');
+  renderSelect();
+  renderProviderList();
+  renderLab();
+}
+
+async function loadModules() {
+  state.modules = await api('/modules');
+  const hasTools = moduleEnabled('mcp') || moduleEnabled('web-search-searxng');
+  $('#attach-button').hidden = !state.modules.some((module) => module.interface_extensions.some((extension) => extension.id === 'attach-files'));
+  $('#web-chip').hidden = !moduleEnabled('web-search-searxng');
+  $('#tools-chip').hidden = !hasTools;
+  $('#mcp-setting').hidden = !moduleEnabled('mcp');
+  $('#decision-setting').hidden = !moduleEnabled('decision-runtime');
+  renderLab();
+}
+
+async function loadChats() {
+  state.conversations = await api('/conversations');
+  renderChats();
+}
+
+function renderChats() {
+  const query = $('#chat-search').value.trim().toLowerCase();
+  const chats = state.conversations.filter((chat) => chat.title.toLowerCase().includes(query));
+  $('#conversation-list').innerHTML = chats.map((chat) => `<button class="conversation-item ${chat.id === state.conversationId ? 'selected' : ''}" data-id="${escapeHtml(chat.id)}" title="${escapeHtml(chat.title)}">${escapeHtml(chat.title)}</button>`).join('') || '<div class="empty-providers">No hay chats todavía</div>';
+  document.querySelectorAll('.conversation-item').forEach((button) => { button.onclick = () => openChat(button.dataset.id); });
+}
+
+function beginChat() {
+  state.conversationId = null;
+  state.messages = [];
+  state.attachments = [];
+  $('#messages').innerHTML = '';
+  $('#welcome').hidden = false;
+  renderAttachments();
+  renderChats();
+  closeSidebar();
+  $('#prompt').focus();
+}
+
+function renderMessages() {
+  const box = $('#messages');
+  box.innerHTML = state.messages.map((message) => {
+    const sources = (message.sources || []).filter((source) => { try { return ['http:', 'https:'].includes(new URL(source.url).protocol); } catch { return false; } });
+    const attachments = (message.attachments || []).map((attachment) => attachment.kind === 'image'
+      ? `<img class="attachment-preview" src="${escapeHtml(attachment.data_url)}" alt="${escapeHtml(attachment.name)}">`
+      : `<span class="message-model">Adjunto: ${escapeHtml(attachment.name)}</span>`).join('');
+    const sourceList = sources.length ? `<details class="message-sources"><summary>Sources · ${sources.length}</summary>${sources.map((source) => `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}<span>${escapeHtml(source.url)}</span></a>`).join('')}</details>` : '';
+    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">NEXO · ${escapeHtml(message.model_id || '')}</div>` : ''}${escapeHtml(message.content)}${attachments}${sourceList}</div></article>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function openChat(id) {
+  try {
+    const data = await api(`/conversations/${id}`);
+    state.conversationId = id;
+    state.messages = data.messages;
+    $('#welcome').hidden = true;
+    renderMessages();
+    renderChats();
+    closeSidebar();
+  } catch (error) { toast(error.message); }
+}
+
+function renderAttachments() {
+  $('#attachment-tray').innerHTML = state.attachments.map((attachment, index) => `<span class="attachment-chip">${escapeHtml(attachment.name)}<button data-index="${index}" aria-label="Quitar ${escapeHtml(attachment.name)}">×</button></span>`).join('');
+  document.querySelectorAll('.attachment-chip button').forEach((button) => { button.onclick = () => { state.attachments.splice(Number(button.dataset.index), 1); renderAttachments(); }; });
+}
+
+async function send() {
+  if (state.busy) return;
+  const text = $('#prompt').value.trim();
+  const choice = selected();
+  if (!text && !state.attachments.length) return;
+  if (!choice.provider) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
+  state.busy = true;
+  $('#send-button').disabled = true;
+  $('#welcome').hidden = true;
+  state.messages.push({ role: 'user', content: text, attachments: state.attachments.slice(), model_id: choice.model });
+  renderMessages();
+  $('#prompt').value = '';
+  $('#prompt').style.height = '';
+  const attachments = state.attachments.slice();
+  state.attachments = [];
+  renderAttachments();
+  state.messages.push({ role: 'assistant', content: '', model_id: choice.model, sources: [] });
+  renderMessages();
+  let answer = '';
+  try {
+    const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: choice.provider.id, model_id: choice.model, content: text, attachments }) });
+    if (!response.ok) throw Error((await response.text()).slice(0, 300));
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+      for (const event of events) {
+        const line = event.split('\n').find((item) => item.startsWith('data: '));
+        if (!line) continue;
+        const data = JSON.parse(line.slice(6));
+        if (data.error) throw Error(data.error);
+        if (data.status) toast(data.message);
+        if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; renderMessages(); }
+        if (data.done) { state.conversationId = data.conversation_id; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [] }); renderMessages(); }
+      }
+    }
+    if (!answer) state.messages.pop();
+    await loadChats();
+  } catch (error) {
+    state.messages.at(-1).content = 'No se pudo completar la respuesta.';
+    renderMessages();
+    toast(error.message || 'No se pudo completar la respuesta.');
+  } finally {
+    state.busy = false;
+    $('#send-button').disabled = false;
+    $('#prompt').focus();
+  }
+}
+
+function openSurface(name) {
+  $('#surface-backdrop').hidden = false;
+  $('#lab-surface').hidden = name !== 'lab';
+  $('#settings-surface').hidden = name !== 'settings';
+  if (name === 'settings') { resetForm(); renderProviderList(); $('#provider-name').focus(); }
+}
+function closeSurface() { $('#surface-backdrop').hidden = true; }
+function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
+function closeSidebar() { $('#sidebar').classList.remove('open'); $('#sidebar-backdrop').hidden = true; $('#open-sidebar').setAttribute('aria-expanded', 'false'); }
+
+function renderLab() {
+  const cards = [{ title: 'Models', text: 'Conecta y selecciona tus modelos locales o remotos.', status: `${allModels().length} configurados` }];
+  if (moduleEnabled('decision-runtime')) {
+    const module = state.modules.find((item) => item.id === 'decision-runtime');
+    cards.push({ title: 'Decisions', text: 'Decisiones tipadas a través del runtime opcional.', status: module.status?.available ? 'Disponible · Arbiter' : 'No disponible', muted: !module.status?.available });
+  }
+  if (moduleEnabled('mcp')) cards.push({ title: 'Tools', text: 'Herramientas MCP conectadas a tu instalación.', status: 'Disponible' });
+  if (moduleEnabled('web-search-searxng')) cards.push({ title: 'Web', text: 'Búsqueda web para modelos con tool-calling.', status: 'Disponible' });
+  $('#lab-grid').innerHTML = cards.map((card) => `<article class="lab-card"><h3>${escapeHtml(card.title)}</h3><p>${escapeHtml(card.text)}</p><span class="lab-status ${card.muted ? 'muted' : ''}">${escapeHtml(card.status)}</span></article>`).join('');
+}
+
+function resetForm() { $('#provider-id').value = ''; $('#provider-name').value = ''; $('#provider-url').value = ''; $('#provider-key').value = ''; $('#provider-models').value = ''; $('#form-title').textContent = 'Añadir proveedor'; $('#save-provider').textContent = 'Guardar proveedor'; $('#cancel-edit').hidden = true; }
+function renderProviderList() {
+  const list = $('#provider-list');
+  if (!state.providers.length) { list.innerHTML = '<div class="empty-providers">Todavía no hay proveedores. Añade oMLX, OpenAI, DeepSeek o cualquier API compatible.</div>'; return; }
+  list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-pills">${provider.models.map((model) => `<span class="model-pill">${escapeHtml(model.id)}<button data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" aria-label="Quitar ${escapeHtml(model.id)}">×</button></span>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
+  list.querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => providerAction(button); });
+}
+
+async function providerAction(button) {
+  const provider = state.providers.find((item) => item.id === button.dataset.id);
+  try {
+    if (button.dataset.action === 'refresh') { button.textContent = '…'; await api(`/providers/${provider.id}/refresh`, { method: 'POST' }); await loadProviders(); toast('Modelos actualizados'); }
+    if (button.dataset.action === 'delete' && confirm(`¿Eliminar ${provider.name} y sus modelos?`)) { await api(`/providers/${provider.id}`, { method: 'DELETE' }); await loadProviders(); }
+    if (button.dataset.action === 'model-delete') { await api(`/providers/${provider.id}/models/${encodeURIComponent(button.dataset.model)}`, { method: 'DELETE' }); await loadProviders(); }
+    if (button.dataset.action === 'edit') { $('#provider-id').value = provider.id; $('#provider-name').value = provider.name; $('#provider-url').value = provider.base_url; $('#provider-key').value = ''; $('#provider-models').value = provider.models.map((model) => model.id).join('\n'); $('#form-title').textContent = 'Editar proveedor'; $('#save-provider').textContent = 'Guardar cambios'; $('#cancel-edit').hidden = false; $('#provider-name').focus(); }
+  } catch (error) { toast(error.message); }
+}
+
+$('#provider-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const id = $('#provider-id').value;
+  const body = { name: $('#provider-name').value, base_url: $('#provider-url').value, api_key: $('#provider-key').value, models: $('#provider-models').value.split('\n').map((model) => model.trim()).filter(Boolean) };
+  try { await api(`/providers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); resetForm(); await loadProviders(); toast(id ? 'Proveedor actualizado' : 'Proveedor añadido'); } catch (error) { toast(error.message); }
+};
+
+$('#model-select').onchange = updateComposerModel;
+$('#cancel-edit').onclick = resetForm;
+$('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
+$('#open-lab').onclick = () => { closeSidebar(); openSurface('lab'); };
+$('#new-chat').onclick = beginChat;
+$('#new-chat-top').onclick = beginChat;
+$('#send-button').onclick = send;
+$('#prompt').onkeydown = (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
+$('#prompt').oninput = (event) => { event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight, 180)}px`; };
+$('#attach-button').onclick = () => $('#file-input').click();
+$('#file-input').onchange = async (event) => { for (const file of event.target.files) { try { const form = new FormData(); form.append('file', file); state.attachments.push(await api('/files', { method: 'POST', body: form })); } catch (error) { toast(error.message); } } renderAttachments(); event.target.value = ''; };
+document.querySelectorAll('.suggestion').forEach((button) => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); }; });
+$('#refresh-chats').onclick = loadChats;
+$('#chat-search').oninput = renderChats;
+$('#open-sidebar').onclick = openSidebar;
+$('#close-sidebar').onclick = closeSidebar;
+$('#sidebar-backdrop').onclick = closeSidebar;
+$('#surface-backdrop').onclick = (event) => { if (event.target === $('#surface-backdrop')) closeSurface(); };
+document.querySelectorAll('[data-close-surface]').forEach((button) => { button.onclick = closeSurface; });
+document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
+
+Promise.all([loadModules(), loadProviders(), loadChats()]).catch((error) => toast(error.message));
