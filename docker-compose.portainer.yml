@@ -1,0 +1,28 @@
+services:
+  nexo-chat:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${NEXO_HTTP_PORT:-8787}:8787"
+    environment:
+      NEXO_DATA_DIR: "${NEXO_DATA_DIR:-/data}"
+      NEXO_MAX_UPLOAD_MB: "${NEXO_MAX_UPLOAD_MB:-15}"
+      NEXO_MODULES: "${NEXO_MODULES:-attachments}"
+      NEXO_SEARXNG_URL: "${NEXO_SEARXNG_URL:-}"
+      NEXO_SEARXNG_LANGUAGE: "${NEXO_SEARXNG_LANGUAGE:-all}"
+      NEXO_SEARXNG_SAFESEARCH: "${NEXO_SEARXNG_SAFESEARCH:-1}"
+      NEXO_SEARXNG_MAX_RESULTS: "${NEXO_SEARXNG_MAX_RESULTS:-5}"
+      NEXO_SEARXNG_TIMEOUT: "${NEXO_SEARXNG_TIMEOUT:-10}"
+      NEXO_MCP_SERVERS: "${NEXO_MCP_SERVERS:-[]}"
+      NEXO_DECISION_PROVIDER: "${NEXO_DECISION_PROVIDER:-arbiter}"
+      NEXO_ARBITER_URL: "${NEXO_ARBITER_URL:-}"
+      NEXO_ARBITER_API_KEY: "${NEXO_ARBITER_API_KEY:-}"
+      NEXO_DECISION_MODEL: "${NEXO_DECISION_MODEL:-jev-latest}"
+      NEXO_DECISION_TIMEOUT: "${NEXO_DECISION_TIMEOUT:-10}"
+    volumes:
+      - nexo-data:/data
+    mem_limit: ${NEXO_MEMORY_LIMIT:-768m}
+    cpus: ${NEXO_CPU_LIMIT:-1.0}
+
+volumes:
+  nexo-data:

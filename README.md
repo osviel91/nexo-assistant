@@ -171,7 +171,26 @@ module diagnostics. See `docs/adr/0003-runtime-opcional-de-decisiones.md`.
 
 ## Portainer
 
-Deploy `docker-compose.yml` as a stack. Map port 8787 as desired and keep the `nexo-data` volume. For oMLX, configure the base URL using an address the container can reach; `localhost` inside the container refers to the container itself.
+For Portainer, deploy `docker-compose.portainer.yml` as a stack from the
+repository. Its `${VARIABLE:-default}` values allow the stack environment to
+override configuration without editing YAML. Set these variables when using
+the optional modules:
+
+```text
+NEXO_MODULES=attachments,web-search-searxng,mcp,decision-runtime
+NEXO_SEARXNG_URL=http://searxng:8111
+NEXO_ARBITER_URL=https://laya.example.com
+NEXO_ARBITER_API_KEY=replace-me
+NEXO_DECISION_MODEL=jev-latest
+```
+
+`NEXO_ARBITER_API_KEY` is optional only when Arbiter does not require
+authentication. Keep it as a Portainer secret where possible. After changing
+stack variables, save and redeploy/recreate the stack; changing the form alone
+does not change an already-running container. Verify `GET /api/modules` and
+keep the `nexo-data` volume. For oMLX or other remote services, configure an
+address reachable from the Nexo container; `localhost` points to the container
+itself.
 
 ## Development
 
