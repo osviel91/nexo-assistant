@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import sqlite3
 import uuid
-import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from app.kernel import ModuleRegistry, enabled_module_ids
+from app.modules.attachments import AttachmentsModule
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,6 +23,9 @@ DB_PATH = DATA_DIR / "nexo.sqlite3"
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 MAX_UPLOAD = int(os.getenv("NEXO_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 app = FastAPI(title="Nexo Chat", version="0.1.0")
+module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
+if "attachments" in enabled_module_ids():
+    module_registry.register(AttachmentsModule())
 
 
 def db() -> sqlite3.Connection:
@@ -56,6 +60,12 @@ def startup() -> None:
           attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
         );
         """)
+    module_registry.startup()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    module_registry.shutdown()
 
 
 class ProviderIn(BaseModel):
@@ -84,6 +94,11 @@ def provider_dict(row: sqlite3.Row) -> dict[str, Any]:
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/api/modules")
+def modules():
+    return module_registry.catalog()
 
 
 @app.get("/api/providers")
@@ -177,37 +192,6 @@ def delete_conversation(cid: str):
     return {"ok": True}
 
 
-@app.post("/api/files")
-async def upload_file(file: UploadFile = File(...)):
-    data = await file.read(MAX_UPLOAD + 1)
-    if len(data) > MAX_UPLOAD: raise HTTPException(413, "File exceeds upload limit")
-    mime = file.content_type or "application/octet-stream"
-    name = Path(file.filename or "attachment").name[:180]
-    if mime.startswith("image/"):
-        return {"name": name, "mime": mime, "kind": "image", "data_url": f"data:{mime};base64," + base64.b64encode(data).decode()}
-    if mime.startswith("text/") or name.lower().endswith((".md", ".csv", ".json", ".log")):
-        try: text = data.decode("utf-8")
-        except UnicodeDecodeError: raise HTTPException(415, "Text file must be UTF-8")
-        return {"name": name, "mime": mime, "kind": "text", "text": text[:120000]}
-    if name.lower().endswith(".pdf") or mime == "application/pdf":
-        try:
-            from pypdf import PdfReader
-            text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(data)).pages)
-        except Exception as e:
-            raise HTTPException(422, f"Could not read PDF: {str(e)[:120]}")
-        if not text.strip(): raise HTTPException(422, "This PDF has no selectable text; scanned document OCR will be added later")
-        return {"name": name, "mime": "application/pdf", "kind": "text", "text": text[:120000]}
-    if name.lower().endswith(".docx"):
-        try:
-            from docx import Document
-            doc = Document(io.BytesIO(data))
-            text = "\n".join(p.text for p in doc.paragraphs)
-        except Exception as e:
-            raise HTTPException(422, f"Could not read Word document: {str(e)[:120]}")
-        return {"name": name, "mime": mime, "kind": "text", "text": text[:120000]}
-    raise HTTPException(415, "Supported files: images, PDF, DOCX, UTF-8 text, Markdown, CSV, JSON, and log files")
-
-
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
@@ -238,6 +222,7 @@ async def chat(req: ChatIn):
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
+    module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
 
     async def events():
         headers = {"Authorization": f"Bearer {key}"} if key else {}
@@ -266,6 +251,7 @@ async def chat(req: ChatIn):
             with db() as c:
                 c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, req.provider_id, req.model_id, "[]", now()))
                 c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
+            module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
             yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id}) + "\n\n"
         except httpx.RequestError as e:
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"

@@ -18,11 +18,44 @@ Open `http://<zimaos-ip>:8787`. Add a provider under **Providers** using its Ope
 - PDF, DOCX, and text files are extracted and included as conversation context; images are sent to vision-capable models. This is a basic attachment flow, not a persistent NotebookLM-style knowledge base.
 - Responsive web interface; single container; persistent `/data` volume.
 
+## Modular foundation
+
+The backend kernel owns startup, SQLite, the base chat/streaming flow, and the
+small versioned module contract in `app/kernel.py`. Built-in modules are
+registered explicitly in `app/main.py`; remote or hot-loaded plugins are not
+supported.
+
+The first module is `attachments`, which owns `/api/files` and the composer
+attachment control. It is enabled by default to preserve existing behavior.
+Set `NEXO_MODULES` to a comma-separated list to activate modules, or leave it
+empty to run without optional modules:
+
+```sh
+NEXO_MODULES= uvicorn app.main:app --host 0.0.0.0 --port 8787
+NEXO_MODULES=attachments docker compose up -d --build
+```
+
+`GET /api/modules` exposes only active modules and their interface extensions.
+Modules declare an id, version, kernel API version, capabilities and optional
+dependencies. Lifecycle and chat hooks are finite and failures are isolated
+and logged without exposing secrets or blocking the core.
+
+See `docs/adr/0001-fundamento-modular.md` for the Etapa 1 decisions and
+`tests/test_kernel.py` for the contract checks.
+
 ## Next milestones
 
-1. Document ingestion pipeline and knowledge notebooks (PDF/DOCX/HTML parsing, chunking, embeddings, vector search, citations).
-2. User authentication and per-user data isolation before exposing the service beyond a trusted LAN/reverse proxy. Provider API keys are stored in SQLite; keep the data volume private and back it up securely.
-3. Provider capability checks and configurable request parameters.
+1. Etapa 2: optional `web-search-searxng` tool, with timeout/error handling,
+   visible sources, and availability gated by model tool-calling capability.
+2. Etapa 3: optional MCP module, starting with one container-safe transport,
+   admin allowlists, provenance, approvals and output/time limits.
+3. Etapa 4: optional Souls module for per-conversation profiles and tool
+   allowlists, without changing existing chats.
+4. Etapa 5: independent RAG libraries module with ingestion states, separate
+   embedding configuration, retrieval and document-linked citations.
+5. User authentication and per-user data isolation before exposing the service
+   beyond a trusted LAN/reverse proxy. Provider API keys are stored in SQLite;
+   keep the data volume private and back it up securely.
 
 ## Portainer
 
