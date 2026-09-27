@@ -21,6 +21,7 @@ from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
 from app.modules.mcp import MCPModule
 from app.modules.web_search_searxng import WebSearchSearxngModule
+from app.modules.decision_runtime import DecisionRuntimeModule
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -45,6 +46,15 @@ if "web-search-searxng" in enabled_modules:
 if "mcp" in enabled_modules:
     module_registry.context.settings["mcp_servers"] = os.getenv("NEXO_MCP_SERVERS", "[]")
     module_registry.register(MCPModule())
+if "decision-runtime" in enabled_modules:
+    module_registry.context.settings.update({
+        "decision_provider": os.getenv("NEXO_DECISION_PROVIDER", "arbiter"),
+        "decision_timeout": os.getenv("NEXO_DECISION_TIMEOUT", "10"),
+        "decision_model": os.getenv("NEXO_DECISION_MODEL", "jev-latest"),
+        "arbiter_url": os.getenv("NEXO_ARBITER_URL", ""),
+        "arbiter_api_key": os.getenv("NEXO_ARBITER_API_KEY", ""),
+    })
+    module_registry.register(DecisionRuntimeModule())
 
 
 def db() -> sqlite3.Connection:

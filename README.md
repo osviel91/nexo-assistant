@@ -115,6 +115,36 @@ migration.
 See `docs/adr/0001-fundamento-modular.md` for the Etapa 1 decisions and
 `tests/test_kernel.py` for the contract checks.
 
+### Decision Runtime (Etapa 3.5)
+
+`decision-runtime` is an optional typed decision capability. It is separate
+from `AgentRuntime` (`REASON`) and `ToolRegistry`/MCP (`ACT`); it does not
+route chats, choose tools, select models, or change existing chat behavior.
+
+Enable it with an explicit module list and configure its Arbiter adapter:
+
+```text
+NEXO_MODULES=attachments,decision-runtime
+NEXO_DECISION_PROVIDER=arbiter
+NEXO_ARBITER_URL=http://arbiter:8000
+NEXO_ARBITER_API_KEY=replace-me
+NEXO_DECISION_MODEL=jev-latest
+NEXO_DECISION_TIMEOUT=10
+```
+
+The experimental `POST /api/decisions` endpoint accepts `state` and a list of
+typed questions (`boolean`, `choice`, `score`). The adapter sends the
+System-One-compatible `POST <NEXO_ARBITER_URL>/v1/systemone` request,
+translating boolean questions to `noul`; choice and score probabilities and
+confidence are preserved in the normalized response. The exact Arbiter URL is
+configurable; no Laya or Jev package is installed in Nexo.
+
+When the module is absent there is no runtime, provider, request, or decision
+route. When enabled, an unavailable Arbiter is reported by `GET /api/modules`
+and does not block Nexo startup. Decision failures are isolated and returned as
+safe typed errors; API keys and decision payloads are not logged or included in
+module diagnostics. See `docs/adr/0003-runtime-opcional-de-decisiones.md`.
+
 ## Next milestones
 
 1. Etapa 2: optional `web-search-searxng` tool, with timeout/error handling,
@@ -122,12 +152,13 @@ See `docs/adr/0001-fundamento-modular.md` for the Etapa 1 decisions and
 2. Etapa 2.5: agent runtime foundation with contextual tool execution,
    explicit capability gating, bounded rounds, bounded output, and isolated
    errors.
-3. Etapa 3B: MCP administration, provenance and approvals.
-4. Etapa 4: optional Souls module for per-conversation profiles and tool
+3. Etapa 3.5: optional typed Decision Runtime foundation with Arbiter adapter.
+4. Etapa 3B: MCP administration, provenance and approvals.
+5. Etapa 4: optional Souls module for per-conversation profiles and tool
    allowlists, without changing existing chats.
-5. Etapa 5: independent RAG libraries module with ingestion states, separate
+6. Etapa 5: independent RAG libraries module with ingestion states, separate
    embedding configuration, retrieval and document-linked citations.
-6. User authentication and per-user data isolation before exposing the service
+7. User authentication and per-user data isolation before exposing the service
    beyond a trusted LAN/reverse proxy. Provider API keys are stored in SQLite;
    keep the data volume private and back it up securely.
 

@@ -81,6 +81,7 @@ class ModuleContext:
     app: FastAPI
     settings: dict[str, Any] = field(default_factory=dict)
     tools: ToolRegistry = field(default_factory=ToolRegistry)
+    services: dict[str, Any] = field(default_factory=dict)
 
 
 class Module(Protocol):
@@ -158,6 +159,9 @@ class ModuleRegistry:
 
     async def invoke_tool(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         return await self.context.tools.invoke(name, context, arguments)
+
+    def service(self, name: str) -> Any | None:
+        return self.context.services.get(name)
 
     def _run_lifecycle(self, hook: Literal["startup", "shutdown"]) -> None:
         for module in self.modules.values():
