@@ -129,7 +129,7 @@ class AgentRuntime:
                     result["results"] = numbered
                 result_text = self._serialize_tool_result(result)
                 if result.get("error"):
-                    yield {"status": "web_search_error", "message": result["error"].get("message", "Error de herramienta")}
+                    yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": context.conversation_id, "provider_id": context.provider_id, "model_id": context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
         yield {"error": "Se alcanzó el límite de rondas de herramientas."}

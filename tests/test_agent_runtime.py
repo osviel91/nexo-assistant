@@ -83,7 +83,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 [{"content": "continued"}],
             ])
             events = run(AgentRuntime(registry), client)
-            self.assertTrue(any(event.get("status") == "web_search_error" for event in events))
+            self.assertTrue(any(event.get("status") == "tool_error" for event in events))
             self.assertNotIn("secret", json.dumps(client.payloads[1]))
             self.assertIn(code, client.payloads[1]["messages"][-1]["content"])
 

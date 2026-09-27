@@ -19,6 +19,7 @@ from app.agent import AgentRuntime, AgentRuntimeLimits
 from app.capabilities import normalize_model_capabilities
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
+from app.modules.mcp import MCPModule
 from app.modules.web_search_searxng import WebSearchSearxngModule
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
@@ -41,6 +42,9 @@ if "web-search-searxng" in enabled_modules:
         "searxng_timeout": os.getenv("NEXO_SEARXNG_TIMEOUT", "10"),
     })
     module_registry.register(WebSearchSearxngModule())
+if "mcp" in enabled_modules:
+    module_registry.context.settings["mcp_servers"] = os.getenv("NEXO_MCP_SERVERS", "[]")
+    module_registry.register(MCPModule())
 
 
 def db() -> sqlite3.Connection:

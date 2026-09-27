@@ -44,6 +44,8 @@ class ToolDefinition:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    source: str = "native"
+    module_id: str = ""
 
 
 class ToolRegistry:
@@ -129,8 +131,9 @@ class ModuleRegistry:
         return results
 
     def catalog(self) -> list[dict[str, Any]]:
-        return [
-            {
+        catalog = []
+        for module in self.modules.values():
+            item = {
                 "id": module.manifest.id,
                 "name": module.manifest.name,
                 "version": module.manifest.version,
@@ -140,8 +143,11 @@ class ModuleRegistry:
                     for ext in module.interface_extensions
                 ],
             }
-            for module in self.modules.values()
-        ]
+            status = getattr(module, "catalog_status", None)
+            if status:
+                item["status"] = status()
+            catalog.append(item)
+        return catalog
 
     def tool_definitions(
         self,
