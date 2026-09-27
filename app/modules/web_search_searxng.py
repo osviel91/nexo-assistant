@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.kernel import InterfaceExtension, ModuleContext, ModuleManifest, ToolDefinition
+from app.kernel import InterfaceExtension, ModuleContext, ModuleManifest, ToolDefinition, ToolExecutionContext
 
 
 class SearXNGSearchError(Exception):
@@ -40,7 +40,7 @@ class WebSearchSearxngModule:
         max_results = min(max(int(context.settings.get("searxng_max_results", 5)), 1), 10)
         timeout = max(float(context.settings.get("searxng_timeout", 10)), 0.1)
 
-        async def search(arguments: dict[str, Any]) -> dict[str, Any]:
+        async def search(_execution: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
             query = arguments.get("query")
             if not isinstance(query, str) or not query.strip() or len(query) > 500:
                 return {"error": {"code": "invalid_query", "message": "La consulta debe tener entre 1 y 500 caracteres."}}
@@ -75,9 +75,9 @@ class WebSearchSearxngModule:
                     break
             return {"results": results}
 
-        async def safe_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        async def safe_search(execution: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
             try:
-                return await search(arguments)
+                return await search(execution, arguments)
             except SearXNGSearchError as exc:
                 return {"error": {"code": exc.code, "message": str(exc)}}
 

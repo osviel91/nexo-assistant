@@ -15,7 +15,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.kernel import ModuleRegistry, enabled_module_ids
+from app.agent import AgentRuntime, AgentRuntimeLimits
+from app.capabilities import normalize_model_capabilities
+from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
 from app.modules.web_search_searxng import WebSearchSearxngModule
 
@@ -26,6 +28,7 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 MAX_UPLOAD = int(os.getenv("NEXO_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 app = FastAPI(title="Nexo Chat", version="0.1.0")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
+agent_runtime = AgentRuntime(module_registry, AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
 enabled_modules = enabled_module_ids()
 if "attachments" in enabled_modules:
     module_registry.register(AttachmentsModule())
@@ -180,13 +183,8 @@ async def refresh_models(pid: str):
     models = [m for m in data if isinstance(m, dict) and m.get("id")]
     with db() as c:
         for model in models:
-            capabilities = model.get("capabilities", [])
-            if model.get("supports_tools") is True or model.get("tool_calling") is True:
-                capabilities = list(set(capabilities if isinstance(capabilities, list) else []) | {"tool-calling"})
-            if not isinstance(capabilities, list): capabilities = []
-            if any("tool" in str(item).lower() or "function" in str(item).lower() for item in model.get("supported_parameters", [])):
-                capabilities = list(set(capabilities) | {"tool-calling"})
-            c.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?) ON CONFLICT(provider_id,id) DO UPDATE SET capabilities=excluded.capabilities", (str(model["id"]), pid, str(model["id"]), json.dumps([str(cap) for cap in capabilities])))
+            capabilities = normalize_model_capabilities(model)
+            c.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?) ON CONFLICT(provider_id,id) DO UPDATE SET capabilities=excluded.capabilities", (str(model["id"]), pid, str(model["id"]), json.dumps(sorted(capabilities))))
         row = c.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
     return provider_dict(row)
 
@@ -250,78 +248,23 @@ async def chat(req: ChatIn):
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
         supports_tools = "tool-calling" in json.loads(model["capabilities"] or "[]")
+    execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0)
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
 
     async def events():
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        answer = ""
-        sources: list[dict[str, Any]] = []
-        tool_rounds = 0
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
-                for request_round in range(4):
-                    payload = {"model": req.model_id, "messages": messages, "stream": True}
-                    if req.temperature is not None: payload["temperature"] = req.temperature
-                    if supports_tools and tool_rounds < 3 and module_registry.tool_definitions():
-                        payload["tools"] = module_registry.tool_definitions()
-                    tool_calls: dict[int, dict[str, Any]] = {}
-                    round_content = ""
-                    async with client.stream("POST", url, headers=headers, json=payload) as response:
-                        if response.status_code >= 400:
-                            yield "data: " + json.dumps({"error": f"Provider HTTP {response.status_code}"}) + "\n\n"
-                            return
-                        async for line in response.aiter_lines():
-                            if not line.startswith("data:"): continue
-                            raw = line[5:].strip()
-                            if raw == "[DONE]": break
-                            try:
-                                choice = json.loads(raw).get("choices", [{}])[0]
-                                delta = choice.get("delta", {})
-                                text = delta.get("content", "")
-                                if isinstance(text, list): text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-                                if text:
-                                    round_content += text
-                                    answer += text
-                                    yield "data: " + json.dumps({"delta": text}) + "\n\n"
-                                for call in delta.get("tool_calls", []) or []:
-                                    index = int(call.get("index", 0))
-                                    current = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                                    current["id"] += call.get("id", "") or ""
-                                    function = call.get("function", {})
-                                    current["name"] += function.get("name", "") or ""
-                                    current["arguments"] += function.get("arguments", "") or ""
-                            except (ValueError, IndexError, AttributeError, TypeError):
-                                continue
-                    if not tool_calls:
-                        break
-                    assistant_call = {"role": "assistant", "content": round_content or None, "tool_calls": [{"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}} for c in tool_calls.values()]}
-                    messages.append(assistant_call)
-                    tool_rounds += 1
-                    for call in tool_calls.values():
-                        try:
-                            arguments = json.loads(call["arguments"] or "{}")
-                            if not isinstance(arguments, dict): raise ValueError
-                            result = await module_registry.invoke_tool(call["name"], arguments)
-                        except KeyError:
-                            result = {"error": {"code": "unknown_tool", "message": "Herramienta desconocida."}}
-                        except (ValueError, TypeError, json.JSONDecodeError):
-                            result = {"error": {"code": "invalid_arguments", "message": "Argumentos de herramienta inválidos."}}
-                        result = dict(result)
-                        if isinstance(result.get("results"), list):
-                            numbered = []
-                            for item in result["results"]:
-                                item = dict(item)
-                                item["source"] = len(sources) + 1
-                                source = {"title": item.get("title", "Fuente"), "url": item.get("url", "")}
-                                sources.append(source)
-                                numbered.append(item)
-                            result["results"] = numbered
-                        if result.get("error"):
-                            yield "data: " + json.dumps({"status": "web_search_error", "message": result["error"].get("message", "Error de búsqueda")}) + "\n\n"
-                        messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": json.dumps(result, ensure_ascii=False)})
-                else:
-                    yield "data: " + json.dumps({"error": "Se alcanzó el límite de rondas de herramientas."}) + "\n\n"
-                    return
+                async for event in agent_runtime.stream(client, url, headers, messages, req.model_id, {"tool-calling"} if supports_tools else set(), execution_context, req.temperature):
+                    if "delta" in event:
+                        yield "data: " + json.dumps({"delta": event["delta"]}) + "\n\n"
+                    elif "status" in event:
+                        yield "data: " + json.dumps({"status": event["status"], "message": event["message"]}) + "\n\n"
+                    elif "error" in event:
+                        yield "data: " + json.dumps({"error": event["error"]}) + "\n\n"
+                        return
+                    elif event.get("complete"):
+                        answer, sources = event["answer"], event["sources"]
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             with db() as c:

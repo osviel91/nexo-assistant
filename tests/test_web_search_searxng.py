@@ -5,7 +5,7 @@ import unittest
 import httpx
 from fastapi import FastAPI
 
-from app.kernel import ModuleContext, ToolRegistry
+from app.kernel import ModuleContext, ToolExecutionContext, ToolRegistry
 from app.modules.web_search_searxng import WebSearchSearxngModule
 
 
@@ -18,7 +18,7 @@ def make_tool(handler, **settings):
 
 class WebSearchTests(unittest.TestCase):
     def run_tool(self, tool, arguments):
-        return asyncio.run(tool.handler(arguments))
+        return asyncio.run(tool.handler(ToolExecutionContext("c", "p", "m", 1), arguments))
 
     def test_active_registers_and_disabled_registry_has_no_tool(self):
         registry = ToolRegistry()
@@ -62,9 +62,9 @@ class WebSearchTests(unittest.TestCase):
         tool = make_tool(lambda request: httpx.Response(200, json={"results": []}))
         registry = ToolRegistry()
         registry.register(tool)
-        self.assertEqual(asyncio.run(registry.invoke("web_search", {"query": "x"})), {"results": []})
+        self.assertEqual(asyncio.run(registry.invoke("web_search", ToolExecutionContext("c", "p", "m", 1), {"query": "x"})), {"results": []})
         with self.assertRaises(KeyError):
-            asyncio.run(registry.invoke("other", {}))
+            asyncio.run(registry.invoke("other", ToolExecutionContext("c", "p", "m", 1), {}))
 
 
 if __name__ == "__main__":

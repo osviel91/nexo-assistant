@@ -30,8 +30,11 @@ funcionan hoy, pero el arranque y las rutas estan concentrados en
    archivos, no necesita SQLite y puede migrarse sin reescribir `/api/chat`.
    Su extension `attach-files` es el primer punto de interfaz delimitado.
 7. Los hooks soportados son solamente `startup`, `shutdown`, `chat_before` y
-   `chat_after`. No se introduce un bus generico. La Etapa 1 deja el contrato
-   listo; la invocacion de herramientas queda fuera de alcance.
+   `chat_after`. No se introduce un bus generico.
+8. La ejecucion de herramientas vive en `app/agent.py`, separada del endpoint
+   HTTP. Cada handler recibe un `ToolExecutionContext`; el registro filtra las
+   definiciones por capacidades del modelo. El runtime limita a tres rondas,
+   acota el resultado serializado y convierte fallos en errores seguros.
 
 ## Estado de proveedores
 
@@ -48,5 +51,5 @@ calling: cada capacidad debera modelarse explicitamente antes de Etapa 2.
 - La configuracion se valida en el registro, pero no se crea todavia un
   sistema generico de secretos o migraciones de modulos porque no hay un
   consumidor real en Etapa 1.
-- Las futuras integraciones SearXNG, MCP, Souls y RAG seran modulos integrados
-  con contratos propios; no se implementan en este cambio.
+- Las futuras integraciones MCP, Souls y RAG seran modulos integrados con
+  contratos propios; no se implementan en este cambio.

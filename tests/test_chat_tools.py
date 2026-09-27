@@ -65,7 +65,7 @@ class ChatToolTests(unittest.TestCase):
             with main.db() as connection:
                 connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))
                 connection.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("m", "p", "m", '["tool-calling"]'))
-            async def search(arguments):
+            async def search(_context, arguments):
                 return {"results": [{"title": "Nexo", "url": "https://nexo.test", "snippet": "Nexo"}]}
             main.module_registry.context.tools._tools.clear()
             main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search))

@@ -75,6 +75,16 @@ Modules declare an id, version, kernel API version, capabilities and optional
 dependencies. Lifecycle and chat hooks are finite and failures are isolated
 and logged without exposing secrets or blocking the core.
 
+### Agent runtime foundation (Etapa 2.5)
+
+Tool execution runs through a contextual agent runtime. Tool handlers receive
+the conversation, provider, model, and tool-round context; tools are exposed
+only when the selected model advertises `tool-calling`. The runtime allows at
+most three tool rounds, limits serialized tool output, isolates tool errors,
+and logs the tool, round, status, and duration without logging arguments or
+results by default. Existing SQLite data and chat contracts require no
+migration.
+
 See `docs/adr/0001-fundamento-modular.md` for the Etapa 1 decisions and
 `tests/test_kernel.py` for the contract checks.
 
@@ -82,13 +92,16 @@ See `docs/adr/0001-fundamento-modular.md` for the Etapa 1 decisions and
 
 1. Etapa 2: optional `web-search-searxng` tool, with timeout/error handling,
    visible sources, and availability gated by model tool-calling capability.
-2. Etapa 3: optional MCP module, starting with one container-safe transport,
+2. Etapa 2.5: agent runtime foundation with contextual tool execution,
+   explicit capability gating, bounded rounds, bounded output, and isolated
+   errors.
+3. Etapa 3: optional MCP module, starting with one container-safe transport,
    admin allowlists, provenance, approvals and output/time limits.
-3. Etapa 4: optional Souls module for per-conversation profiles and tool
+4. Etapa 4: optional Souls module for per-conversation profiles and tool
    allowlists, without changing existing chats.
-4. Etapa 5: independent RAG libraries module with ingestion states, separate
+5. Etapa 5: independent RAG libraries module with ingestion states, separate
    embedding configuration, retrieval and document-linked citations.
-5. User authentication and per-user data isolation before exposing the service
+6. User authentication and per-user data isolation before exposing the service
    beyond a trusted LAN/reverse proxy. Provider API keys are stored in SQLite;
    keep the data volume private and back it up securely.
 

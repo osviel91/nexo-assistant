@@ -10,7 +10,15 @@ from fastapi import FastAPI
 logger = logging.getLogger("nexo.kernel")
 KERNEL_API_VERSION = 1
 HookName = Literal["startup", "shutdown", "chat_before", "chat_after"]
-ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    conversation_id: str
+    provider_id: str
+    model_id: str
+    round: int
+
+
+ToolHandler = Callable[[ToolExecutionContext, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -47,17 +55,23 @@ class ToolRegistry:
             raise ValueError(f"duplicate tool: {tool.name}")
         self._tools[tool.name] = tool
 
-    def definitions(self) -> list[dict[str, Any]]:
+    def definitions(
+        self,
+        context: ToolExecutionContext | None = None,
+        capabilities: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if capabilities is not None and "tool-calling" not in capabilities:
+            return []
         return [
             {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
             for t in self._tools.values()
         ]
 
-    async def invoke(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def invoke(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
         if not tool:
             raise KeyError(name)
-        return await tool.handler(arguments)
+        return await tool.handler(context, arguments)
 
 
 @dataclass
@@ -129,11 +143,15 @@ class ModuleRegistry:
             for module in self.modules.values()
         ]
 
-    def tool_definitions(self) -> list[dict[str, Any]]:
-        return self.context.tools.definitions()
+    def tool_definitions(
+        self,
+        context: ToolExecutionContext | None = None,
+        capabilities: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.context.tools.definitions(context, capabilities)
 
-    async def invoke_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return await self.context.tools.invoke(name, arguments)
+    async def invoke_tool(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self.context.tools.invoke(name, context, arguments)
 
     def _run_lifecycle(self, hook: Literal["startup", "shutdown"]) -> None:
         for module in self.modules.values():
