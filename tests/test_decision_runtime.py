@@ -100,6 +100,17 @@ class DecisionRuntimeTests(unittest.TestCase):
         self.assertIs(registry.service("decision"), module.runtime)
         self.assertEqual(module.catalog_status()["last_error"], "decision_provider_unavailable")
 
+    def test_startup_schedules_readiness_check_inside_running_loop(self):
+        async def run():
+            provider = FakeProvider(available=True)
+            module = DecisionRuntimeModule(provider=provider)
+            module.startup(ModuleRegistry(FastAPI()).context)
+            await asyncio.sleep(0)
+            self.assertTrue(module.available)
+            self.assertIsNone(module.last_error)
+
+        asyncio.run(run())
+
     def test_runtime_preserves_typed_result(self):
         question = {"id": "needs_web", "type": "boolean", "statement": "Needs web"}
         result = {"answers": {"needs_web": {"type": "boolean", "value": True}}}

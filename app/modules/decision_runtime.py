@@ -57,9 +57,8 @@ class DecisionRuntimeModule:
         except RuntimeError:
             asyncio.run(self.startup_async())
         else:
-            # The existing synchronous kernel cannot await while an app loop runs.
-            self.last_error = "decision_provider_unavailable"
-            self.available = False
+            # FastAPI calls the synchronous kernel lifecycle inside its event loop.
+            asyncio.create_task(self.startup_async())
 
     async def startup_async(self) -> None:
         try:
