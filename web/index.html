@@ -15,14 +15,14 @@
         <a class="brand" href="#" aria-label="Nexo, inicio"><span class="brand-mark">n</span><strong>Nexo</strong></a>
         <button class="icon-button sidebar-close" id="close-sidebar" aria-label="Cerrar navegación">×</button>
       </div>
-      <button class="new-chat" id="new-chat"><span aria-hidden="true">＋</span> Nuevo chat <kbd>⌘ K</kbd></button>
+      <button class="new-chat" id="new-chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg> Nuevo chat <kbd>⌘ K</kbd></button>
       <label class="search-box"><span aria-hidden="true">⌕</span><input id="chat-search" type="search" placeholder="Buscar chats" aria-label="Buscar chats"></label>
       <div class="history-head"><span class="side-label">CHATS</span><button class="tiny-icon" id="refresh-chats" title="Actualizar chats" aria-label="Actualizar chats">↻</button></div>
       <div id="conversation-list" class="conversation-list"></div>
       <nav class="sidebar-bottom" aria-label="Más espacios">
         <div class="nav-divider"></div>
-        <button class="side-link" id="open-lab"><span class="side-icon" aria-hidden="true">◈</span> Lab</button>
-        <button class="side-link" id="open-settings"><span class="side-icon" aria-hidden="true">⚙</span> Settings</button>
+        <button class="side-link" id="open-lab"><svg class="side-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 8 9-8 9-8-9 8-9Z"/><path d="m12 7 4 5-4 5-4-5 4-5Z"/></svg> Lab</button>
+        <button class="side-link" id="open-settings"><svg class="side-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/><path d="M4.9 15.4 3.5 14l1.4-2.4L3.5 9.2l1.4-1.4 2.7.7 1.4-2.4h2.8l1.4 2.4 2.7-.7 1.4 1.4-1.4 2.4 1.4 2.4-1.4 1.4-2.7-.7-1.4 2.4H9l-1.4-2.4-2.7.7Z"/></svg> Settings</button>
         <div class="profile"><div class="avatar">O</div><div><strong>Osvi</strong><span>Espacio personal</span></div></div>
       </nav>
     </aside>
@@ -34,7 +34,7 @@
           <strong class="top-title">Nexo</strong>
           <label class="model-picker"><span class="sr-only">Modelo activo</span><select id="model-select" aria-label="Modelo activo"><option value="">Añade un proveedor</option></select><span aria-hidden="true">⌄</span></label>
         </div>
-        <button class="icon-button new-chat-top" id="new-chat-top" title="Nuevo chat" aria-label="Nuevo chat">＋</button>
+        <button class="icon-button new-chat-top" id="new-chat-top" title="Nuevo chat" aria-label="Nuevo chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
       </header>
 
       <section class="chat-view" id="chat-view" aria-live="polite">
@@ -43,9 +43,9 @@
           <h1>¿En qué puedo ayudarte?</h1>
           <p>Un espacio privado para pensar, crear y resolver.</p>
           <div class="suggestions">
-            <button class="suggestion" data-prompt="Ayúdame a pensar una idea desde cero">Explorar una idea</button>
-            <button class="suggestion" data-prompt="Resume los puntos clave y dame una explicación clara">Entender algo mejor</button>
-            <button class="suggestion" data-prompt="Ayúdame a resolver este problema paso a paso">Resolver un problema</button>
+            <button class="suggestion" data-prompt="Ayúdame a pensar una idea desde cero"><svg class="suggestion-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 1.4 5.6L19 10l-5.6 1.4L12 17l-1.4-5.6L5 10l5.6-1.4L12 3Z"/></svg>Explorar una idea</button>
+            <button class="suggestion" data-prompt="Resume los puntos clave y dame una explicación clara"><svg class="suggestion-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/></svg>Entender algo mejor</button>
+            <button class="suggestion" data-prompt="Ayúdame a resolver este problema paso a paso"><svg class="suggestion-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m8 8 4-4 4 4M12 4v11M5 20h14"/></svg>Resolver un problema</button>
           </div>
         </div>
         <div class="messages" id="messages"></div>
@@ -57,11 +57,10 @@
           <textarea id="prompt" rows="1" placeholder="Pregunta lo que quieras..." aria-label="Mensaje"></textarea>
           <div class="composer-tools">
             <div class="composer-left">
-              <button class="tool-button" id="attach-button" title="Adjuntar archivo" aria-label="Adjuntar archivo" hidden>＋</button>
+              <button class="tool-button" id="attach-button" title="Adjuntar archivo" aria-label="Adjuntar archivo" hidden><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m8 12 5.5-5.5a3.5 3.5 0 0 1 5 5L11 19a5 5 0 0 1-7-7l7-7"/></svg></button>
               <input id="file-input" type="file" accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log" multiple hidden>
-              <span class="composer-model" id="composer-model">Selecciona un modelo</span>
-              <span class="capability-chip" id="web-chip" hidden>Web</span>
-              <span class="capability-chip" id="tools-chip" hidden>Tools</span>
+              <span class="capability-chip" id="web-chip" hidden><svg class="chip-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/></svg>Web</span>
+              <span class="capability-chip" id="tools-chip" hidden><svg class="chip-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6 4 4M5 19l5.5-5.5M15 5a4 4 0 0 0 4 4l-5 5-4-4 5-5Z"/></svg>Tools</span>
             </div>
             <div class="composer-right"><span class="enter-hint">Enter para enviar</span><button class="send-button" id="send-button" aria-label="Enviar">↑</button></div>
           </div>
