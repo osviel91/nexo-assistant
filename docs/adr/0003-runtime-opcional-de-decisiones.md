@@ -23,6 +23,11 @@ System One `noul`; `choice` y `score` conservan opciones, escalas,
 probabilidades y confidence. La normalización vuelve a exponer un valor
 tipado común en cada respuesta.
 
+`noul` es el nombre intencional de la primitiva booleana de System One, no un
+typo: `P(true) = noul` y `P(false) = 1 - noul`. El adapter usa `GET /readyz`
+con la misma autenticación configurada para Arbiter. El modelo por defecto es
+`jev-latest`; `NEXO_DECISION_MODEL` lo reemplaza de forma opaca.
+
 `ArbiterDecisionProvider` es solo un adapter HTTP configurable. La API pública
 de TypeSafe documenta `POST /v1/systemone`, con `state`, `model` y un mapa de
 preguntas `noul`/`choice`/`score`, y respuestas con probabilidades y confidence.

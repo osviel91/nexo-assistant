@@ -139,6 +139,13 @@ translating boolean questions to `noul`; choice and score probabilities and
 confidence are preserved in the normalized response. The exact Arbiter URL is
 configurable; no Laya or Jev package is installed in Nexo.
 
+`jev-latest` is the default model ID. `NEXO_DECISION_MODEL` can override it;
+Nexo forwards the value to Arbiter without interpreting checkpoint names.
+Arbiter readiness uses authenticated `GET /readyz` (not `/health`), and an
+unavailable response only marks the optional module unavailable. The System One
+boolean primitive is intentionally named `noul`: `P(true)` is `noul` and
+`P(false)` is `1 - noul`.
+
 When the module is absent there is no runtime, provider, request, or decision
 route. When enabled, an unavailable Arbiter is reported by `GET /api/modules`
 and does not block Nexo startup. Decision failures are isolated and returned as

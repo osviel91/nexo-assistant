@@ -12,7 +12,7 @@ class DecisionQuestion(BaseModel):
     id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     type: QuestionType
     statement: str = Field(min_length=1, max_length=4000)
-    options: dict[str, Any] | None = None
+    options: dict[str, Any] | list[Any] | None = None
     scale: list[Any] | None = None
 
     @model_validator(mode="after")
@@ -55,3 +55,4 @@ class DecisionAnswer(BaseModel):
 class DecisionResult(BaseModel):
     model: str | None = None
     answers: dict[str, DecisionAnswer]
+    metadata: dict[str, Any] | None = None

@@ -25,6 +25,11 @@ class ArbiterDecisionProvider:
     def endpoint(self) -> str:
         return self.url + ("/systemone" if self.url.endswith("/v1") else "/v1/systemone")
 
+    @property
+    def readiness_endpoint(self) -> str:
+        base = self.url[:-3] if self.url.endswith("/v1") else self.url
+        return base + "/readyz"
+
     async def decide(self, request: DecisionRequest) -> DecisionResult:
         payload = {
             "state": request.state,
@@ -35,20 +40,24 @@ class ArbiterDecisionProvider:
             async with self.client_factory(timeout=self.timeout) as client:
                 response = await client.post(self.endpoint, headers=self._headers(), json=payload)
             response.raise_for_status()
-            return self._parse_response(response.json(), request)
         except httpx.TimeoutException as exc:
             raise ArbiterError("decision_timeout") from exc
         except httpx.HTTPStatusError as exc:
             raise ArbiterError("decision_provider_unavailable") from exc
-        except (httpx.RequestError, ValueError, TypeError) as exc:
+        except httpx.RequestError as exc:
             raise ArbiterError("decision_provider_unavailable") from exc
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise ArbiterError("decision_invalid_response") from exc
+        return self._parse_response(payload, request)
 
     async def check_available(self) -> bool:
         if not self.url:
             return False
         try:
             async with self.client_factory(timeout=self.timeout) as client:
-                response = await client.get(self.url + "/health", headers=self._headers())
+                response = await client.get(self.readiness_endpoint, headers=self._headers())
             return response.is_success
         except (httpx.HTTPError, OSError):
             return False
@@ -59,6 +68,7 @@ class ArbiterDecisionProvider:
     @staticmethod
     def _question_payload(question) -> dict:
         if question.type == "boolean":
+            # System One intentionally calls the boolean primitive "noul".
             return {"type": "noul", "instructions": question.statement}
         if question.type == "choice":
             return {"type": "choice", "instructions": question.statement, "criteria": question.options}
@@ -76,7 +86,16 @@ class ArbiterDecisionProvider:
             except (KeyError, TypeError, ValueError):
                 raise ArbiterError("decision_invalid_response") from None
         model = payload.get("model")
-        return DecisionResult(model=model if isinstance(model, str) else None, answers=answers)
+        metadata = {}
+        if isinstance(payload.get("routing"), str):
+            metadata["routing"] = payload["routing"]
+        if isinstance(payload.get("latency_ms"), (int, float)) and not isinstance(payload["latency_ms"], bool):
+            metadata["latency_ms"] = payload["latency_ms"]
+        return DecisionResult(
+            model=model if isinstance(model, str) else None,
+            answers=answers,
+            metadata=metadata or None,
+        )
 
     @staticmethod
     def _parse_answer(question, raw: object) -> DecisionAnswer:
@@ -87,7 +106,7 @@ class ArbiterDecisionProvider:
             if not isinstance(probability, (int, float)) or not 0 <= probability <= 1:
                 raise ValueError
             p = float(probability)
-            return DecisionAnswer(type="boolean", value=p >= 0.5, probabilities={"true": p, "false": 1 - p}, confidence=max(p, 1 - p))
+            return DecisionAnswer(type="boolean", value=p >= 0.5, probabilities={"true": p, "false": round(1 - p, 12)}, confidence=max(p, 1 - p))
         if raw.get("type") != question.type:
             raise ValueError
         probabilities = raw.get("probabilities")
@@ -98,10 +117,10 @@ class ArbiterDecisionProvider:
             raise ValueError
         if question.type == "choice":
             value = raw.get("choice")
-            if not isinstance(value, str) or value not in question.options:
+            if value not in question.options:
                 raise ValueError
         else:
             value = raw.get("score")
-            if not isinstance(value, (int, float)):
+            if not isinstance(value, (int, float)) and value not in question.scale:
                 raise ValueError
         return DecisionAnswer(type=question.type, value=value, probabilities={str(k): float(v) for k, v in probabilities.items()}, confidence=float(confidence))
