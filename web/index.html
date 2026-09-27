@@ -5,6 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101512">
   <title>Nexo · Chat privado</title>
+  <script>
+    (() => {
+      try {
+        const ui = localStorage.getItem('nexo-ui-style');
+        const scheme = localStorage.getItem('nexo-color-scheme');
+        document.documentElement.dataset.ui = ['standard', 'developer'].includes(ui) ? ui : 'standard';
+        document.documentElement.dataset.colorScheme = ['system', 'light', 'dark'].includes(scheme) ? scheme : 'system';
+      } catch {
+        document.documentElement.dataset.ui = 'standard';
+        document.documentElement.dataset.colorScheme = 'system';
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -77,7 +90,12 @@
     </div>
     <div class="surface settings-surface" id="settings-surface" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="surface-header"><div><span class="eyebrow">PREFERENCIAS</span><h2 id="settings-title">Settings</h2><p>Configura cómo se conecta Nexo a tus modelos.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
-      <div class="settings-nav"><span class="settings-nav-active">Providers &amp; Models</span><span>General</span><span class="optional-setting" id="mcp-setting" hidden>MCP</span><span class="optional-setting" id="decision-setting" hidden>Decision Runtime</span></div>
+       <section class="appearance-settings" aria-labelledby="appearance-title">
+         <div class="settings-section-heading"><div><span class="eyebrow">APPEARANCE</span><h3 id="appearance-title">Interface</h3></div><span class="settings-hint">Saved on this device</span></div>
+         <fieldset class="setting-group"><legend>Interface style</legend><div class="setting-options"><label class="setting-option"><input type="radio" name="ui-style" value="standard"><span><strong>Standard</strong><small>Calm, spacious presentation</small></span></label><label class="setting-option"><input type="radio" name="ui-style" value="developer"><span><strong>Developer</strong><small>Dense technical workspace</small></span></label></div></fieldset>
+         <fieldset class="setting-group"><legend>Color scheme</legend><div class="setting-options setting-options-three"><label class="setting-option"><input type="radio" name="color-scheme" value="system"><span><strong>System</strong><small>Follow device</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="dark"><span><strong>Dark</strong><small>Low-light surfaces</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="light"><span><strong>Light</strong><small>Bright surfaces</small></span></label></div></fieldset>
+       </section>
+       <div class="settings-nav"><span class="settings-nav-active">Providers &amp; Models</span><span>General</span><span class="optional-setting" id="mcp-setting" hidden>MCP</span><span class="optional-setting" id="decision-setting" hidden>Decision Runtime</span></div>
       <div class="provider-list" id="provider-list"></div>
       <form id="provider-form" class="provider-form">
         <h3 id="form-title">Añadir proveedor</h3>

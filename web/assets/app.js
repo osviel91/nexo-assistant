@@ -1,6 +1,18 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { providers: [], conversations: [], modules: [], conversationId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+function applyPreferences(persist = false) {
+  const ui = document.documentElement.dataset.ui || 'standard';
+  const scheme = document.documentElement.dataset.colorScheme || 'system';
+  document.documentElement.dataset.ui = ui;
+  document.documentElement.dataset.colorScheme = scheme;
+  $('#prompt').placeholder = ui === 'developer' ? '> Ask anything...' : 'Pregunta lo que quieras...';
+  document.querySelectorAll('input[name="ui-style"]').forEach((input) => { input.checked = input.value === ui; });
+  document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { input.checked = input.value === scheme; });
+  if (persist) {
+    try { localStorage.setItem('nexo-ui-style', ui); localStorage.setItem('nexo-color-scheme', scheme); } catch { /* local-only preference is best effort */ }
+  }
+}
 
 function safeUrl(value) {
   try {
@@ -241,7 +253,7 @@ function openSurface(name) {
   $('#surface-backdrop').hidden = false;
   $('#lab-surface').hidden = name !== 'lab';
   $('#settings-surface').hidden = name !== 'settings';
-  if (name === 'settings') { resetForm(); renderProviderList(); $('#provider-name').focus(); }
+  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -302,6 +314,9 @@ $('#close-sidebar').onclick = closeSidebar;
 $('#sidebar-backdrop').onclick = closeSidebar;
 $('#surface-backdrop').onclick = (event) => { if (event.target === $('#surface-backdrop')) closeSurface(); };
 document.querySelectorAll('[data-close-surface]').forEach((button) => { button.onclick = closeSurface; });
+document.querySelectorAll('input[name="ui-style"]').forEach((input) => { input.onchange = () => { document.documentElement.dataset.ui = input.value; applyPreferences(true); }; });
+document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { input.onchange = () => { document.documentElement.dataset.colorScheme = input.value; applyPreferences(true); }; });
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
+applyPreferences();
 Promise.all([loadModules(), loadProviders(), loadChats()]).catch((error) => toast(error.message));
