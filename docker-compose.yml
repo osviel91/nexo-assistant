@@ -8,6 +8,14 @@ services:
     environment:
       NEXO_DATA_DIR: /data
       NEXO_MAX_UPLOAD_MB: "15"
+      # Enable in Portainer with: attachments,web-search-searxng
+      NEXO_MODULES: "attachments"
+      # Required only when web-search-searxng is enabled.
+      # NEXO_SEARXNG_URL: "http://searxng:8080"
+      # NEXO_SEARXNG_LANGUAGE: "all"
+      # NEXO_SEARXNG_SAFESEARCH: "1"
+      # NEXO_SEARXNG_MAX_RESULTS: "5"
+      # NEXO_SEARXNG_TIMEOUT: "10"
     volumes:
       - nexo-data:/data
     mem_limit: 768m
