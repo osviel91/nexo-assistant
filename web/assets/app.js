@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], conversations: [], modules: [], conversationId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], conversations: [], modules: [], tools: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -126,6 +126,11 @@ async function loadProviders() {
   state.providers = await api('/providers');
   renderSelect();
   renderProviderList();
+  renderLab();
+}
+
+async function loadTools() {
+  state.tools = await api('/tools');
   renderLab();
 }
 
@@ -260,14 +265,40 @@ function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdr
 function closeSidebar() { $('#sidebar').classList.remove('open'); $('#sidebar-backdrop').hidden = true; $('#open-sidebar').setAttribute('aria-expanded', 'false'); }
 
 function renderLab() {
-  const cards = [{ title: 'Models', text: 'Conecta y selecciona tus modelos locales o remotos.', status: `${allModels().length} configurados` }];
-  if (moduleEnabled('decision-runtime')) {
-    const module = state.modules.find((item) => item.id === 'decision-runtime');
-    cards.push({ title: 'Decisions', text: 'Decisiones tipadas a través del runtime opcional.', status: module.status?.available ? 'Disponible · Arbiter' : 'No disponible', muted: !module.status?.available });
-  }
-  if (moduleEnabled('mcp')) cards.push({ title: 'Tools', text: 'Herramientas MCP conectadas a tu instalación.', status: 'Disponible' });
-  if (moduleEnabled('web-search-searxng')) cards.push({ title: 'Web', text: 'Búsqueda web para modelos con tool-calling.', status: 'Disponible' });
-  $('#lab-grid').innerHTML = cards.map((card) => `<article class="lab-card"><h3>${escapeHtml(card.title)}</h3><p>${escapeHtml(card.text)}</p><span class="lab-status ${card.muted ? 'muted' : ''}">${escapeHtml(card.status)}</span></article>`).join('');
+  const tabs = [{ id: 'models', label: 'Models' }];
+  if (moduleEnabled('decision-runtime')) tabs.push({ id: 'decisions', label: 'Decisions' });
+  if (state.tools.length || moduleEnabled('mcp')) tabs.push({ id: 'tools', label: 'Tools' });
+  if (!tabs.some((tab) => tab.id === state.labTab)) state.labTab = tabs[0].id;
+  $('#lab-tabs').innerHTML = tabs.map((tab) => `<button class="lab-tab ${tab.id === state.labTab ? 'active' : ''}" data-lab-tab="${tab.id}">${tab.label}</button>`).join('');
+  $('#lab-tabs').querySelectorAll('[data-lab-tab]').forEach((button) => { button.onclick = () => { state.labTab = button.dataset.labTab; renderLab(); }; });
+  $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : renderDecisions();
+  if (state.labTab === 'decisions') bindDecisionPlayground();
+}
+
+function renderModels() {
+  return `<section class="lab-section"><div class="lab-section-head"><div><span class="eyebrow">PROVIDERS / MODELS</span><h3>Model inventory</h3></div><span class="lab-count">${allModels().length} models</span></div>${state.providers.length ? state.providers.map((provider) => `<article class="model-provider"><div class="model-provider-head"><div><h4>${escapeHtml(provider.name)}</h4><span>${escapeHtml(provider.base_url)}</span></div><span class="status status-ready">● CONFIGURED</span></div><div class="model-list">${provider.models.map((model) => `<div class="model-row"><strong>${escapeHtml(model.id)}</strong><span>${escapeHtml(provider.name)}</span>${(model.capabilities || []).map((capability) => `<em>${escapeHtml(capability)}</em>`).join('')}</div>`).join('') || '<div class="lab-empty">No hay modelos descubiertos.</div>'}</div></article>`).join('') : '<div class="lab-empty">No hay providers configurados. Añade uno desde Settings para inspeccionar sus modelos.</div>'}</section>`;
+}
+
+function renderTools() {
+  const native = state.tools.filter((tool) => tool.source !== 'mcp');
+  const mcp = state.tools.filter((tool) => tool.source === 'mcp');
+  const group = (title, items) => items.length ? `<section class="tool-group"><div class="lab-section-head"><h3>${title}</h3><span class="lab-count">${items.length}</span></div>${items.map((tool) => `<details class="tool-row"><summary><strong>${escapeHtml(tool.name)}</strong><span>${escapeHtml(tool.module_id || 'native')}</span></summary><p>${escapeHtml(tool.description)}</p><pre>${escapeHtml(JSON.stringify(tool.parameters, null, 2))}</pre></details>`).join('')}</section>` : '';
+  return `<section class="lab-section"><div class="lab-section-head"><div><span class="eyebrow">TOOL REGISTRY</span><h3>Read-only catalog</h3></div><span class="lab-count">${state.tools.length} tools</span></div>${group('Native', native)}${group('MCP', mcp)}${!state.tools.length ? '<div class="lab-empty">No hay tools activas para inspeccionar.</div>' : ''}</section>`;
+}
+
+function renderDecisions() {
+  const module = state.modules.find((item) => item.id === 'decision-runtime');
+  return `<section class="lab-section"><div class="lab-section-head"><div><span class="eyebrow">DECISION RUNTIME</span><h3>Decision playground</h3></div><span class="status ${module?.status?.available ? 'status-ready' : 'status-disabled'}">● ${module?.status?.available ? 'READY' : 'UNAVAILABLE'}</span></div><form id="decision-form" class="decision-form"><label>State<textarea id="decision-state" required placeholder="Describe the situation to evaluate..."></textarea></label><div id="decision-questions"></div><button type="button" class="text-button" id="add-question">+ Add question</button><div class="form-actions"><button class="primary-button" type="submit" ${module?.status?.available ? '' : 'disabled'}>Run decision</button></div></form><pre class="decision-result" id="decision-result" hidden></pre></section>`;
+}
+
+function bindDecisionPlayground() {
+  const questions = [{ id: 'question', type: 'boolean', statement: '' }];
+  const renderQuestions = () => { $('#decision-questions').innerHTML = questions.map((question, index) => `<div class="decision-question"><div class="decision-question-line"><input data-question="id" data-index="${index}" value="${escapeHtml(question.id)}" placeholder="id"><select data-question="type" data-index="${index}"><option value="boolean" ${question.type === 'boolean' ? 'selected' : ''}>boolean</option><option value="choice" ${question.type === 'choice' ? 'selected' : ''}>choice</option><option value="score" ${question.type === 'score' ? 'selected' : ''}>score</option></select><input data-question="statement" data-index="${index}" value="${escapeHtml(question.statement)}" placeholder="Question statement" required></div>${question.type === 'choice' ? `<input data-question="options" data-index="${index}" value="${escapeHtml(question.options || '')}" placeholder="Options, comma separated">` : ''}${question.type === 'score' ? `<input data-question="scale" data-index="${index}" value="${escapeHtml(question.scale || '')}" placeholder="Scale, comma separated">` : ''}</div>`).join(''); };
+  renderQuestions();
+  $('#add-question').onclick = () => { questions.push({ id: `question_${questions.length + 1}`, type: 'boolean', statement: '' }); renderQuestions(); };
+  $('#decision-questions').oninput = (event) => { const input = event.target; const question = questions[Number(input.dataset.index)]; if (question) question[input.dataset.question] = input.value; };
+  $('#decision-questions').onchange = (event) => { const input = event.target; const question = questions[Number(input.dataset.index)]; if (question) { question[input.dataset.question] = input.value; renderQuestions(); } };
+  $('#decision-form').onsubmit = async (event) => { event.preventDefault(); const result = $('#decision-result'); try { result.hidden = false; result.textContent = 'Running...'; const payload = questions.map((question) => { const item = { id: question.id, type: question.type, statement: question.statement }; if (question.type === 'choice') item.options = question.options.split(',').map((value) => value.trim()).filter(Boolean); if (question.type === 'score') item.scale = question.scale.split(',').map((value) => value.trim()).filter(Boolean); return item; }); const data = await api('/decisions', { method: 'POST', body: JSON.stringify({ state: $('#decision-state').value, questions: payload }) }); result.textContent = JSON.stringify(data, null, 2); } catch (error) { result.hidden = false; result.textContent = error.message; } };
 }
 
 function resetForm() { $('#provider-id').value = ''; $('#provider-name').value = ''; $('#provider-url').value = ''; $('#provider-key').value = ''; $('#provider-models').value = ''; $('#form-title').textContent = 'Añadir proveedor'; $('#save-provider').textContent = 'Guardar proveedor'; $('#cancel-edit').hidden = true; }
@@ -319,4 +350,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadTools(), loadChats()]).catch((error) => toast(error.message));

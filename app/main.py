@@ -137,6 +137,12 @@ def modules():
     return module_registry.catalog()
 
 
+@app.get("/api/tools")
+def tools():
+    """Return the registered tools without exposing executable handlers."""
+    return module_registry.tool_catalog()
+
+
 @app.get("/api/providers")
 def providers():
     with db() as c:

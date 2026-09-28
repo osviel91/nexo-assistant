@@ -69,6 +69,18 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
+    def catalog(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "source": tool.source,
+                "module_id": tool.module_id or None,
+            }
+            for tool in self._tools.values()
+        ]
+
     async def invoke(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
         if not tool:
@@ -156,6 +168,9 @@ class ModuleRegistry:
         capabilities: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         return self.context.tools.definitions(context, capabilities)
+
+    def tool_catalog(self) -> list[dict[str, Any]]:
+        return self.context.tools.catalog()
 
     async def invoke_tool(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         return await self.context.tools.invoke(name, context, arguments)
