@@ -82,6 +82,14 @@ class ChatToolTests(unittest.TestCase):
                     runtime_events = connection.execute("SELECT kind FROM runtime_events WHERE run_id=? ORDER BY sequence", (run["id"],)).fetchall()
                 self.assertEqual(run["status"], "completed")
                 self.assertEqual([event["kind"] for event in runtime_events], ["REASON", "ACT", "REASON"])
+                FakeClient.payloads = []
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="sin web", web_enabled=False, tools_enabled=False)))
+                asyncio.run(self.collect(response.body_iterator))
+                self.assertNotIn("tools", FakeClient.payloads[0])
+                FakeClient.payloads = []
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="solo web", web_enabled=True, tools_enabled=False)))
+                asyncio.run(self.collect(response.body_iterator))
+                self.assertEqual(FakeClient.payloads[0]["tools"][0]["function"]["name"], "web_search")
                 with main.db() as connection:
                     connection.execute("UPDATE models SET capabilities='[]' WHERE provider_id='p' AND id='m'")
                 FakeClient.payloads = []

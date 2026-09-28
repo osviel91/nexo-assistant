@@ -76,6 +76,7 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 with main.db() as database:
                     database.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "MacMini", "http://provider", "secret", main.now()))
                     database.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("Cyber-Tiel", "p", "Cyber-Tiel", "[]"))
+                    database.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("Raw", "p", "Raw", "[]"))
                 repository = NotebookRepository(main.db, main.now)
                 main.notebooks = NotebookService(repository, root / "sources")
                 main.ingestion = NotebookIngestionService(repository, root / "sources", main.now, main.MAX_UPLOAD)
@@ -92,15 +93,22 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 profile = main.agent_profiles.create(AgentProfileInput(
                     name="Tiel", provider_id="p", model_id="Cyber-Tiel", system_instructions="You are Tiel. Preserve this Soul."))
 
-                no_agent_no_notebook = self.run_chat(main, "one", None, None)
-                tiel_no_notebook = self.run_chat(main, "two", profile["id"], None)
-                no_agent_notebook = self.run_chat(main, "three", None, notebook["id"])
-                tiel_notebook = self.run_chat(main, "four", profile["id"], notebook["id"])
+                no_agent_no_notebook = self.run_chat(main, "one", "chat", None, None)
+                tiel_no_notebook = self.run_chat(main, "two", "agent", profile["id"], None)
+                no_agent_notebook = self.run_chat(main, "three", "chat", None, notebook["id"])
+                tiel_notebook = self.run_chat(main, "four", "agent", profile["id"], notebook["id"])
 
                 self.assertNotIn("amethyst", no_agent_no_notebook["answer"])
                 self.assertNotIn("amethyst", tiel_no_notebook["answer"])
                 self.assertIn("amethyst", no_agent_notebook["answer"])
                 self.assertIn("amethyst", tiel_notebook["answer"])
+                self.assertEqual(no_agent_no_notebook["runtime"]["execution_mode"], "chat")
+                self.assertEqual(no_agent_notebook["runtime"]["execution_mode"], "chat")
+                self.assertIsNone(no_agent_notebook["runtime"].get("agent_profile_id"))
+                self.assertNotIn("You are Tiel", json.dumps(no_agent_notebook["payload"]["messages"]))
+                self.assertEqual(no_agent_no_notebook["payload"]["model"], "Raw")
+                self.assertEqual(tiel_no_notebook["runtime"]["execution_mode"], "agent")
+                self.assertEqual(tiel_notebook["runtime"]["execution_mode"], "agent")
                 self.assertEqual(tiel_notebook["runtime"]["agent_profile_name"], "Tiel")
                 self.assertEqual(tiel_notebook["runtime"]["resolved_model"], "Cyber-Tiel")
                 self.assertEqual(tiel_notebook["runtime"]["resolved_model_name"], "Cyber-Tiel")
@@ -131,10 +139,10 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 main.DB_PATH = old_db
                 main.notebooks, main.ingestion, main.retrieval_service = old_notebooks, old_ingestion, old_retrieval
 
-    def run_chat(self, main, content, profile_id, notebook_id):
+    def run_chat(self, main, content, execution_mode, profile_id, notebook_id):
         Client.payloads = []
-        response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="Cyber-Tiel", content=content,
-                                                      agent_profile_id=profile_id, notebook_id=notebook_id)))
+        response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="Raw", content=content,
+                                                      execution_mode=execution_mode, agent_profile_id=profile_id, notebook_id=notebook_id)))
         body = asyncio.run(self.collect(response.body_iterator))
         packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
         done = next(packet for packet in packets if packet.get("done"))

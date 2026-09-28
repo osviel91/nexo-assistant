@@ -257,7 +257,13 @@ def _migration_10(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "notebook_sources", "indexing_identity", "TEXT")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10))
+def _migration_11(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "conversations", "execution_mode", "TEXT NOT NULL DEFAULT 'chat'")
+    connection.execute("UPDATE conversations SET execution_mode='agent' WHERE agent_profile_id IS NOT NULL AND execution_mode='chat'")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC, id DESC)")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

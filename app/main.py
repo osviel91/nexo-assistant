@@ -10,7 +10,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile
@@ -153,11 +153,16 @@ class ChatIn(BaseModel):
     temperature: float | None = None
     agent_profile_id: str | None = None
     notebook_id: str | None = None
+    execution_mode: Literal["chat", "agent"] | None = None
+    web_enabled: bool | None = None
+    tools_enabled: bool | None = None
 
 
 class ConversationPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
     agent_profile_id: str | None = None
     notebook_id: str | None = None
+    execution_mode: Literal["chat", "agent"] | None = None
 
 
 class AgentProfileIn(BaseModel):
@@ -748,7 +753,7 @@ def delete_model(pid: str, model_id: str):
 
 @app.get("/api/conversations")
 def conversations():
-    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,agent_profile_id,notebook_id FROM conversations ORDER BY updated_at DESC").fetchall()
+    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id FROM conversations ORDER BY updated_at DESC, id DESC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -796,11 +801,20 @@ def update_conversation(cid: str, item: ConversationPatch):
             raise HTTPException(404, "agent_profile_not_found")
         if item.notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (item.notebook_id,)).fetchone() is None:
             raise HTTPException(404, "notebook_not_found")
-        values = {**({"agent_profile_id": item.agent_profile_id} if "agent_profile_id" in item.model_fields_set else {}),
-                  **({"notebook_id": item.notebook_id} if "notebook_id" in item.model_fields_set else {})}
+        current = c.execute("SELECT execution_mode,agent_profile_id FROM conversations WHERE id=?", (cid,)).fetchone()
+        mode = item.execution_mode if "execution_mode" in item.model_fields_set else ("agent" if item.agent_profile_id is not None else current["execution_mode"])
+        profile_id = item.agent_profile_id if "agent_profile_id" in item.model_fields_set else current["agent_profile_id"]
+        if mode == "agent" and not profile_id:
+            raise HTTPException(400, "agent_profile_required")
+        if mode == "chat":
+            profile_id = None
+        values = ({"title": item.title.strip()} if "title" in item.model_fields_set and item.title else {})
+        values.update({"execution_mode": mode} if "execution_mode" in item.model_fields_set or mode == "chat" else {})
+        values.update({"agent_profile_id": profile_id} if "agent_profile_id" in item.model_fields_set or mode == "chat" else {})
+        values.update({"notebook_id": item.notebook_id} if "notebook_id" in item.model_fields_set else {})
         if values:
             c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in values)},updated_at=? WHERE id=?", (*values.values(), now(), cid))
-        return dict(c.execute("SELECT id,title,created_at,updated_at,agent_profile_id,notebook_id FROM conversations WHERE id=?", (cid,)).fetchone())
+        return dict(c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id FROM conversations WHERE id=?", (cid,)).fetchone())
 
 
 @app.post("/api/chat")
@@ -813,7 +827,12 @@ async def chat(req: ChatIn):
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
         # Omitted means inherit; explicit null is the normal Nexo selection.
+        mode = req.execution_mode if "execution_mode" in req.model_fields_set else (conv["execution_mode"] if conv else ("agent" if req.agent_profile_id else "chat"))
         profile_id = req.agent_profile_id if "agent_profile_id" in req.model_fields_set else (conv["agent_profile_id"] if conv else None)
+        if mode == "agent" and not profile_id:
+            raise HTTPException(400, "agent_profile_required")
+        if mode == "chat":
+            profile_id = None
         notebook_id = req.notebook_id if "notebook_id" in req.model_fields_set else (conv["notebook_id"] if conv else None)
         if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
@@ -830,10 +849,11 @@ async def chat(req: ChatIn):
             indexed_sources = c.execute("SELECT COUNT(*) FROM notebook_sources WHERE notebook_id=? AND indexing_status='ready'", (notebook_id,)).fetchone()[0] if notebook_id else 0
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
-            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?)", (cid, title, now(), now(), profile_id, notebook_id))
-        elif "agent_profile_id" in req.model_fields_set or "notebook_id" in req.model_fields_set:
-            values = {"agent_profile_id": profile_id, "notebook_id": notebook_id}
+            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?,?)", (cid, title, now(), now(), mode, profile_id, notebook_id))
+        elif "agent_profile_id" in req.model_fields_set or "notebook_id" in req.model_fields_set or "execution_mode" in req.model_fields_set:
+            values = {"execution_mode": mode, "agent_profile_id": profile_id, "notebook_id": notebook_id}
             fields = [key for key in values if key in req.model_fields_set]
+            if "execution_mode" in req.model_fields_set and mode == "chat": fields = ["execution_mode", "agent_profile_id"] + (["notebook_id"] if "notebook_id" in req.model_fields_set else [])
             c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?", (*(values[key] for key in fields), now(), cid))
         if profile_id:
             try:
@@ -866,6 +886,7 @@ async def chat(req: ChatIn):
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
         runtime_snapshot = {
             "agent_profile_id": profile_config.profile_id if profile_config else None,
+            "execution_mode": mode,
             "agent_profile_name": profile_config.profile_name if profile_config else None,
             "resolved_provider": selected_provider_id,
             "resolved_provider_name": provider["name"],
@@ -953,7 +974,10 @@ async def chat(req: ChatIn):
                     runtime_snapshot.update(retrieval_metadata)
                     _update_runtime_metadata(run_id, runtime_snapshot)
                 catalog = module_registry.tool_catalog_view()
-                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None)
+                web_enabled = req.web_enabled if "web_enabled" in req.model_fields_set else True
+                tools_enabled = req.tools_enabled if "tools_enabled" in req.model_fields_set else True
+                allowed_tools = {entry.name for entry in catalog.entries() if (entry.name == "web_search" and web_enabled) or (entry.name != "web_search" and tools_enabled)}
+                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
                 runtime_snapshot["effective_tool_names"] = effective_tool_names
                 if profile_config and profile_config.temperature is not None:

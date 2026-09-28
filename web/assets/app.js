@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { effectiveMessageIdentity } from './identity.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
+const state = { providers: [], knowledge: null, agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -55,7 +55,7 @@ function renderSelect(keep = true) {
 function renderNotebookPicker() {
   const select = $('#notebook-picker');
   if (!select) return;
-  select.innerHTML = `<option value="">No notebook</option>${state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)} · ${notebook.source_count} sources</option>`).join('')}`;
+   select.innerHTML = `<option value="">Knowledge</option>${state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)} · ${notebook.source_count} sources</option>`).join('')}`;
   select.value = state.currentNotebookId || '';
 }
 
@@ -125,7 +125,22 @@ function renderNotebookDetail(notebook) {
 function currentAgent() { return state.agents.find((agent) => agent.id === state.agentProfileId); }
 function renderAgentPicker() {
   const agent = currentAgent();
-  $('#agent-picker-name').textContent = agent?.name || 'Nexo';
+  $('#agent-picker-name').textContent = agent?.name || 'Seleccionar agente';
+}
+function renderExecutionMode() {
+  document.querySelectorAll('[data-mode]').forEach((button) => { button.classList.toggle('active', button.dataset.mode === state.executionMode); });
+  $('#model-picker').hidden = state.executionMode === 'agent';
+  $('#agent-picker').hidden = state.executionMode !== 'agent';
+}
+async function setExecutionMode(mode) {
+  if (mode === state.executionMode) return;
+  if (mode === 'agent' && !state.agentProfileId) { openSurface('agents'); toast('Selecciona un Agent Profile'); return; }
+  state.executionMode = mode;
+  if (state.conversationId) {
+    try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: mode, agent_profile_id: mode === 'agent' ? state.agentProfileId : null }) }); }
+    catch (error) { state.executionMode = mode === 'agent' ? 'chat' : 'agent'; toast(error.message); }
+  }
+  renderExecutionMode(); renderAgentPicker(); renderChats();
 }
 function renderAgentList() {
   const items = [{ id: '', name: 'Nexo', description: 'General assistant' }, ...state.agents];
@@ -140,8 +155,10 @@ function renderAgentList() {
 }
 async function selectAgent(id) {
   state.agentProfileId = id || null;
+  if (id) state.executionMode = 'agent';
   renderAgentPicker(); renderAgentList();
-  if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
+  renderExecutionMode();
+  if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: 'agent', agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
   closeSurface();
 }
 function renderAgentModels(selected = '') {
@@ -180,6 +197,8 @@ async function loadModules() {
   $('#attach-button').hidden = !state.modules.some((module) => module.interface_extensions.some((extension) => extension.id === 'attach-files'));
   $('#web-chip').hidden = !moduleEnabled('web-search-searxng');
   $('#tools-chip').hidden = !hasTools;
+  $('#web-chip').setAttribute('aria-pressed', String(state.webEnabled));
+  $('#tools-chip').setAttribute('aria-pressed', String(state.toolsEnabled));
   $('#mcp-setting').hidden = !moduleEnabled('mcp');
   $('#decision-setting').hidden = !moduleEnabled('decision-runtime');
   renderLab();
@@ -193,8 +212,22 @@ async function loadChats() {
 function renderChats() {
   const query = $('#chat-search').value.trim().toLowerCase();
   const chats = state.conversations.filter((chat) => chat.title.toLowerCase().includes(query));
-  $('#conversation-list').innerHTML = chats.map((chat) => `<button class="conversation-item ${chat.id === state.conversationId ? 'selected' : ''}" data-id="${escapeHtml(chat.id)}" title="${escapeHtml(chat.title)}">${escapeHtml(chat.title)}</button>`).join('') || '<div class="empty-providers">No hay chats todavía</div>';
+  $('#conversation-list').innerHTML = chats.map((chat) => `<div class="conversation-row"><button class="conversation-item ${chat.id === state.conversationId ? 'selected' : ''}" data-id="${escapeHtml(chat.id)}" title="${escapeHtml(chat.title)}">${escapeHtml(chat.title)}</button><button class="conversation-menu" data-menu-id="${escapeHtml(chat.id)}" aria-label="Manage ${escapeHtml(chat.title)}" aria-expanded="false">⋯</button><div class="conversation-context-menu" data-context-id="${escapeHtml(chat.id)}" hidden><button data-rename-id="${escapeHtml(chat.id)}">Rename</button><button data-delete-id="${escapeHtml(chat.id)}">Delete</button></div></div>`).join('') || '<div class="empty-providers">No hay chats todavía</div>';
   document.querySelectorAll('.conversation-item').forEach((button) => { button.onclick = () => openChat(button.dataset.id); });
+  document.querySelectorAll('.conversation-menu').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); const menu = button.parentElement.querySelector('.conversation-context-menu'); menu.hidden = !menu.hidden; button.setAttribute('aria-expanded', String(!menu.hidden)); }; });
+  document.querySelectorAll('[data-rename-id]').forEach((button) => { button.onclick = () => renameConversation(button.dataset.renameId); });
+  document.querySelectorAll('[data-delete-id]').forEach((button) => { button.onclick = () => deleteConversation(button.dataset.deleteId); });
+}
+async function renameConversation(id) {
+  const chat = state.conversations.find((item) => item.id === id);
+  if (!chat) return;
+  const title = prompt('New title', chat.title)?.trim();
+  if (title) try { await api(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }); await loadChats(); } catch (error) { toast(error.message); }
+}
+async function deleteConversation(id) {
+  const chat = state.conversations.find((item) => item.id === id);
+  if (!chat || !confirm(`Delete "${chat.title}"?`)) return;
+  try { await api(`/conversations/${id}`, { method: 'DELETE' }); if (state.conversationId === id) beginChat(); await loadChats(); } catch (error) { toast(error.message); }
 }
 
 function beginChat() {
@@ -202,6 +235,9 @@ function beginChat() {
   state.messages = [];
   state.attachments = [];
   state.agentProfileId = null;
+  state.executionMode = 'chat';
+  state.webEnabled = false;
+  state.toolsEnabled = false;
   state.currentNotebookId = null;
   state.lastRuntime = null;
   $('#messages').innerHTML = '';
@@ -259,9 +295,11 @@ async function openChat(id) {
   try {
     const data = await api(`/conversations/${id}`);
     state.conversationId = id;
+    state.executionMode = data.conversation.execution_mode || (data.conversation.agent_profile_id ? 'agent' : 'chat');
     state.agentProfileId = data.conversation.agent_profile_id || null;
     state.currentNotebookId = data.conversation.notebook_id || null;
     renderNotebookPicker();
+    renderExecutionMode();
     state.messages = data.messages;
     state.lastRuntime = [...state.messages].reverse().find((message) => message.role === 'assistant')?.runtime || null;
     $('#welcome').hidden = true;
@@ -281,7 +319,7 @@ async function send() {
   const text = $('#prompt').value.trim();
   const choice = selected();
   const agent = currentAgent();
-  const effectiveChoice = agent ? { provider: state.providers.find((provider) => provider.id === agent.provider_id), model: agent.model_id } : choice;
+   const effectiveChoice = state.executionMode === 'agent' && agent ? { provider: state.providers.find((provider) => provider.id === agent.provider_id), model: agent.model_id } : choice;
   if (!text && !state.attachments.length) return;
    if (!effectiveChoice.provider && !state.agentProfileId) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
   state.busy = true;
@@ -300,7 +338,10 @@ async function send() {
   let answer = '';
   try {
      const chatPayload = { conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments };
-     if (state.agentProfileId) chatPayload.agent_profile_id = state.agentProfileId;
+      chatPayload.execution_mode = state.executionMode;
+      chatPayload.web_enabled = state.webEnabled;
+      chatPayload.tools_enabled = state.toolsEnabled;
+      if (state.executionMode === 'agent') chatPayload.agent_profile_id = state.agentProfileId;
      if (state.currentNotebookId) chatPayload.notebook_id = state.currentNotebookId;
      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chatPayload) });
     if (!response.ok) throw Error((await response.text()).slice(0, 300));
@@ -356,7 +397,7 @@ function renderConfig() {
   if (!runtime) return '<div class="lab-empty">No completed run yet.</div>';
   const row = (label, value) => value == null || value === '' ? '' : `<div class="config-value"><span>${label}</span> ${escapeHtml(value)}</div>`;
   const knowledge = runtime.knowledge_available ? `${row('Notebook', runtime.notebook_name)}${row('Status', runtime.knowledge_retrieval_applied ? 'Ready' : 'Unavailable')}${row('Indexed sources', runtime.knowledge_indexed_sources)}${row('Retrieval', runtime.knowledge_retrieval_enabled ? 'Enabled' : 'Disabled')}${row('Embedding model', runtime.knowledge_embedding_model)}${row('Retrieved', runtime.retrieval_count != null ? `${runtime.retrieval_count} chunks` : null)}${row('Context', runtime.context_chars != null ? `${runtime.context_chars} chars` : null)}` : row('Knowledge', 'Not available');
-  return `<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Agent', runtime.agent_profile_name || 'Nexo')}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider)}${row('Model', runtime.resolved_model_name || runtime.resolved_model)}${row('Soul', runtime.system_instructions_applied ? 'Applied' : 'Not applied')}</div><div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>TELEMETRY</h3>${row('Generation', runtime.completion_tokens != null ? `${runtime.completion_tokens} tokens` : null)}${row('Tokens/s', runtime.tokens_per_second)}${row('TTFT ms', runtime.ttft_ms)}${row('Model context', runtime.context_used_tokens != null && runtime.context_window != null ? `${runtime.context_used_tokens} / ${runtime.context_window}` : null)}${row('Top score', runtime.top_score)}${row('Truncated', runtime.context_truncated ? 'Yes' : runtime.retrieval_count != null ? 'No' : null)}</div><div class="config-block"><h3>PARAMETERS</h3>${row('temperature', runtime.temperature)}${row('top_p', runtime.top_p)}${row('top_k', runtime.top_k)}</div><div class="config-block"><h3>TOOLS</h3>${row('effective', (runtime.effective_tool_names || []).join(', ') || 'none')}</div>`;
+   return `<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Mode', runtime.agent_profile_id ? 'AGENT' : 'CHAT')}${row('Agent', runtime.agent_profile_name)}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider)}${row('Model', runtime.resolved_model_name || runtime.resolved_model)}${row('Instructions', runtime.system_instructions_applied ? 'Applied' : 'Not applied')}${row('Temperature', runtime.temperature)}</div><div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>TELEMETRY</h3>${row('Generation', runtime.completion_tokens != null ? `${runtime.completion_tokens} tokens` : null)}${row('Tokens/s', runtime.tokens_per_second)}${row('TTFT ms', runtime.ttft_ms)}${row('Model context', runtime.context_used_tokens != null && runtime.context_window != null ? `${runtime.context_used_tokens} / ${runtime.context_window}` : null)}${row('Top score', runtime.top_score)}${row('Truncated', runtime.context_truncated ? 'Yes' : runtime.retrieval_count != null ? 'No' : null)}</div><div class="config-block"><h3>TOOLS</h3>${row('Effective', (runtime.effective_tool_names || []).join(', ') || 'none')}</div>`;
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -470,6 +511,8 @@ $('#notebook-form').onsubmit = async (event) => {
 };
 
 $('#model-select').onchange = updateComposerModel;
+document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
+['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; $(`#${id}`).setAttribute('aria-pressed', String(state[key])); }; });
 $('#notebook-picker').onchange = async (event) => {
   state.currentNotebookId = event.target.value || null;
   if (!state.conversationId) return;

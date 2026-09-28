@@ -249,6 +249,24 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
   .lab-tabs { gap: 14px; }
 }
 
+.mode-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.mode-switch button { padding: 4px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font: 9px ui-monospace, monospace; letter-spacing: .06em; }
+.mode-switch button.active { background: var(--accent-soft); color: var(--text); }
+.topbar-center { gap: 5px; }
+.agent-picker { position: static; padding: 4px 9px; }
+.conversation-row { display: flex; flex: 0 0 36px; min-width: 0; align-items: center; }
+.conversation-item { flex: 1 1 auto; min-width: 0; }
+.conversation-menu { flex: none; width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); }
+.conversation-menu:hover, .conversation-menu:focus-visible { background: var(--surface-raised); color: var(--text); }
+.conversation-context-menu { position: absolute; z-index: 2; right: 4px; display: grid; min-width: 100px; padding: 4px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
+.conversation-row { position: relative; }
+.conversation-context-menu button { padding: 7px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; font-size: 11px; }
+.conversation-context-menu button:hover, .conversation-context-menu button:focus-visible { background: var(--surface-raised); }
+.notebook-picker { position: static; display: inline-flex; align-items: center; gap: 4px; }
+.notebook-picker select { max-width: 150px; border: 0; background: transparent; color: var(--muted); font: 10px var(--font-ui); }
+.capability-toggle[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+@media (max-width: 700px) { .agent-picker { max-width: 180px; }.agent-picker strong { max-width: 150px; }.mode-switch button { padding-inline: 6px; }.notebook-picker select { max-width: 120px; } }
+
 .notebook-list { display: grid; gap: 9px; margin-top: 25px; }
 .notebook-card { display: flex; align-items: stretch; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .notebook-card-main { display: grid; flex: 1; gap: 4px; padding: 0; border: 0; background: transparent; text-align: left; }
