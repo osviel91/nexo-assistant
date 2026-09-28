@@ -13,6 +13,7 @@ SAFE_METADATA_KEYS = {
     "context_utilization", "prompt_tokens", "completion_tokens", "total_tokens", "ttft_ms",
     "generation_duration_ms", "total_duration_ms", "tokens_per_second", "usage_source",
     "tokens_per_second_source",
+    "notebook_id", "retrieval_count", "retrieval_duration_ms", "context_chars", "context_truncated", "citation_count",
 }
 
 
@@ -22,11 +23,13 @@ def safe_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     for key, value in (metadata or {}).items():
         if key not in SAFE_METADATA_KEYS:
             continue
-        if key in {"model", "tool", "provider", "status", "error_code", "agent_profile_id", "agent_profile_name", "resolved_provider", "resolved_model", "usage_source"} and isinstance(value, (str, int, float, bool)):
+        if key in {"model", "tool", "provider", "status", "error_code", "agent_profile_id", "agent_profile_name", "resolved_provider", "resolved_model", "notebook_id", "usage_source"} and isinstance(value, (str, int, float, bool)):
             output[key] = str(value)
         elif key == "system_instructions_applied" and isinstance(value, bool):
             output[key] = value
-        elif key in {"round", "duration_ms", "temperature", "top_p", "top_k", "context_window", "context_used_tokens", "context_utilization", "prompt_tokens", "completion_tokens", "total_tokens", "ttft_ms", "generation_duration_ms", "total_duration_ms", "tokens_per_second"} and isinstance(value, (int, float)):
+        elif key in {"round", "duration_ms", "retrieval_count", "retrieval_duration_ms", "context_chars", "citation_count", "temperature", "top_p", "top_k", "context_window", "context_used_tokens", "context_utilization", "prompt_tokens", "completion_tokens", "total_tokens", "ttft_ms", "generation_duration_ms", "total_duration_ms", "tokens_per_second"} and isinstance(value, (int, float)):
+            output[key] = value
+        elif key in {"context_truncated"} and isinstance(value, bool):
             output[key] = value
         elif key == "effective_tool_names" and isinstance(value, (list, tuple)):
             output[key] = [str(item) for item in value[:50] if isinstance(item, str)]

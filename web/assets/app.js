@@ -52,6 +52,13 @@ function renderSelect(keep = true) {
   updateComposerModel();
 }
 
+function renderNotebookPicker() {
+  const select = $('#notebook-picker');
+  if (!select) return;
+  select.innerHTML = `<option value="">No notebook</option>${state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)} · ${notebook.source_count} sources</option>`).join('')}`;
+  select.value = state.currentNotebookId || '';
+}
+
 function updateComposerModel() {
   // The active model is controlled from the header only.
 }
@@ -70,7 +77,7 @@ async function loadTools() {
 
 async function loadAgents() { state.agents = await api('/agents'); renderAgentPicker(); renderAgentList(); }
 
-async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebooks(); }
+async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); }
 function renderNotebooks() {
   $('#notebook-list').innerHTML = state.notebooks.map((notebook) => `<article class="notebook-card" data-notebook-id="${escapeHtml(notebook.id)}"><button class="notebook-card-main"><strong>${escapeHtml(notebook.name)}</strong><span>${notebook.source_count} source${notebook.source_count === 1 ? '' : 's'}</span><small>${escapeHtml(notebook.description || 'Persistent knowledge space')}</small></button><div class="card-actions"><button data-notebook-edit="${escapeHtml(notebook.id)}">Edit</button><button data-notebook-delete="${escapeHtml(notebook.id)}">Delete</button></div></article>`).join('') || '<div class="empty-providers">No hay notebooks todavía. Crea uno para guardar fuentes.</div>';
   $('#notebook-list').querySelectorAll('.notebook-card-main').forEach((button) => { button.onclick = () => openNotebook(button.closest('[data-notebook-id]').dataset.notebookId); });
@@ -184,6 +191,7 @@ function beginChat() {
   state.messages = [];
   state.attachments = [];
   state.agentProfileId = null;
+  state.currentNotebookId = null;
   state.lastRuntime = null;
   $('#messages').innerHTML = '';
   $('#welcome').hidden = false;
@@ -197,15 +205,17 @@ function renderMessages() {
   const box = $('#messages');
   box.innerHTML = state.messages.map((message) => {
     const sources = (message.sources || []).filter((source) => { try { return ['http:', 'https:'].includes(new URL(source.url).protocol); } catch { return false; } });
+    const citations = message.citations || [];
     const attachments = (message.attachments || []).map((attachment) => attachment.kind === 'image'
       ? `<img class="attachment-preview" src="${escapeHtml(attachment.data_url)}" alt="${escapeHtml(attachment.name)}">`
       : `<span class="message-model">Adjunto: ${escapeHtml(attachment.name)}</span>`).join('');
     const sourceList = sources.length ? `<details class="message-sources"><summary>Sources · ${sources.length}</summary>${sources.map((source) => `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}<span>${escapeHtml(source.url)}</span></a>`).join('')}</details>` : '';
+    const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => `<div><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}<span>${escapeHtml(citation.status || citation.provenance?.[0]?.heading || 'Retrieved excerpt')}</span></div>`).join('')}</details>` : '';
     const content = message.role === 'assistant' ? renderMarkdown(message.content) : escapeHtml(message.content).replace(/\n/g, '<br>');
     const runtime = message.runtime || {};
     const metrics = message.role === 'assistant' && (runtime.tokens_per_second != null || runtime.completion_tokens != null || runtime.context_used_tokens != null)
       ? `<div class="message-metrics">${runtime.tokens_per_second != null ? `${escapeHtml(runtime.tokens_per_second)} tok/s` : ''}${runtime.completion_tokens != null ? ` · ${escapeHtml(runtime.completion_tokens)} tok` : ''}${runtime.context_used_tokens != null && runtime.context_window != null ? ` · ctx ${escapeHtml(runtime.context_used_tokens)}/${escapeHtml(runtime.context_window)}` : ''}</div>` : '';
-    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${metrics}${attachments}${sourceList}</div></article>`;
+    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${metrics}${attachments}${sourceList}${notebookList}</div></article>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
 }
@@ -215,6 +225,8 @@ async function openChat(id) {
     const data = await api(`/conversations/${id}`);
     state.conversationId = id;
     state.agentProfileId = data.conversation.agent_profile_id || null;
+    state.currentNotebookId = data.conversation.notebook_id || null;
+    renderNotebookPicker();
     state.messages = data.messages;
     state.lastRuntime = [...state.messages].reverse().find((message) => message.role === 'assistant')?.runtime || null;
     $('#welcome').hidden = true;
@@ -251,7 +263,7 @@ async function send() {
   renderMessages();
   let answer = '';
   try {
-    const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments, agent_profile_id: state.agentProfileId }) });
+     const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments, agent_profile_id: state.agentProfileId, notebook_id: state.currentNotebookId }) });
     if (!response.ok) throw Error((await response.text()).slice(0, 300));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -269,7 +281,7 @@ async function send() {
         if (data.error) throw Error(data.error);
         if (data.status) toast(data.message);
         if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; renderMessages(); }
-        if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], runtime: data.runtime || {} }); renderMessages(); }
+        if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
       }
       if (done) break;
     }
@@ -409,6 +421,11 @@ $('#notebook-form').onsubmit = async (event) => {
 };
 
 $('#model-select').onchange = updateComposerModel;
+$('#notebook-picker').onchange = async (event) => {
+  state.currentNotebookId = event.target.value || null;
+  if (!state.conversationId) return;
+  try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ notebook_id: state.currentNotebookId }) }); await loadChats(); } catch (error) { toast(error.message); }
+};
 $('#config-inspector').onclick = () => { $('#config-content').innerHTML = renderConfig(); openSurface('config'); };
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };

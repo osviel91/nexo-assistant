@@ -199,7 +199,30 @@ def _migration_8(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "notebook_sources", "indexed_at", "TEXT")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8))
+def _migration_9(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "conversations", "notebook_id", "TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_notebook ON conversations(notebook_id)")
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS message_citations (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      citation_key TEXT NOT NULL,
+      notebook_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      chunk_id TEXT NOT NULL,
+      canonical_start INTEGER NOT NULL,
+      canonical_end INTEGER NOT NULL,
+      provenance TEXT NOT NULL DEFAULT '[]',
+      document_content_hash TEXT,
+      chunk_content_hash TEXT,
+      UNIQUE(message_id, citation_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_citations_message ON message_citations(message_id);
+    """)
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

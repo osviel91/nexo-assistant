@@ -66,6 +66,7 @@ class NotebookRepository:
 
     def delete(self, notebook_id: str) -> bool:
         with self.connection_factory() as connection:
+            connection.execute("UPDATE conversations SET notebook_id=NULL WHERE notebook_id=?", (notebook_id,))
             return connection.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,)).rowcount > 0
 
     def sources(self, notebook_id: str):

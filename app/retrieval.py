@@ -63,8 +63,10 @@ class RetrievalService:
         batch = await self.provider.embed([query])
         validate_batch(batch, 1)
         return [{"chunk_id": item.chunk_id, "source_id": item.source_id, "document_id": item.document_id,
-                 "score": round(item.score, 6), "content": item.content, "canonical_start": item.canonical_start,
-                 "canonical_end": item.canonical_end, "provenance": item.provenance}
+                  "score": round(item.score, 6), "content": item.content, "canonical_start": item.canonical_start,
+                  "canonical_end": item.canonical_end, "provenance": item.provenance,
+                  "document_content_hash": item.document_content_hash, "chunk_content_hash": item.chunk_content_hash,
+                  "source_title": item.source_title}
                 for item in self.index.search(notebook_id, batch.vectors[0], limit)]
 
     def status(self, source_id: str) -> dict[str, Any]:

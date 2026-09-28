@@ -36,6 +36,7 @@ from app.ingestion import NotebookIngestionService
 from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
 from app.retrieval import RetrievalError, RetrievalService
 from app.vector_index import SQLiteVectorIndex
+from app.grounding import GroundedContext, cited_results
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -136,10 +137,12 @@ class ChatIn(BaseModel):
     attachments: list[dict[str, Any]] = []
     temperature: float | None = None
     agent_profile_id: str | None = None
+    notebook_id: str | None = None
 
 
 class ConversationPatch(BaseModel):
     agent_profile_id: str | None = None
+    notebook_id: str | None = None
 
 
 class AgentProfileIn(BaseModel):
@@ -580,7 +583,7 @@ def delete_model(pid: str, model_id: str):
 
 @app.get("/api/conversations")
 def conversations():
-    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,agent_profile_id FROM conversations ORDER BY updated_at DESC").fetchall()
+    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,agent_profile_id,notebook_id FROM conversations ORDER BY updated_at DESC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -590,7 +593,27 @@ def get_conversation(cid: str):
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if not conv: raise HTTPException(404, "Conversation not found")
         msgs = c.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)).fetchall()
-    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": json.loads(m["runtime_metadata"] or "{}")} for m in msgs]}
+    citation_map: dict[str, list[dict[str, Any]]] = {}
+    with db() as c:
+        all_citations = c.execute("""SELECT mc.*, ns.title AS source_title,
+            cd.content_hash AS current_document_content_hash, dc.content_hash AS current_chunk_content_hash
+            FROM message_citations mc
+            LEFT JOIN notebook_sources ns ON ns.id=mc.source_id
+            LEFT JOIN canonical_documents cd ON cd.id=mc.document_id
+            LEFT JOIN document_chunks dc ON dc.id=mc.chunk_id
+            WHERE mc.message_id IN (SELECT id FROM messages WHERE conversation_id=?)
+            ORDER BY mc.message_id, mc.citation_key""", (cid,)).fetchall()
+    for citation in all_citations:
+        item = dict(citation)
+        item["provenance"] = json.loads(item["provenance"] or "[]")
+        if not citation["current_document_content_hash"] or not citation["current_chunk_content_hash"]:
+            item["status"] = "unavailable"
+        elif citation["current_document_content_hash"] != citation["document_content_hash"] or citation["current_chunk_content_hash"] != citation["chunk_content_hash"]:
+            item["status"] = "changed"
+        else:
+            item["status"] = "valid"
+        citation_map.setdefault(citation["message_id"], []).append(item)
+    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": json.loads(m["runtime_metadata"] or "{}"), "citations": citation_map.get(m["id"], [])} for m in msgs]}
 
 
 @app.delete("/api/conversations/{cid}")
@@ -606,27 +629,38 @@ def update_conversation(cid: str, item: ConversationPatch):
             raise HTTPException(404, "Conversation not found")
         if item.agent_profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (item.agent_profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
-        c.execute("UPDATE conversations SET agent_profile_id=?,updated_at=? WHERE id=?", (item.agent_profile_id, now(), cid))
-        return dict(c.execute("SELECT id,title,created_at,updated_at,agent_profile_id FROM conversations WHERE id=?", (cid,)).fetchone())
+        if item.notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (item.notebook_id,)).fetchone() is None:
+            raise HTTPException(404, "notebook_not_found")
+        values = {**({"agent_profile_id": item.agent_profile_id} if "agent_profile_id" in item.model_fields_set else {}),
+                  **({"notebook_id": item.notebook_id} if "notebook_id" in item.model_fields_set else {})}
+        if values:
+            c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in values)},updated_at=? WHERE id=?", (*values.values(), now(), cid))
+        return dict(c.execute("SELECT id,title,created_at,updated_at,agent_profile_id,notebook_id FROM conversations WHERE id=?", (cid,)).fetchone())
 
 
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
     profile_config = None
+    grounded_context: GroundedContext | None = None
     with db() as c:
         cid = req.conversation_id or str(uuid.uuid4())
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
         # Omitted means inherit; explicit null is the normal Nexo selection.
         profile_id = req.agent_profile_id if "agent_profile_id" in req.model_fields_set else (conv["agent_profile_id"] if conv else None)
+        notebook_id = req.notebook_id if "notebook_id" in req.model_fields_set else (conv["notebook_id"] if conv else None)
         if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
+        if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
+            raise HTTPException(404, "notebook_not_found")
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
-            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id) VALUES(?,?,?,?,?)", (cid, title, now(), now(), profile_id))
-        elif "agent_profile_id" in req.model_fields_set:
-            c.execute("UPDATE conversations SET agent_profile_id=?,updated_at=? WHERE id=?", (profile_id, now(), cid))
+            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?)", (cid, title, now(), now(), profile_id, notebook_id))
+        elif "agent_profile_id" in req.model_fields_set or "notebook_id" in req.model_fields_set:
+            values = {"agent_profile_id": profile_id, "notebook_id": notebook_id}
+            fields = [key for key in values if key in req.model_fields_set]
+            c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?", (*(values[key] for key in fields), now(), cid))
         if profile_id:
             try:
                 profile_config = agent_profile_resolver.resolve(profile_id, req.temperature)
@@ -662,6 +696,7 @@ async def chat(req: ChatIn):
             "resolved_provider": selected_provider_id,
             "resolved_model": selected_model_id,
             "system_instructions_applied": bool(profile_config and profile_config.system_instructions),
+            "notebook_id": notebook_id,
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
@@ -687,10 +722,31 @@ async def chat(req: ChatIn):
         task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
     async def events():
+        nonlocal grounded_context
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                 model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id)
+                if notebook_id:
+                    retrieve_started = asyncio.get_running_loop().time()
+                    retrieve_event = event_sink.start_event("RETRIEVE", "notebook retrieval", {"notebook_id": notebook_id, "retrieval_count": 0})
+                    try:
+                        top_k = min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
+                        max_chars = min(max(int(os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000")), 1000), 100000)
+                        retrieval = await retrieval_service(client).search(notebook_id, req.content, top_k)
+                        grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
+                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": len(grounded_context.retrieval_results),
+                                             "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                             "context_chars": grounded_context.context_chars, "context_truncated": grounded_context.truncated}
+                        event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
+                    except (RetrievalError, ValueError, EmbeddingError):
+                        grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
+                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": 0,
+                                             "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                             "context_chars": 0, "context_truncated": False}
+                        event_sink.finish_event(retrieve_event, "failed", {**retrieval_metadata, "error_code": "retrieval_unavailable"}, retrieval_metadata["retrieval_duration_ms"])
+                    runtime_snapshot.update(retrieval_metadata)
+                    _update_runtime_metadata(run_id, runtime_snapshot)
                 catalog = module_registry.tool_catalog_view()
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
@@ -704,8 +760,8 @@ async def chat(req: ChatIn):
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
                                               profile_config.profile_id if profile_config else None,
-                                              profile_config.profile_name if profile_config else None,
-                                              runtime_snapshot)
+                                               profile_config.profile_name if profile_config else None,
+                                               runtime_snapshot, grounded_context)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
@@ -728,13 +784,22 @@ async def chat(req: ChatIn):
                         if not execution_future.done():
                             execution_future.set_result(execution)
                         run_status = "completed"
+            notebook_citations = cited_results(answer, grounded_context) if grounded_context else []
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
+            runtime_metadata["citation_count"] = len(notebook_citations)
+            assistant_id = str(uuid.uuid4())
             with db() as c:
-                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now()))
+                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (assistant_id, cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now()))
+                for citation_key, result in notebook_citations:
+                    c.execute("""INSERT INTO message_citations
+                        (id,message_id,citation_key,notebook_id,source_id,document_id,chunk_id,canonical_start,canonical_end,provenance,document_content_hash,chunk_content_hash)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), assistant_id, citation_key, notebook_id, result["source_id"], result["document_id"], result["chunk_id"], result["canonical_start"], result["canonical_end"], json.dumps(result.get("provenance", [])), result.get("document_content_hash"), result.get("chunk_content_hash")))
                 c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
+            _update_runtime_metadata(run_id, runtime_metadata)
             module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
-            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "runtime": runtime_metadata}) + "\n\n"
+            citation_payload = [{"citation_key": citation_key, **{key: value for key, value in result.items() if key != "content"}} for citation_key, result in notebook_citations]
+            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "citations": citation_payload, "runtime": runtime_metadata}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"

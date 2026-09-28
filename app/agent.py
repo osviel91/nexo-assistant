@@ -11,6 +11,7 @@ from app.diagnostics import diagnostic
 from app.kernel import ToolExecutionContext
 from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
+from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext
 
 logger = logging.getLogger("nexo.agent")
 
@@ -34,6 +35,7 @@ class AgentRunRequest:
     profile_id: str | None = None
     profile_name: str | None = None
     runtime_snapshot: dict[str, Any] | None = None
+    grounded_context: GroundedContext | None = None
 
 
 class AgentRuntime:
@@ -47,6 +49,9 @@ class AgentRuntime:
         messages = list(request.messages)
         if request.system_instructions:
             messages.insert(0, {"role": "system", "content": request.system_instructions})
+        if request.grounded_context is not None:
+            messages.insert(1 if request.system_instructions else 0, {"role": "system", "content": GROUNDING_INSTRUCTIONS})
+            messages.insert(2 if request.system_instructions else 1, {"role": "system", "content": request.grounded_context.serialize()})
         answer = ""
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []

@@ -19,10 +19,12 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 8)
+            self.assertEqual(version_count, 9)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
+            self.assertIn("notebook_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
+            self.assertIn("message_citations", tables)
 
     def test_existing_database_gets_missing_columns_without_replacing_data(self):
         with tempfile.TemporaryDirectory() as directory:

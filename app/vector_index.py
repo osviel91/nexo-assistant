@@ -21,6 +21,9 @@ class VectorSearchResult:
     canonical_start: int
     canonical_end: int
     provenance: list[dict]
+    document_content_hash: str | None = None
+    chunk_content_hash: str | None = None
+    source_title: str | None = None
 
 
 class VectorIndex(Protocol):
@@ -66,8 +69,11 @@ class SQLiteVectorIndex:
         if not vector or limit <= 0:
             return []
         with self.connection_factory() as connection:
-            rows = connection.execute("""SELECT document_chunks.* FROM document_chunks
-                                      JOIN notebook_sources ON notebook_sources.id=document_chunks.source_id
+            rows = connection.execute("""SELECT document_chunks.*, notebook_sources.title AS source_title,
+                                       canonical_documents.content_hash AS document_content_hash
+                                       FROM document_chunks
+                                       JOIN notebook_sources ON notebook_sources.id=document_chunks.source_id
+                                       JOIN canonical_documents ON canonical_documents.id=document_chunks.document_id
                                       WHERE document_chunks.notebook_id=? AND document_chunks.embedding IS NOT NULL
                                       AND notebook_sources.indexing_status='ready'""",
                                       (notebook_id,)).fetchall()
@@ -79,5 +85,6 @@ class SQLiteVectorIndex:
             metadata = json.loads(row["metadata"] or "{}")
             results.append(VectorSearchResult(row["id"], row["notebook_id"], row["source_id"], row["document_id"],
                                               _cosine(vector, candidate), row["content"], row["canonical_start"],
-                                              row["canonical_end"], metadata.get("provenance", [])))
+                                              row["canonical_end"], metadata.get("provenance", []),
+                                              row["document_content_hash"], row["content_hash"], row["source_title"]))
         return sorted(results, key=lambda item: (-item.score, item.chunk_id))[:limit]
