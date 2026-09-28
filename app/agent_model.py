@@ -51,6 +51,10 @@ class OpenAICompatibleModelAdapter:
             "tools_field_present": bool(tools),
             "tool_count": len(tools),
             "tool_names": [tool["function"]["name"] for tool in tools],
+            "message_roles": [message.get("role") for message in messages],
+            "message_count": len(messages),
+            "grounding_message_indexes": [index for index, message in enumerate(messages) if "Retrieved Notebook material" in str(message.get("content", ""))],
+            "grounding_message_chars": sum(len(str(message.get("content", ""))) for message in messages if "Retrieved Notebook material" in str(message.get("content", ""))),
         })
         try:
             async with self.client.stream("POST", self.url, headers=self.headers, json=payload) as response:

@@ -79,6 +79,9 @@ class AgentRuntime:
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
+                               "grounding_applied": grounded_context is not None and bool(grounded_context.retrieval_results),
+                               "grounding_chunks": len(grounded_context.retrieval_results) if grounded_context else 0,
+                               "context_chars": grounded_context.context_chars if grounded_context else 0,
                                **(request.runtime_snapshot or {}),
                                **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
             reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
@@ -88,6 +91,10 @@ class AgentRuntime:
                 "tools_available": len(definitions),
                 "tools_exposed": len(definitions),
                 "exposed_tool_names": [tool["function"]["name"] for tool in definitions],
+                "grounding_applied": grounded_context is not None and bool(grounded_context.retrieval_results),
+                "grounding_chunks": len(grounded_context.retrieval_results) if grounded_context else 0,
+                "grounding_context_chars": grounded_context.context_chars if grounded_context else 0,
+                "message_roles": [message.get("role") for message in messages],
             })
             tool_calls: dict[int, dict[str, Any]] = {}
             round_content = ""

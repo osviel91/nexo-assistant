@@ -288,7 +288,10 @@ async function send() {
   renderMessages();
   let answer = '';
   try {
-     const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments, agent_profile_id: state.agentProfileId, notebook_id: state.currentNotebookId }) });
+     const chatPayload = { conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments };
+     if (state.agentProfileId) chatPayload.agent_profile_id = state.agentProfileId;
+     if (state.currentNotebookId) chatPayload.notebook_id = state.currentNotebookId;
+     const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chatPayload) });
     if (!response.ok) throw Error((await response.text()).slice(0, 300));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

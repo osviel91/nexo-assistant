@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -746,7 +747,12 @@ async def chat(req: ChatIn):
                         retrieval = await retrieval_service(client).search(notebook_id, req.content, top_k)
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": len(grounded_context.retrieval_results),
-                                              "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                               "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
+                                               "retrieval_query_length": len(req.content),
+                                               "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results],
+                                               "top_scores": [item.get("score") for item in grounded_context.retrieval_results],
+                                               "grounded_context_created": True,
+                                               "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                               "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
                                               "context_chars": grounded_context.context_chars, "context_truncated": grounded_context.truncated,
                                               "knowledge_retrieval_applied": True}
@@ -754,7 +760,11 @@ async def chat(req: ChatIn):
                     except (RetrievalError, ValueError, EmbeddingError):
                         grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": 0,
-                                              "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                               "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
+                                               "retrieval_query_length": len(req.content),
+                                               "selected_chunk_ids": [], "top_scores": [],
+                                               "grounded_context_created": True,
+                                               "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                               "context_chars": 0, "context_truncated": False,
                                               "knowledge_retrieval_applied": False}
                         event_sink.finish_event(retrieve_event, "failed", {**retrieval_metadata, "error_code": "retrieval_unavailable"}, retrieval_metadata["retrieval_duration_ms"])
