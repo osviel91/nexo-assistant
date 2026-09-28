@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import AgentRuntime, AgentRuntimeLimits
 from app.capabilities import normalize_model_capabilities
-from app.diagnostics import diagnostic
+from app.diagnostics import diagnostic, recent
 from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
@@ -169,6 +169,11 @@ def shadow_observations(conversation_id: str | None = None, limit: int = 20):
     with db() as c:
         rows = c.execute(query, params).fetchall()
     return [{**dict(row), "answers": json.loads(row["answers"]), "execution": json.loads(row["execution"]), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
+@app.get("/api/lab/diagnostics")
+def diagnostics(limit: int = 50):
+    return recent(limit)
 
 
 @app.get("/api/providers")
