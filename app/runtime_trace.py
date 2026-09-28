@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 SAFE_METADATA_KEYS = {
     "model", "tool", "provider", "round", "status", "duration_ms",
-    "error_code", "capabilities", "answers", "confidence", "probabilities",
+    "error_code", "agent_profile_id", "capabilities", "answers", "confidence", "probabilities",
 }
 
 
@@ -17,7 +17,7 @@ def safe_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     for key, value in (metadata or {}).items():
         if key not in SAFE_METADATA_KEYS:
             continue
-        if key in {"model", "tool", "provider", "status", "error_code"} and isinstance(value, (str, int, float, bool)):
+        if key in {"model", "tool", "provider", "status", "error_code", "agent_profile_id"} and isinstance(value, (str, int, float, bool)):
             output[key] = str(value) if key != "round" else value
         elif key in {"round", "duration_ms"} and isinstance(value, (int, float)):
             output[key] = value

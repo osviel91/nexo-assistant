@@ -17,6 +17,12 @@ class ProfileNotFoundError(LookupError):
     pass
 
 
+class ProfileResolutionError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class AgentProfile:
     id: str
@@ -42,6 +48,16 @@ class AgentProfileInput:
     model_parameters: dict[str, Any] | None = None
     enabled: bool = True
     tool_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AgentRunConfiguration:
+    profile_id: str
+    provider_id: str
+    model_id: str
+    system_instructions: str
+    temperature: float | None
+    requested_tool_names: tuple[str, ...]
 
 
 class AgentProfileRepository:
@@ -189,3 +205,36 @@ class AgentProfileService:
     def delete(self, profile_id: str) -> None:
         if not self.repository.delete(profile_id):
             raise ProfileNotFoundError(profile_id)
+
+
+class AgentProfileResolver:
+    """Resolve one persisted profile into an immutable runtime configuration."""
+
+    def __init__(self, repository: AgentProfileRepository) -> None:
+        self.repository = repository
+
+    def resolve(self, profile_id: str, runtime_temperature: float | None = None) -> AgentRunConfiguration:
+        stored = self.repository.get(profile_id)
+        if stored is None:
+            raise ProfileNotFoundError(profile_id)
+        row, tool_names = stored
+        provider_id, model_id = row["provider_id"], row["model_id"]
+        if not row["enabled"] or not isinstance(provider_id, str) or not provider_id.strip() or not isinstance(model_id, str) or not model_id.strip() or not isinstance(row["system_instructions"], str):
+            raise ProfileResolutionError("agent_profile_invalid")
+        try:
+            parameters = json.loads(row["model_parameters"])
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProfileResolutionError("agent_profile_invalid") from exc
+        if not isinstance(parameters, dict) or set(parameters) - {"temperature"}:
+            raise ProfileResolutionError("agent_profile_invalid")
+        temperature = parameters.get("temperature", runtime_temperature)
+        if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2):
+            raise ProfileResolutionError("agent_profile_invalid")
+        if any(not isinstance(tool, str) or len(tool) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)*", tool) for tool in tool_names):
+            raise ProfileResolutionError("agent_profile_invalid")
+        with self.repository.connection_factory() as connection:
+            if connection.execute("SELECT 1 FROM providers WHERE id=?", (provider_id,)).fetchone() is None:
+                raise ProfileResolutionError("agent_model_unavailable")
+            if connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (provider_id, model_id)).fetchone() is None:
+                raise ProfileResolutionError("agent_model_unavailable")
+        return AgentRunConfiguration(profile_id, provider_id, model_id, row["system_instructions"], temperature, tool_names)

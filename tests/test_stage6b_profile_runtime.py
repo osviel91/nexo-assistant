@@ -1,0 +1,151 @@
+import asyncio
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from app.agent_profiles import AgentProfileInput, AgentProfileResolver, AgentProfileRepository, AgentProfileService, ProfileNotFoundError, ProfileResolutionError
+from app.migrations import migrate
+
+
+class Stage6BProfileRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "nexo.sqlite3"
+
+        def connection():
+            import sqlite3
+            result = sqlite3.connect(self.path)
+            result.row_factory = sqlite3.Row
+            result.execute("PRAGMA foreign_keys=ON")
+            return result
+
+        self.connection = connection
+        with connection() as db:
+            migrate(db)
+            db.execute("INSERT INTO providers VALUES ('p', 'Provider', 'http://provider', 'provider-secret', 'now')")
+            db.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES ('m','p','Model','[\"tool-calling\"]')")
+        self.service = AgentProfileService(AgentProfileRepository(connection, lambda: "now"), lambda: [])
+        self.resolver = AgentProfileResolver(self.service.repository)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def profile(self, **overrides):
+        values = {"name": "Research", "provider_id": "p", "model_id": "m", "system_instructions": "Be brief", "model_parameters": {"temperature": 0.7}, "tool_names": ()}
+        values.update(overrides)
+        return AgentProfileInput(**values)
+
+    def test_resolver_snapshots_precedence_and_empty_tools(self):
+        profile = self.service.create(self.profile(model_parameters={}))
+        config = self.resolver.resolve(profile["id"], runtime_temperature=0.2)
+        self.assertEqual(config.temperature, 0.2)
+        self.assertEqual(config.requested_tool_names, ())
+        updated = self.service.update(profile["id"], {"system_instructions": "changed", "model_parameters": {"temperature": 1.2}})
+        self.assertEqual(config.system_instructions, "Be brief")
+        self.assertEqual(config.temperature, 0.2)
+        self.assertNotEqual(updated["system_instructions"], config.system_instructions)
+
+    def test_resolver_reports_missing_and_invalid_profiles_safely(self):
+        with self.assertRaises(ProfileNotFoundError):
+            self.resolver.resolve("deleted")
+        profile = self.service.create(self.profile())
+        with self.connection() as db:
+            db.execute("DELETE FROM models")
+        with self.assertRaises(ProfileResolutionError) as error:
+            self.resolver.resolve(profile["id"])
+        self.assertEqual(str(error.exception), "agent_model_unavailable")
+
+    def test_profile_chat_selects_model_system_temperature_limited_tools_and_safe_trace(self):
+        from app import main
+        from app.kernel import ToolDefinition
+
+        old_db, old_tools = main.DB_PATH, main.module_registry.context.tools._tools.copy()
+        old_profiles, old_resolver = main.agent_profiles, main.agent_profile_resolver
+        main.DB_PATH = self.path
+        seen = []
+
+        async def visible(_context, arguments):
+            seen.append(arguments)
+            return {"ok": True}
+
+        main.module_registry.context.tools._tools.clear()
+        main.module_registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, visible))
+        main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible))
+        main.agent_profiles = AgentProfileService(AgentProfileRepository(main.db, main.now), main.module_registry.tool_catalog)
+        main.agent_profile_resolver = AgentProfileResolver(main.agent_profiles.repository)
+        profile = main.agent_profiles.create(self.profile(tool_names=("visible", "missing__tool")))
+
+        class Response:
+            status_code = 200
+
+            async def aiter_lines(self):
+                if not any(message.get("role") == "tool" for message in self.payload["messages"]):
+                    chunks = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call", "function": {"name": "visible", "arguments": "{}"}}]}}]}]
+                else:
+                    chunks = [{"choices": [{"delta": {"content": "continued"}}]}]
+                for chunk in chunks:
+                    yield "data: " + json.dumps(chunk)
+                yield "data: [DONE]"
+
+        class Stream:
+            def __init__(self, payload):
+                self.response = Response()
+                self.response.payload = payload
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return None
+
+        class Client:
+            payloads = []
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def stream(self, method, url, headers, json):
+                self.payloads.append(json)
+                return Stream(json)
+
+        old_client = main.httpx.AsyncClient
+        main.httpx.AsyncClient = Client
+        try:
+            response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="wrong", content="run", temperature=0.1, agent_profile_id=profile["id"])))
+            body = asyncio.run(self.collect(response.body_iterator))
+            payload = Client.payloads[0]
+            self.assertEqual(payload["model"], "m")
+            self.assertEqual(payload["temperature"], 0.7)
+            self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})
+            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible"])
+            self.assertEqual(seen, [{}])
+            self.assertIn("continued", body)
+            with main.db() as db:
+                run = db.execute("SELECT * FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()
+            metadata = json.loads(run["metadata"])
+            self.assertEqual(metadata["agent_profile_id"], profile["id"])
+            self.assertNotIn("Be brief", json.dumps(metadata))
+            self.assertNotIn("provider-secret", json.dumps(metadata))
+        finally:
+            main.httpx.AsyncClient = old_client
+            main.DB_PATH = old_db
+            main.agent_profiles, main.agent_profile_resolver = old_profiles, old_resolver
+            main.module_registry.context.tools._tools.clear()
+            main.module_registry.context.tools._tools.update(old_tools)
+
+    async def collect(self, iterator):
+        chunks = []
+        async for chunk in iterator:
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        return "".join(chunks)
+
+
+if __name__ == "__main__":
+    unittest.main()

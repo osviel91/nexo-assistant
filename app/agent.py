@@ -30,6 +30,8 @@ class AgentRunRequest:
     context: ToolExecutionContext
     temperature: float | None = None
     event_sink: RuntimeEventSink = NullRuntimeEventSink()
+    system_instructions: str = ""
+    profile_id: str | None = None
 
 
 class AgentRuntime:
@@ -40,13 +42,17 @@ class AgentRuntime:
         self,
         request: AgentRunRequest,
     ) -> AsyncIterator[dict[str, Any]]:
+        messages = list(request.messages)
+        if request.system_instructions:
+            messages.insert(0, {"role": "system", "content": request.system_instructions})
         answer = ""
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []
         tool_rounds = 0
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
-            reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, {"model": request.model.model_id, "round": tool_rounds + 1})
+            reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1, **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
+            reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
             definitions = request.effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
@@ -57,7 +63,7 @@ class AgentRuntime:
             round_content = ""
             finish_reason = None
             try:
-                async for chunk in request.model.stream(request.messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], request.temperature):
+                async for chunk in request.model.stream(messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], request.temperature):
                     finish_reason = chunk.finish_reason or finish_reason
                     if chunk.content:
                         round_content += chunk.content
@@ -72,9 +78,9 @@ class AgentRuntime:
                         current["arguments"] += function.get("arguments", "") or ""
             except ModelAdapterError as exc:
                 duration_ms = round((time.perf_counter() - reason_started) * 1000, 2)
-                request.event_sink.finish_event(reason_event_id, "failed", {"error_code": "provider_failure", "model": request.model.model_id, "round": tool_rounds + 1}, duration_ms)
-                yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
-                yield {"error": str(exc)}
+                request.event_sink.finish_event(reason_event_id, "failed", {**reason_metadata, "error_code": "provider_failure"}, duration_ms)
+                yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {**reason_metadata, "run_id": request.context.run_id}}}
+                yield {"error": "provider_failure" if request.profile_id else str(exc)}
                 return
 
             diagnostic(logger, "provider_response", **{
@@ -84,8 +90,8 @@ class AgentRuntime:
                 "tool_call_names": [call["name"] for call in tool_calls.values() if call["name"]],
             })
             duration_ms = round((time.perf_counter() - reason_started) * 1000, 2)
-            request.event_sink.finish_event(reason_event_id, "completed", {"model": request.model.model_id, "round": tool_rounds + 1}, duration_ms)
-            yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "success", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
+            request.event_sink.finish_event(reason_event_id, "completed", reason_metadata, duration_ms)
+            yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "success", "metadata": {**reason_metadata, "run_id": request.context.run_id}}}
 
             if not tool_calls:
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
@@ -95,7 +101,7 @@ class AgentRuntime:
                 yield {"error": "Se alcanzó el límite de rondas de herramientas."}
                 return
 
-            request.messages.append({
+            messages.append({
                 "role": "assistant",
                 "content": round_content or None,
                 "tool_calls": [{"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}} for c in tool_calls.values()],
@@ -144,7 +150,7 @@ class AgentRuntime:
                 result_text = self._serialize_tool_result(result)
                 if result.get("error"):
                     yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}
-                request.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
+                messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
             diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
         yield {"error": "Se alcanzó el límite de rondas de herramientas."}

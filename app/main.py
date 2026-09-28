@@ -30,7 +30,7 @@ from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor
 from app.runtime_trace import RuntimeEventSink, safe_metadata
-from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileService, ProfileNotFoundError, ProfileValidationError
+from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -82,6 +82,7 @@ def now() -> str:
 
 
 agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_registry.tool_catalog)
+agent_profile_resolver = AgentProfileResolver(agent_profiles.repository)
 
 
 @app.on_event("startup")
@@ -115,6 +116,7 @@ class ChatIn(BaseModel):
     content: str
     attachments: list[dict[str, Any]] = []
     temperature: float | None = None
+    agent_profile_id: str | None = None
 
 
 class AgentProfileIn(BaseModel):
@@ -425,12 +427,22 @@ def delete_conversation(cid: str):
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
+    profile_config = None
+    if req.agent_profile_id:
+        try:
+            profile_config = agent_profile_resolver.resolve(req.agent_profile_id, req.temperature)
+        except ProfileNotFoundError:
+            raise HTTPException(404, "agent_profile_not_found")
+        except ProfileResolutionError as error:
+            raise HTTPException(400, error.code)
+    selected_provider_id = profile_config.provider_id if profile_config else req.provider_id
+    selected_model_id = profile_config.model_id if profile_config else req.model_id
     with db() as c:
-        provider = c.execute("SELECT * FROM providers WHERE id=?", (req.provider_id,)).fetchone()
+        provider = c.execute("SELECT * FROM providers WHERE id=?", (selected_provider_id,)).fetchone()
         if not provider: raise HTTPException(404, "Provider not found")
-        model = c.execute("SELECT * FROM models WHERE provider_id=? AND id=?", (req.provider_id, req.model_id)).fetchone()
+        model = c.execute("SELECT * FROM models WHERE provider_id=? AND id=?", (selected_provider_id, selected_model_id)).fetchone()
         if not model:
-            raise HTTPException(400, "Choose a model configured for this provider")
+            raise HTTPException(400, "agent_model_unavailable" if profile_config else "Choose a model configured for this provider")
         cid = req.conversation_id or str(uuid.uuid4())
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
@@ -450,22 +462,22 @@ async def chat(req: ChatIn):
             user_content = parts
         message_id = str(uuid.uuid4())
         run_id = str(uuid.uuid4())
-        c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, req.provider_id, req.model_id, json.dumps(req.attachments), now()))
+        c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, selected_provider_id, selected_model_id, json.dumps(req.attachments), now()))
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
-        c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", req.model_id, json.dumps({"provider": req.provider_id})))
+        c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps({"provider": selected_provider_id, **({"agent_profile_id": profile_config.profile_id} if profile_config else {})})))
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
         supports_tools = "tool-calling" in json.loads(model["capabilities"] or "[]")
         diagnostic(logger, "capability_policy", **{
-            "model": req.model_id,
+            "model": selected_model_id,
             "reported_tool_capability": supports_tools,
             "fallback_enabled": _tool_calling_fallback(),
             "effective_tool_capability": supports_tools,
         })
-    execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0, run_id)
+    execution_context = ToolExecutionContext(cid, selected_provider_id, selected_model_id, 0, run_id)
     event_sink = SQLiteRuntimeEventSink(run_id)
-    module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
+    module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     if _shadow_configured():
         trace_id = _insert_trace_event(cid, message_id, "DECIDE", "running", {"model": None, "run_id": run_id})
@@ -478,10 +490,13 @@ async def chat(req: ChatIn):
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
-                model_adapter = OpenAICompatibleModelAdapter(client, url, headers, req.model_id)
+                model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id)
                 catalog = module_registry.tool_catalog_view()
-                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set())
-                run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context, req.temperature, event_sink)
+                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None)
+                run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
+                                              profile_config.temperature if profile_config else req.temperature, event_sink,
+                                              profile_config.system_instructions if profile_config else "",
+                                              profile_config.profile_id if profile_config else None)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
@@ -504,10 +519,10 @@ async def chat(req: ChatIn):
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             with db() as c:
-                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, req.provider_id, req.model_id, "[]", json.dumps(sources), now()))
+                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), now()))
                 c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
-            module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
-            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id, "sources": sources}) + "\n\n"
+            module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
+            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
