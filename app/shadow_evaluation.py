@@ -13,8 +13,16 @@ DIAGNOSTIC_CASES = [
     ("web-negative", "Explícame conceptualmente la diferencia entre TCP y UDP."),
     ("tool-positive", "Usa la herramienta de búsqueda web para consultar las noticias de hoy."),
 ]
+ADDITIONAL_DIAGNOSTIC_CASES = [
+    ("current-positive", "¿Cuál es el precio actual del oro?"),
+    ("explicit-search-positive", "Busca en la web las últimas novedades de Qwen."),
+    ("timeless-knowledge", "¿Cómo funciona consistent hashing?"),
+    ("explicit-tool-positive", "Utiliza una herramienta disponible para buscar documentación actual de Python."),
+    ("unavailable-tool-action", "Envía un correo electrónico a soporte con este mensaje: Hola."),
+]
+DIAGNOSTIC_CASE_SETS = ("original", "additional", "all")
 DIAGNOSTIC_MODES = ("batch-current", "needs-web-only", "needs-tools-only")
-DIAGNOSTIC_STATE_VARIANTS = ("production-state", "message-only")
+DIAGNOSTIC_STATE_VARIANTS = ("production-state", "message-only", "structured-state")
 
 
 WORDING_VARIANTS = {
@@ -62,7 +70,20 @@ def diagnostic_request(message: str, available_tools: list[str], mode: str, stat
         request.questions = [question for question in request.questions if question.id == "needs_tools"]
     if state_variant == "message-only":
         request.state = {"message": message}
+    elif state_variant == "structured-state":
+        request.state = {
+            "message": message,
+            "available_capabilities": {
+                tool: {"description": _capability_description(tool)} for tool in available_tools
+            },
+        }
     return request
+
+
+def _capability_description(name: str) -> str:
+    if name == "web_search":
+        return "Search the web for current or external information"
+    return f"Use the {name} capability when the request requires it"
 
 
 def score_cases(cases: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:

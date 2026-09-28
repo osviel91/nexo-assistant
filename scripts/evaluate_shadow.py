@@ -10,7 +10,9 @@ from pathlib import Path
 
 from app.decision.models import ShadowDecision
 from app.shadow_evaluation import (
+    ADDITIONAL_DIAGNOSTIC_CASES,
     DIAGNOSTIC_CASES,
+    DIAGNOSTIC_CASE_SETS,
     DIAGNOSTIC_MODES,
     DIAGNOSTIC_STATE_VARIANTS,
     WORDING_VARIANTS,
@@ -32,6 +34,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--tools", default="web_search", help="Stable comma-separated available tool names for every case.")
     parser.add_argument("--diagnostic-mode", choices=DIAGNOSTIC_MODES, help="Evaluator-only boolean isolation mode.")
     parser.add_argument("--state-variant", choices=DIAGNOSTIC_STATE_VARIANTS, help="Evaluator-only state construction.")
+    parser.add_argument("--case-set", choices=DIAGNOSTIC_CASE_SETS, default="all", help="Evaluator-only diagnostic case set.")
     parser.add_argument("--output", default=None)
     return parser.parse_args()
 
@@ -56,7 +59,12 @@ async def run(options: argparse.Namespace | None = None) -> None:
         tools = sorted({tool["name"] for tool in main.module_registry.tool_catalog()})
     tools = sorted(item.strip() for item in options.tools.split(",") if item.strip()) if options.model else tools
     if options.diagnostic_mode:
-        cases = [{"id": case_id, "category": case_id, "state": message, "expected": {}} for case_id, message in DIAGNOSTIC_CASES]
+        selected_cases = {
+            "original": DIAGNOSTIC_CASES,
+            "additional": ADDITIONAL_DIAGNOSTIC_CASES,
+            "all": DIAGNOSTIC_CASES + ADDITIONAL_DIAGNOSTIC_CASES,
+        }[options.case_set]
+        cases = [{"id": case_id, "category": case_id, "state": message, "expected": {}} for case_id, message in selected_cases]
     results = []
     for case in cases:
         started = time.perf_counter()
@@ -97,6 +105,7 @@ async def run(options: argparse.Namespace | None = None) -> None:
             "model": options.model,
             "mode": options.diagnostic_mode,
             "state_variant": options.state_variant,
+            "case_set": options.case_set,
             "wording": "baseline",
             "cases": len(cases),
             "results": results,

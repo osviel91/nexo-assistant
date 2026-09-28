@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.decision.models import DecisionRequest
-from app.shadow_evaluation import DIAGNOSTIC_MODES, DIAGNOSTIC_STATE_VARIANTS, WORDING_VARIANTS, diagnostic_request, evaluation_request, latency_summary, score_cases
+from app.shadow_evaluation import ADDITIONAL_DIAGNOSTIC_CASES, DIAGNOSTIC_CASES, DIAGNOSTIC_MODES, DIAGNOSTIC_STATE_VARIANTS, WORDING_VARIANTS, diagnostic_request, evaluation_request, latency_summary, score_cases
 
 
 class ShadowEvaluationTests(unittest.TestCase):
@@ -47,11 +47,20 @@ class ShadowEvaluationTests(unittest.TestCase):
             self.assertEqual(request.questions[0].statement, "Would this request materially benefit from current or external information obtained through web search?" if "needs_web" in expected else "Would solving this request materially benefit from using one of the available agent tools?")
             self.assertEqual(request.state, {"message": "x", "available_tools": ["web_search"]})
         self.assertEqual(set(DIAGNOSTIC_MODES), {"batch-current", "needs-web-only", "needs-tools-only"})
-        self.assertEqual(set(DIAGNOSTIC_STATE_VARIANTS), {"production-state", "message-only"})
+        self.assertEqual(set(DIAGNOSTIC_STATE_VARIANTS), {"production-state", "message-only", "structured-state"})
 
     def test_diagnostic_message_only_state_has_no_tools(self):
         request = diagnostic_request("x", ["web_search"], "needs-web-only", "message-only")
         self.assertEqual(request.state, {"message": "x"})
+
+    def test_structured_state_describes_capabilities_without_changing_message(self):
+        request = diagnostic_request("x", ["web_search"], "needs-tools-only", "structured-state")
+        self.assertEqual(request.state, {"message": "x", "available_capabilities": {"web_search": {"description": "Search the web for current or external information"}}})
+        self.assertEqual(request.questions[0].statement, "Would solving this request materially benefit from using one of the available agent tools?")
+
+    def test_additional_diagnostic_cases_are_separate_from_original_cases(self):
+        self.assertEqual([case[0] for case in DIAGNOSTIC_CASES], ["web-positive", "web-negative", "tool-positive"])
+        self.assertEqual([case[0] for case in ADDITIONAL_DIAGNOSTIC_CASES], ["current-positive", "explicit-search-positive", "timeless-knowledge", "explicit-tool-positive", "unavailable-tool-action"])
 
     def test_scores_booleans_tasks_and_confidence(self):
         cases = [{"id": "web", "expected": {"needs_web": True}}, {"id": "code", "expected": {"task_type": "coding"}}]
