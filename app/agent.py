@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from app.diagnostics import diagnostic
 from app.kernel import ModuleRegistry, ToolExecutionContext
 
 logger = logging.getLogger("nexo.agent")
@@ -44,13 +45,28 @@ class AgentRuntime:
             if temperature is not None:
                 payload["temperature"] = temperature
             definitions = self.registry.tool_definitions(context, capabilities)
+            diagnostic(logger, "agent_runtime", **{
+                "tools_available": len(self.registry.tool_catalog()),
+                "tools_exposed": len(definitions),
+                "exposed_tool_names": [tool["function"]["name"] for tool in definitions],
+            })
             if tool_rounds < self.limits.max_tool_rounds and definitions:
                 payload["tools"] = definitions
             tool_calls: dict[int, dict[str, Any]] = {}
             round_content = ""
+            finish_reason = None
             try:
+                diagnostic(logger, "provider_request", **{
+                    "api_mode": "chat_completions",
+                    "endpoint": url,
+                    "tools_field_present": "tools" in payload,
+                    "tool_count": len(payload.get("tools", [])),
+                    "tool_names": [tool["function"]["name"] for tool in payload.get("tools", [])],
+                    "tool_choice": payload.get("tool_choice"),
+                })
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     if response.status_code >= 400:
+                        diagnostic(logger, "provider_response", status=response.status_code, finish_reason=None, tool_calls_present=False, tool_call_names=[])
                         yield {"error": f"Provider HTTP {response.status_code}"}
                         return
                     async for line in response.aiter_lines():
@@ -60,7 +76,9 @@ class AgentRuntime:
                         if raw == "[DONE]":
                             break
                         try:
-                            delta = json.loads(raw).get("choices", [{}])[0].get("delta", {})
+                            choice = json.loads(raw).get("choices", [{}])[0]
+                            delta = choice.get("delta", {})
+                            finish_reason = choice.get("finish_reason") or finish_reason
                             text = delta.get("content", "")
                             if isinstance(text, list):
                                 text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
@@ -81,7 +99,15 @@ class AgentRuntime:
                 yield {"error": f"Provider connection failed: {str(exc)[:180]}"}
                 return
 
+            diagnostic(logger, "provider_response", **{
+                "status": 200,
+                "finish_reason": finish_reason,
+                "tool_calls_present": bool(tool_calls),
+                "tool_call_names": [call["name"] for call in tool_calls.values() if call["name"]],
+            })
+
             if not tool_calls:
+                diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
                 yield {"complete": True, "answer": answer, "sources": sources, "tools_used": tools_used, "tool_rounds": tool_rounds}
                 return
             if tool_rounds >= self.limits.max_tool_rounds:
@@ -134,6 +160,7 @@ class AgentRuntime:
                     yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": context.conversation_id, "provider_id": context.provider_id, "model_id": context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
+            diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
         yield {"error": "Se alcanzó el límite de rondas de herramientas."}
 
     def _serialize_tool_result(self, result: dict[str, Any]) -> str:

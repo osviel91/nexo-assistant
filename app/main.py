@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import AgentRuntime, AgentRuntimeLimits
 from app.capabilities import normalize_model_capabilities
+from app.diagnostics import diagnostic
 from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
@@ -231,6 +232,14 @@ async def refresh_models(pid: str):
     with db() as c:
         for model in models:
             capabilities = normalize_model_capabilities(model, _tool_calling_fallback())
+            diagnostic(logger, "model_capabilities", **{
+                "model": str(model["id"]),
+                "raw_capabilities": model.get("capabilities"),
+                "raw_supports_tools": model.get("supports_tools"),
+                "raw_tool_calling": model.get("tool_calling"),
+                "raw_supported_parameters": model.get("supported_parameters"),
+                "normalized_capabilities": sorted(capabilities),
+            })
             c.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?) ON CONFLICT(provider_id,id) DO UPDATE SET capabilities=excluded.capabilities", (str(model["id"]), pid, str(model["id"]), json.dumps(sorted(capabilities))))
         row = c.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
     return provider_dict(row)
@@ -296,6 +305,12 @@ async def chat(req: ChatIn):
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
         supports_tools = "tool-calling" in json.loads(model["capabilities"] or "[]")
+        diagnostic(logger, "capability_policy", **{
+            "model": req.model_id,
+            "reported_tool_capability": supports_tools,
+            "fallback_enabled": _tool_calling_fallback(),
+            "effective_tool_capability": supports_tools,
+        })
     execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0)
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -348,9 +363,9 @@ def _tool_calling_fallback() -> bool:
 def _finish_shadow_task(task: asyncio.Task[None], conversation_id: str, message_id: str) -> None:
     shadow_tasks.discard(task)
     if task.cancelled():
-        logger.error("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_cancelled"})
+        diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="shadow_cancelled")
     elif task.exception() is not None:
-        logger.error("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_task_failed"})
+        diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="shadow_task_failed")
 
 
 async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]]) -> None:
@@ -361,24 +376,24 @@ async def _run_shadow_observation(message_id: str, conversation_id: str, message
     try:
         if service is None or not getattr(service, "shadow_enabled", False):
             raise RuntimeError("decision_runtime_unavailable")
-        logger.info("shadow_started", extra={"conversation_id": conversation_id, "message_id": message_id})
+        diagnostic(logger, "shadow_started", conversation_id=conversation_id, message_id=message_id, latency_ms=None, error_code=None)
         result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
-        logger.info("shadow_completed", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms, "error_code": None})
+        diagnostic(logger, "shadow_completed", conversation_id=conversation_id, message_id=message_id, latency_ms=result.latency_ms, error_code=None)
     except Exception as exc:
         error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
         result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
-        logger.warning("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": error, "latency_ms": result.latency_ms})
+        diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code=error, latency_ms=result.latency_ms)
     try:
         execution = await asyncio.shield(execution_future)
     except asyncio.CancelledError:
-        logger.warning("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_cancelled"})
+        diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="shadow_cancelled")
         raise
     except Exception:
-        logger.exception("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "execution_observation_failed"})
+        diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="execution_observation_failed")
         execution = {"tools_used": [], "tool_rounds": 0, "web_search_used": False}
     with db() as c:
         c.execute("INSERT INTO shadow_observations(id,conversation_id,message_id,mode,model,answers,execution,metadata,latency_ms,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, message_id, result.mode, result.model, json.dumps(result.answers), json.dumps(execution), json.dumps(result.metadata), result.latency_ms, error, now()))
-    logger.info("shadow_persisted", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms, "error_code": error})
+    diagnostic(logger, "shadow_persisted", conversation_id=conversation_id, message_id=message_id, latency_ms=result.latency_ms, error_code=error)
 
 
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")

@@ -7,6 +7,8 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from fastapi import FastAPI
 
+from app.diagnostics import diagnostic
+
 logger = logging.getLogger("nexo.kernel")
 KERNEL_API_VERSION = 1
 HookName = Literal["startup", "shutdown", "chat_before", "chat_after"]
@@ -62,6 +64,11 @@ class ToolRegistry:
         context: ToolExecutionContext | None = None,
         capabilities: set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        web_search = self._tools.get("web_search")
+        diagnostic(logger, "tool_registry", **{
+            "web_search_registered": web_search is not None,
+            "schema_present": bool(web_search and web_search.parameters),
+        })
         if capabilities is not None and "tool-calling" not in capabilities:
             return []
         return [
