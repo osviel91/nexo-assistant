@@ -33,6 +33,9 @@ from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
 from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookRepository, NotebookService, NotebookSourceNotFoundError, NotebookValidationError
 from app.ingestion import NotebookIngestionService
+from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
+from app.retrieval import RetrievalError, RetrievalService
+from app.vector_index import SQLiteVectorIndex
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,6 +90,18 @@ agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_reg
 agent_profile_resolver = AgentProfileResolver(agent_profiles.repository)
 notebooks = NotebookService(NotebookRepository(db, now), DATA_DIR / "notebook-sources")
 ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_root, now, MAX_UPLOAD)
+
+
+def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
+    base_url = os.getenv("NEXO_EMBEDDING_BASE_URL", "").strip()
+    if not base_url:
+        raise RetrievalError("embedding provider is not configured")
+    headers = {"Content-Type": "application/json"}
+    if os.getenv("NEXO_EMBEDDING_API_KEY", ""):
+        headers["Authorization"] = f"Bearer {os.getenv('NEXO_EMBEDDING_API_KEY')}"
+    provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model"))
+    return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider,
+                            batch_size=int(os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32")))
 
 
 @app.on_event("startup")
@@ -157,6 +172,11 @@ class NotebookIn(BaseModel):
 class NotebookPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+
+
+class RetrievalIn(BaseModel):
+    query: str = Field(min_length=1, max_length=10000)
+    limit: int = Field(default=5, ge=1, le=50)
 
 
 def profile_input(item: AgentProfileIn) -> AgentProfileInput:
@@ -307,6 +327,32 @@ def ingest_notebook_source(notebook_id: str, source_id: str):
         return {"source": notebooks.source(notebook_id, source_id), "document": result}
     except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
         raise notebook_error(error)
+
+
+@app.post("/api/notebooks/{notebook_id}/sources/{source_id}/index")
+async def index_notebook_source(notebook_id: str, source_id: str):
+    try:
+        notebooks.source(notebook_id, source_id)
+        async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
+            service = retrieval_service(client)
+            result = await service.index_source(notebook_id, source_id)
+        return {"source": notebooks.source(notebook_id, source_id), "index": result}
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+    except (RetrievalError, EmbeddingError) as error:
+        raise HTTPException(400, str(error))
+
+
+@app.post("/api/notebooks/{notebook_id}/retrieve")
+async def retrieve_notebook(notebook_id: str, item: RetrievalIn):
+    try:
+        notebooks.get(notebook_id)
+        async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
+            return {"results": await retrieval_service(client).search(notebook_id, item.query, item.limit)}
+    except NotebookNotFoundError as error:
+        raise notebook_error(error)
+    except (RetrievalError, EmbeddingError) as error:
+        raise HTTPException(400, str(error))
 
 
 @app.post("/api/notebooks/{notebook_id}/sources")

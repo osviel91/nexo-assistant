@@ -167,7 +167,39 @@ def _migration_7(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "messages", "runtime_metadata", "TEXT NOT NULL DEFAULT '{}'")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7))
+def _migration_8(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS document_chunks (
+      id TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+      document_id TEXT NOT NULL REFERENCES canonical_documents(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL REFERENCES notebook_sources(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      canonical_start INTEGER NOT NULL,
+      canonical_end INTEGER NOT NULL,
+      token_count INTEGER,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      content_hash TEXT NOT NULL,
+      embedding TEXT,
+      embedding_dimension INTEGER,
+      created_at TEXT NOT NULL,
+      UNIQUE(document_id, ordinal),
+      CHECK(canonical_start >= 0 AND canonical_end >= canonical_start)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_chunks_notebook ON document_chunks(notebook_id, document_id, ordinal);
+    CREATE INDEX IF NOT EXISTS idx_document_chunks_source ON document_chunks(source_id);
+    """)
+    _add_column_if_missing(connection, "notebook_sources", "indexing_status", "TEXT NOT NULL DEFAULT 'not_indexed'")
+    _add_column_if_missing(connection, "notebook_sources", "indexing_error", "TEXT")
+    _add_column_if_missing(connection, "notebook_sources", "chunk_count", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "embedding_batches", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "embedding_duration_ms", "REAL")
+    _add_column_if_missing(connection, "notebook_sources", "indexing_duration_ms", "REAL")
+    _add_column_if_missing(connection, "notebook_sources", "indexed_at", "TEXT")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

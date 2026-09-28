@@ -100,6 +100,15 @@ class NotebookRepository:
                 canonical_character_count=?, error_code=?, error_message=?, updated_at=? WHERE id=?""",
                 (status, adapter, duration, character_count, error_code, error_message, self.now(), source_id))
 
+    def set_indexing_status(self, source_id: str, status: str, error: str | None = None,
+                            chunk_count: int | None = None, embedding_batches: int | None = None,
+                            embedding_duration_ms: float | None = None, indexing_duration_ms: float | None = None) -> None:
+        with self.connection_factory() as connection:
+            connection.execute("""UPDATE notebook_sources SET indexing_status=?, indexing_error=?, chunk_count=?,
+                embedding_batches=?, embedding_duration_ms=?, indexing_duration_ms=?, indexed_at=?, updated_at=? WHERE id=?""",
+                (status, error, chunk_count, embedding_batches, embedding_duration_ms, indexing_duration_ms,
+                 self.now() if status == "ready" else None, self.now(), source_id))
+
     def replace_canonical(self, source: sqlite3.Row, data: Any) -> dict[str, Any]:
         document_id = str(uuid.uuid4())
         timestamp = self.now()
@@ -107,24 +116,32 @@ class NotebookRepository:
             existing = connection.execute("SELECT id,created_at FROM canonical_documents WHERE source_id=?", (source["id"],)).fetchone()
             if existing:
                 document_id, created_at = existing["id"], existing["created_at"]
-                connection.execute("DELETE FROM canonical_documents WHERE id=?", (document_id,))
+                metadata = {**data.metadata, "source_type": data.source_type}
+                connection.execute("""UPDATE canonical_documents SET title=?,content=?,content_hash=?,content_type=?,
+                    language=?,metadata=?,updated_at=? WHERE id=?""", (data.title, data.content, data.content_hash,
+                    data.content_type, data.language, json.dumps(metadata), timestamp, document_id))
+                connection.execute("DELETE FROM canonical_spans WHERE document_id=?", (document_id,))
             else:
                 created_at = timestamp
-            connection.execute("""INSERT INTO canonical_documents
-                (id,notebook_id,source_id,title,content,content_hash,content_type,language,metadata,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (document_id, source["notebook_id"], source["id"], data.title,
-                data.content, data.content_hash, data.content_type, data.language, json.dumps(data.metadata), created_at, timestamp))
+                connection.execute("""INSERT INTO canonical_documents
+                    (id,notebook_id,source_id,title,content,content_hash,content_type,language,metadata,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (document_id, source["notebook_id"], source["id"], data.title,
+                    data.content, data.content_hash, data.content_type, data.language, json.dumps({**data.metadata, "source_type": data.source_type}), created_at, timestamp))
             connection.executemany("""INSERT INTO canonical_spans
                 (id,document_id,start_offset,end_offset,source_type,source_location) VALUES(?,?,?,?,?,?)""",
                 [(str(uuid.uuid4()), document_id, span.start_offset, span.end_offset, span.source_type, json.dumps(span.source_location)) for span in data.spans])
+            connection.execute("""UPDATE notebook_sources SET indexing_status='not_indexed', indexing_error=NULL,
+                chunk_count=NULL, embedding_batches=NULL, embedding_duration_ms=NULL, indexing_duration_ms=NULL,
+                indexed_at=NULL WHERE id=?""", (source["id"],))
             return self.canonical(source["notebook_id"], source["id"], connection=connection)
 
     def canonical(self, notebook_id: str, source_id: str, connection: sqlite3.Connection | None = None):
         owns_connection = connection is None
         connection = connection or self.connection_factory()
         try:
-            row = connection.execute("""SELECT * FROM canonical_documents
-                WHERE notebook_id=? AND source_id=?""", (notebook_id, source_id)).fetchone()
+            row = connection.execute("""SELECT canonical_documents.*, notebook_sources.type AS source_type
+                FROM canonical_documents JOIN notebook_sources ON notebook_sources.id=canonical_documents.source_id
+                WHERE canonical_documents.notebook_id=? AND canonical_documents.source_id=?""", (notebook_id, source_id)).fetchone()
             if row is None:
                 return None
             spans = connection.execute("""SELECT id,start_offset,end_offset,source_type,source_location
