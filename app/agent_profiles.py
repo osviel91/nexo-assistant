@@ -116,6 +116,7 @@ class AgentProfileRepository:
 
     def delete(self, profile_id: str) -> bool:
         with self.connection_factory() as connection:
+            connection.execute("UPDATE conversations SET agent_profile_id=NULL WHERE agent_profile_id=?", (profile_id,))
             cursor = connection.execute("DELETE FROM agent_profiles WHERE id=?", (profile_id,))
             return cursor.rowcount > 0
 

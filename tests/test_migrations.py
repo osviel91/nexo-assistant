@@ -19,9 +19,10 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 3)
+            self.assertEqual(version_count, 4)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
+            self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
 
     def test_existing_database_gets_missing_columns_without_replacing_data(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -33,7 +34,7 @@ class MigrationTests(unittest.TestCase):
                 CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, provider_id TEXT, model_id TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
                 INSERT INTO providers VALUES ('p', 'Existing', 'http://provider', '', 'now');
-                INSERT INTO conversations VALUES ('c', 'Conversation', 'now', 'now');
+                INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('c', 'Conversation', 'now', 'now');
                 INSERT INTO messages VALUES ('m', 'c', 'user', 'keep', NULL, NULL, '[]', 'now');
                 """)
                 migrate(connection)

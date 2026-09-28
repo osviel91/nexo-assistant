@@ -43,10 +43,11 @@
     <main class="main-panel">
       <header class="topbar">
         <button class="icon-button menu-button" id="open-sidebar" aria-label="Abrir navegación" aria-expanded="false">☰</button>
-        <div class="topbar-center">
-          <strong class="top-title">Nexo</strong>
-          <label class="model-picker"><span class="sr-only">Modelo activo</span><select id="model-select" aria-label="Modelo activo"><option value="">Añade un proveedor</option></select><span aria-hidden="true">⌄</span></label>
-        </div>
+         <div class="topbar-center">
+           <strong class="top-title">Nexo</strong>
+           <label class="model-picker"><span class="sr-only">Modelo activo</span><select id="model-select" aria-label="Modelo activo"><option value="">Añade un proveedor</option></select><span aria-hidden="true">⌄</span></label>
+         </div>
+         <button class="agent-picker" id="agent-picker" aria-haspopup="dialog" aria-expanded="false"><span class="agent-picker-label">AGENT</span><strong id="agent-picker-name">Nexo</strong><span aria-hidden="true">⌄</span></button>
         <button class="icon-button new-chat-top" id="new-chat-top" title="Nuevo chat" aria-label="Nuevo chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
       </header>
 
@@ -69,11 +70,12 @@
         <div class="composer">
           <textarea id="prompt" rows="1" placeholder="Pregunta lo que quieras..." aria-label="Mensaje"></textarea>
           <div class="composer-tools">
-            <div class="composer-left">
+             <div class="composer-left">
               <button class="tool-button" id="attach-button" title="Adjuntar archivo" aria-label="Adjuntar archivo" hidden><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m8 12 5.5-5.5a3.5 3.5 0 0 1 5 5L11 19a5 5 0 0 1-7-7l7-7"/></svg></button>
               <input id="file-input" type="file" accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log" multiple hidden>
               <span class="capability-chip" id="web-chip" hidden><svg class="chip-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2 2.2 3 4.9 3 8s-1 5.8-3 8c-2-2.2-3-4.9-3-8s1-5.8 3-8Z"/></svg>Web</span>
-              <span class="capability-chip" id="tools-chip" hidden><svg class="chip-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6 4 4M5 19l5.5-5.5M15 5a4 4 0 0 0 4 4l-5 5-4-4 5-5Z"/></svg>Tools</span>
+               <span class="capability-chip" id="tools-chip" hidden><svg class="chip-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6 4 4M5 19l5.5-5.5M15 5a4 4 0 0 0 4 4l-5 5-4-4 5-5Z"/></svg>Tools</span>
+               <button class="capability-chip composer-agent" id="composer-agent" type="button">Nexo</button>
             </div>
             <div class="composer-right"><span class="enter-hint">Enter para enviar</span><button class="send-button" id="send-button" aria-label="Enviar">↑</button></div>
           </div>
@@ -89,7 +91,7 @@
        <nav class="lab-tabs" id="lab-tabs" aria-label="Secciones del laboratorio"></nav>
        <div id="lab-content"></div>
     </div>
-    <div class="surface settings-surface" id="settings-surface" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+         <div class="surface settings-surface" id="settings-surface" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="surface-header"><div><span class="eyebrow">PREFERENCIAS</span><h2 id="settings-title">Settings</h2><p>Configura cómo se conecta Nexo a tus modelos.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
        <section class="appearance-settings" aria-labelledby="appearance-title">
          <div class="settings-section-heading"><div><span class="eyebrow">APPEARANCE</span><h3 id="appearance-title">Interface</h3></div><span class="settings-hint">Saved on this device</span></div>
@@ -108,8 +110,23 @@
         <div class="form-actions"><button type="button" class="text-button" id="cancel-edit" hidden>Cancelar</button><button type="submit" class="primary-button" id="save-provider">Guardar proveedor</button></div>
       </form>
       <p class="surface-foot">Las claves no se envían al navegador durante las consultas.</p>
-    </div>
-  </section>
+       </div>
+     <div class="surface agents-surface" id="agents-surface" hidden role="dialog" aria-modal="true" aria-labelledby="agents-title">
+       <div class="surface-header"><div><span class="eyebrow">AGENTS</span><h2 id="agents-title">Choose an agent</h2><p>Profiles change how future messages run. Nexo keeps the default assistant behavior.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
+       <div id="agent-list" class="agent-list"></div>
+       <form id="agent-form" class="agent-form" hidden>
+         <h3 id="agent-form-title">New agent</h3><input id="agent-id" type="hidden">
+         <label>Name<input id="agent-name" required maxlength="120"></label>
+         <label>Description<input id="agent-description" maxlength="2000"></label>
+         <label>Model<select id="agent-model" required></select></label>
+         <label>System instructions <span class="optional">Advanced configuration, not a runtime trace</span><textarea id="agent-instructions" rows="5" maxlength="20000"></textarea></label>
+         <label>Temperature<input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Default"></label>
+         <fieldset class="agent-tools"><legend>Tools</legend><div id="agent-tool-options"></div></fieldset>
+         <div class="form-actions"><button type="button" class="text-button" id="cancel-agent-edit">Cancel</button><button type="submit" class="primary-button">Save agent</button></div>
+       </form>
+       <div class="form-actions"><button type="button" class="primary-button" id="new-agent">New agent</button></div>
+     </div>
+   </section>
   <div class="toast" id="toast" role="status"></div>
   <script type="module" src="/assets/app.js"></script>
 </body>

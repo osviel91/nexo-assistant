@@ -1,7 +1,7 @@
 import { renderMarkdown } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], agents: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -67,6 +67,51 @@ async function loadTools() {
   renderLab();
 }
 
+async function loadAgents() { state.agents = await api('/agents'); renderAgentPicker(); renderAgentList(); }
+
+function currentAgent() { return state.agents.find((agent) => agent.id === state.agentProfileId); }
+function renderAgentPicker() {
+  const agent = currentAgent();
+  $('#agent-picker-name').textContent = agent?.name || 'Nexo';
+  $('#composer-agent').textContent = agent?.name || 'Nexo';
+}
+function renderAgentList() {
+  const items = [{ id: '', name: 'Nexo', description: 'General assistant' }, ...state.agents];
+  $('#agent-list').innerHTML = `${items.map((agent) => {
+    const stored = Boolean(agent.id);
+    const warning = stored && !agent.model_available ? '<span class="status status-degraded">Model unavailable</span>' : stored && agent.unavailable_tools?.length ? `<span class="status status-degraded">${agent.unavailable_tools.length} tool${agent.unavailable_tools.length > 1 ? 's' : ''} unavailable</span>` : '';
+    return `<div class="agent-option ${(!state.agentProfileId && !stored) || agent.id === state.agentProfileId ? 'selected' : ''}" data-agent-id="${escapeHtml(agent.id)}" role="button" tabindex="0"><span><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.description || '')}</small>${warning}</span>${stored ? `<span class="agent-actions"><span class="agent-tools-count">${agent.tool_names.length} tools</span><button type="button" data-edit-agent="${escapeHtml(agent.id)}">Edit</button><button type="button" data-delete-agent="${escapeHtml(agent.id)}">Delete</button></span>` : '<span class="agent-check">✓</span>'}</div>`;
+  }).join('')}<p class="agent-help">Select Nexo to clear this conversation's binding.</p>`;
+  $('#agent-list').querySelectorAll('[data-agent-id]').forEach((button) => { button.onclick = () => selectAgent(button.dataset.agentId || null); });
+  $('#agent-list').querySelectorAll('[data-edit-agent]').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); editAgent(button.dataset.editAgent); }; });
+  $('#agent-list').querySelectorAll('[data-delete-agent]').forEach((button) => { button.onclick = async (event) => { event.stopPropagation(); await deleteAgent(button.dataset.deleteAgent); }; });
+}
+async function selectAgent(id) {
+  state.agentProfileId = id || null;
+  renderAgentPicker(); renderAgentList();
+  if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
+  closeSurface();
+}
+function renderAgentModels(selected = '') {
+  $('#agent-model').innerHTML = allModels().map(({ provider, model }) => `<option value="${escapeHtml(provider.id)}::${escapeHtml(model.id)}" ${`${provider.id}::${model.id}` === selected ? 'selected' : ''}>${escapeHtml(provider.name)} / ${escapeHtml(model.id)}</option>`).join('') || '<option value="">Configure a provider first</option>';
+}
+function renderAgentTools(selected = []) {
+  const groups = [['Native', state.tools.filter((tool) => tool.source !== 'mcp')], ['MCP', state.tools.filter((tool) => tool.source === 'mcp')]];
+  const known = new Set(state.tools.map((tool) => tool.name));
+  const missing = selected.filter((name) => !known.has(name));
+  $('#agent-tool-options').innerHTML = groups.map(([title, tools]) => tools.length ? `<div class="agent-tool-group"><strong>${title}</strong>${tools.map((tool) => `<label><input type="checkbox" value="${escapeHtml(tool.name)}" ${selected.includes(tool.name) ? 'checked' : ''}>${escapeHtml(tool.name)}</label>`).join('')}</div>` : '').join('') + (missing.length ? `<div class="agent-tool-group"><strong>Unavailable</strong>${missing.map((name) => `<label class="unavailable-tool"><input type="checkbox" value="${escapeHtml(name)}" checked disabled>⚠ ${escapeHtml(name)} — unavailable</label>`).join('')}</div>` : '') || '<span class="optional">No tools available</span>';
+}
+function editAgent(id = '') {
+  const agent = state.agents.find((item) => item.id === id);
+  $('#agent-form').hidden = false; $('#new-agent').hidden = true;
+  $('#agent-id').value = agent?.id || ''; $('#agent-name').value = agent?.name || ''; $('#agent-description').value = agent?.description || '';
+  renderAgentModels(agent ? `${agent.provider_id}::${agent.model_id}` : ''); $('#agent-instructions').value = agent?.system_instructions || '';
+  $('#agent-temperature').value = agent?.model_parameters?.temperature ?? ''; renderAgentTools(agent?.tool_names || []);
+  $('#agent-form-title').textContent = agent ? 'Edit agent' : 'New agent';
+}
+function resetAgentForm() { $('#agent-form').hidden = true; $('#new-agent').hidden = false; }
+async function deleteAgent(id) { const agent = state.agents.find((item) => item.id === id); if (!agent || !confirm(`Delete ${agent.name}?`)) return; try { await api(`/agents/${id}`, { method: 'DELETE' }); if (state.agentProfileId === id) state.agentProfileId = null; await loadAgents(); renderAgentPicker(); if (state.conversationId) await openChat(state.conversationId); toast('Agent deleted'); } catch (error) { toast(error.message); } }
+
 async function loadShadow() {
   state.shadow = await api('/lab/shadow?limit=20');
   renderLab();
@@ -104,6 +149,7 @@ function beginChat() {
   state.conversationId = null;
   state.messages = [];
   state.attachments = [];
+  state.agentProfileId = null;
   $('#messages').innerHTML = '';
   $('#welcome').hidden = false;
   renderAttachments();
@@ -130,6 +176,7 @@ async function openChat(id) {
   try {
     const data = await api(`/conversations/${id}`);
     state.conversationId = id;
+    state.agentProfileId = data.conversation.agent_profile_id || null;
     state.messages = data.messages;
     $('#welcome').hidden = true;
     renderMessages();
@@ -148,7 +195,7 @@ async function send() {
   const text = $('#prompt').value.trim();
   const choice = selected();
   if (!text && !state.attachments.length) return;
-  if (!choice.provider) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
+   if (!choice.provider && !state.agentProfileId) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
   state.busy = true;
   $('#send-button').disabled = true;
   $('#welcome').hidden = true;
@@ -163,7 +210,7 @@ async function send() {
   renderMessages();
   let answer = '';
   try {
-    const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: choice.provider.id, model_id: choice.model, content: text, attachments }) });
+    const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: state.conversationId, provider_id: choice.provider?.id || '', model_id: choice.model || '', content: text, attachments, agent_profile_id: state.agentProfileId }) });
     if (!response.ok) throw Error((await response.text()).slice(0, 300));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -202,7 +249,9 @@ function openSurface(name) {
   $('#surface-backdrop').hidden = false;
   $('#lab-surface').hidden = name !== 'lab';
   $('#settings-surface').hidden = name !== 'settings';
+  $('#agents-surface').hidden = name !== 'agents';
   if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
+  if (name === 'agents') { resetAgentForm(); renderAgentList(); }
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -293,11 +342,24 @@ $('#provider-form').onsubmit = async (event) => {
   try { await api(`/providers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); resetForm(); await loadProviders(); toast(id ? 'Proveedor actualizado' : 'Proveedor añadido'); } catch (error) { toast(error.message); }
 };
 
+$('#agent-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const id = $('#agent-id').value;
+  const [provider_id, model_id] = $('#agent-model').value.split('::');
+  const temperature = $('#agent-temperature').value;
+  const body = { name: $('#agent-name').value, description: $('#agent-description').value, provider_id, model_id, system_instructions: $('#agent-instructions').value, model_parameters: temperature === '' ? {} : { temperature: Number(temperature) }, tool_names: [...$('#agent-tool-options').querySelectorAll('input:checked')].map((input) => input.value) };
+  try { await api(`/agents${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); resetAgentForm(); await loadAgents(); toast(id ? 'Agent updated' : 'Agent created'); } catch (error) { toast(error.message); }
+};
+
 $('#model-select').onchange = updateComposerModel;
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
+$('#agent-picker').onclick = () => { openSurface('agents'); $('#agent-picker').setAttribute('aria-expanded', 'true'); };
+$('#composer-agent').onclick = () => openSurface('agents');
 $('#open-lab').onclick = () => { closeSidebar(); openSurface('lab'); };
 $('#new-chat').onclick = beginChat;
+$('#new-agent').onclick = () => editAgent();
+$('#cancel-agent-edit').onclick = resetAgentForm;
 $('#new-chat-top').onclick = beginChat;
 $('#send-button').onclick = send;
 $('#prompt').onkeydown = (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
@@ -317,4 +379,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadTools(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadTools(), loadAgents(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));

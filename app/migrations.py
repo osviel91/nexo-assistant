@@ -98,7 +98,12 @@ def _migration_3(connection: sqlite3.Connection) -> None:
     """)
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3))
+def _migration_4(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "conversations", "agent_profile_id", "TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_agent_profile ON conversations(agent_profile_id)")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

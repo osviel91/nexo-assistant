@@ -119,6 +119,10 @@ class ChatIn(BaseModel):
     agent_profile_id: str | None = None
 
 
+class ConversationPatch(BaseModel):
+    agent_profile_id: str | None = None
+
+
 class AgentProfileIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
@@ -405,7 +409,7 @@ def delete_model(pid: str, model_id: str):
 
 @app.get("/api/conversations")
 def conversations():
-    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at FROM conversations ORDER BY updated_at DESC").fetchall()
+    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,agent_profile_id FROM conversations ORDER BY updated_at DESC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -424,31 +428,48 @@ def delete_conversation(cid: str):
     return {"ok": True}
 
 
+@app.patch("/api/conversations/{cid}")
+def update_conversation(cid: str, item: ConversationPatch):
+    with db() as c:
+        if c.execute("SELECT 1 FROM conversations WHERE id=?", (cid,)).fetchone() is None:
+            raise HTTPException(404, "Conversation not found")
+        if item.agent_profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (item.agent_profile_id,)).fetchone() is None:
+            raise HTTPException(404, "agent_profile_not_found")
+        c.execute("UPDATE conversations SET agent_profile_id=?,updated_at=? WHERE id=?", (item.agent_profile_id, now(), cid))
+        return dict(c.execute("SELECT id,title,created_at,updated_at,agent_profile_id FROM conversations WHERE id=?", (cid,)).fetchone())
+
+
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
     profile_config = None
-    if req.agent_profile_id:
-        try:
-            profile_config = agent_profile_resolver.resolve(req.agent_profile_id, req.temperature)
-        except ProfileNotFoundError:
-            raise HTTPException(404, "agent_profile_not_found")
-        except ProfileResolutionError as error:
-            raise HTTPException(400, error.code)
-    selected_provider_id = profile_config.provider_id if profile_config else req.provider_id
-    selected_model_id = profile_config.model_id if profile_config else req.model_id
     with db() as c:
+        cid = req.conversation_id or str(uuid.uuid4())
+        conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+        if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
+        # Omitted means inherit; explicit null is the normal Nexo selection.
+        profile_id = req.agent_profile_id if "agent_profile_id" in req.model_fields_set else (conv["agent_profile_id"] if conv else None)
+        if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
+            raise HTTPException(404, "agent_profile_not_found")
+        if not conv:
+            title = req.content.strip().replace("\n", " ")[:60] or "New chat"
+            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id) VALUES(?,?,?,?,?)", (cid, title, now(), now(), profile_id))
+        elif "agent_profile_id" in req.model_fields_set:
+            c.execute("UPDATE conversations SET agent_profile_id=?,updated_at=? WHERE id=?", (profile_id, now(), cid))
+        if profile_id:
+            try:
+                profile_config = agent_profile_resolver.resolve(profile_id, req.temperature)
+            except ProfileNotFoundError:
+                raise HTTPException(404, "agent_profile_not_found")
+            except ProfileResolutionError as error:
+                raise HTTPException(400, error.code)
+        selected_provider_id = profile_config.provider_id if profile_config else req.provider_id
+        selected_model_id = profile_config.model_id if profile_config else req.model_id
         provider = c.execute("SELECT * FROM providers WHERE id=?", (selected_provider_id,)).fetchone()
         if not provider: raise HTTPException(404, "Provider not found")
         model = c.execute("SELECT * FROM models WHERE provider_id=? AND id=?", (selected_provider_id, selected_model_id)).fetchone()
         if not model:
             raise HTTPException(400, "agent_model_unavailable" if profile_config else "Choose a model configured for this provider")
-        cid = req.conversation_id or str(uuid.uuid4())
-        conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
-        if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
-        if not conv:
-            title = req.content.strip().replace("\n", " ")[:60] or "New chat"
-            c.execute("INSERT INTO conversations VALUES(?,?,?,?)", (cid, title, now(), now()))
         history = c.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)).fetchall()
         user_content: Any = req.content
         if req.attachments:

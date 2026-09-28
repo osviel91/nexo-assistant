@@ -14,7 +14,7 @@ class RuntimeObservabilityTests(unittest.TestCase):
         main.DB_PATH = Path(self.directory.name) / "runtime.sqlite3"
         main.startup()
         with main.db() as connection:
-            connection.execute("INSERT INTO conversations VALUES(?,?,?,?)", ("c", "Test", main.now(), main.now()))
+            connection.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)", ("c", "Test", main.now(), main.now()))
             connection.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", ("r", "c", "m", main.now(), "started", "Cyber-Tiel", json.dumps({"provider": "local"})))
 
     def tearDown(self):
