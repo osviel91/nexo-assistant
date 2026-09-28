@@ -71,7 +71,14 @@ async function loadProviders() {
   renderProviderList();
   renderLab();
 }
-async function loadPreferences() { state.preferences = await api('/preferences'); }
+async function loadPreferences() {
+  try {
+    state.preferences = await api('/preferences');
+  } catch {
+    // Preferences are optional; they must not prevent the main chat from loading.
+    state.preferences = {};
+  }
+}
 
 async function loadKnowledge() {
   state.knowledge = await api('/settings/embeddings');
@@ -602,4 +609,9 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-(async () => { await loadPreferences(); await Promise.all([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]); })().catch((error) => toast(error.message));
+(async () => {
+  await loadPreferences();
+  const results = await Promise.allSettled([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]);
+  const failure = results.find((result) => result.status === 'rejected');
+  if (failure) toast(failure.reason?.message || 'No se pudieron cargar todos los datos.');
+})();
