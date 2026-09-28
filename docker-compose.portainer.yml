@@ -19,6 +19,7 @@ services:
       NEXO_ARBITER_API_KEY: "${NEXO_ARBITER_API_KEY:-}"
       NEXO_DECISION_MODEL: "${NEXO_DECISION_MODEL:-jev-latest}"
       NEXO_DECISION_TIMEOUT: "${NEXO_DECISION_TIMEOUT:-10}"
+      NEXO_DECISION_SHADOW: "${NEXO_DECISION_SHADOW:-false}"
     volumes:
       - nexo-data:/data
     mem_limit: ${NEXO_MEMORY_LIMIT:-768m}
