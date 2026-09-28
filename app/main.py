@@ -30,6 +30,7 @@ from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor
 from app.runtime_trace import RuntimeEventSink, safe_metadata
+from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileService, ProfileNotFoundError, ProfileValidationError
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,9 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_registry.tool_catalog)
+
+
 @app.on_event("startup")
 def startup() -> None:
     with db() as c:
@@ -113,6 +117,37 @@ class ChatIn(BaseModel):
     temperature: float | None = None
 
 
+class AgentProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    provider_id: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    system_instructions: str = Field(default="", max_length=20000)
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    tool_names: list[str] = Field(default_factory=list)
+
+
+class AgentProfilePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    provider_id: str | None = None
+    model_id: str | None = None
+    system_instructions: str | None = Field(default=None, max_length=20000)
+    model_parameters: dict[str, Any] | None = None
+    enabled: bool | None = None
+    tool_names: list[str] | None = None
+
+
+def profile_input(item: AgentProfileIn) -> AgentProfileInput:
+    return AgentProfileInput(item.name, item.description, item.provider_id, item.model_id, item.system_instructions,
+                             item.model_parameters, item.enabled, tuple(item.tool_names))
+
+
+def profile_error(error: Exception) -> HTTPException:
+    return HTTPException(404 if isinstance(error, ProfileNotFoundError) else 400, str(error))
+
+
 def provider_dict(row: sqlite3.Row) -> dict[str, Any]:
     with db() as c:
         models = c.execute("SELECT id,label,capabilities FROM models WHERE provider_id=? ORDER BY label", (row["id"],)).fetchall()
@@ -135,6 +170,44 @@ def modules():
 def tools():
     """Return the registered tools without exposing executable handlers."""
     return module_registry.tool_catalog()
+
+
+@app.get("/api/agents")
+def list_agents():
+    return agent_profiles.list()
+
+
+@app.post("/api/agents")
+def create_agent(item: AgentProfileIn):
+    try:
+        return agent_profiles.create(profile_input(item))
+    except (ProfileNotFoundError, ProfileValidationError) as error:
+        raise profile_error(error)
+
+
+@app.get("/api/agents/{profile_id}")
+def get_agent(profile_id: str):
+    try:
+        return agent_profiles.get(profile_id)
+    except ProfileNotFoundError as error:
+        raise profile_error(error)
+
+
+@app.patch("/api/agents/{profile_id}")
+def update_agent(profile_id: str, item: AgentProfilePatch):
+    try:
+        return agent_profiles.update(profile_id, item.model_dump(exclude_unset=True))
+    except (ProfileNotFoundError, ProfileValidationError) as error:
+        raise profile_error(error)
+
+
+@app.delete("/api/agents/{profile_id}")
+def delete_agent(profile_id: str):
+    try:
+        agent_profiles.delete(profile_id)
+    except ProfileNotFoundError as error:
+        raise profile_error(error)
+    return {"ok": True}
 
 
 @app.get("/api/lab/shadow")

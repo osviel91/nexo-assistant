@@ -19,7 +19,9 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 2)
+            self.assertEqual(version_count, 3)
+            self.assertIn("agent_profiles", tables)
+            self.assertIn("agent_profile_tools", tables)
 
     def test_existing_database_gets_missing_columns_without_replacing_data(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -31,12 +33,18 @@ class MigrationTests(unittest.TestCase):
                 CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, provider_id TEXT, model_id TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
                 INSERT INTO providers VALUES ('p', 'Existing', 'http://provider', '', 'now');
+                INSERT INTO conversations VALUES ('c', 'Conversation', 'now', 'now');
+                INSERT INTO messages VALUES ('m', 'c', 'user', 'keep', NULL, NULL, '[]', 'now');
                 """)
                 migrate(connection)
                 migrate(connection)
                 model_columns = {row[1] for row in connection.execute("PRAGMA table_info(models)")}
                 message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
                 provider = connection.execute("SELECT name FROM providers WHERE id='p'").fetchone()
+                conversation = connection.execute("SELECT title FROM conversations WHERE id='c'").fetchone()
+                message = connection.execute("SELECT content FROM messages WHERE id='m'").fetchone()
             self.assertIn("capabilities", model_columns)
             self.assertIn("sources", message_columns)
             self.assertEqual(provider[0], "Existing")
+            self.assertEqual(conversation[0], "Conversation")
+            self.assertEqual(message[0], "keep")

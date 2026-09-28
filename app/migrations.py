@@ -75,7 +75,30 @@ def _migration_2(connection: sqlite3.Connection) -> None:
     """)
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2))
+def _migration_3(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS agent_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      system_instructions TEXT NOT NULL DEFAULT '',
+      model_parameters TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_profile_tools (
+      agent_profile_id TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+      tool_name TEXT NOT NULL,
+      PRIMARY KEY(agent_profile_id, tool_name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_profiles_name ON agent_profiles(name);
+    """)
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3))
 
 
 def migrate(connection: sqlite3.Connection) -> None:
