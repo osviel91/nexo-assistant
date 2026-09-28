@@ -196,8 +196,8 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 [data-ui="developer"] .search-box { height: 36px; }
 [data-ui="developer"] .conversation-item { padding-block: 8px; }
 [data-ui="developer"] .conversation-item.selected { border-left: 2px solid var(--accent); border-radius: 0 var(--radius-xs) var(--radius-xs) 0; }
-[data-ui="developer"] .topbar { height: 64px; justify-content: flex-start; }
-[data-ui="developer"] .topbar-center { align-items: flex-start; margin-left: 4px; }
+[data-ui="developer"] .topbar { height: 64px; justify-content: center; }
+[data-ui="developer"] .topbar-center { align-items: center; margin-left: 0; }
 [data-ui="developer"] .model-picker select { text-align: left; }
 [data-ui="developer"] .welcome-logo { box-shadow: none; }
 [data-ui="developer"] .welcome h1 { font-family: var(--font-ui); font-size: clamp(24px, 3vw, 34px); letter-spacing: -.06em; }
