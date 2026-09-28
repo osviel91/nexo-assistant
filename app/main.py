@@ -737,6 +737,7 @@ async def chat(req: ChatIn):
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": len(grounded_context.retrieval_results),
                                              "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                             "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
                                              "context_chars": grounded_context.context_chars, "context_truncated": grounded_context.truncated}
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
                     except (RetrievalError, ValueError, EmbeddingError):
