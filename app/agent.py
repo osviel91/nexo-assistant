@@ -65,6 +65,7 @@ class AgentRuntime:
                                **(request.runtime_snapshot or {}),
                                **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
             reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
+            yield {"activity": {"type": "REASON", "status": "running", "round": tool_rounds + 1}}
             definitions = request.effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
@@ -138,6 +139,7 @@ class AgentRuntime:
                 tool_context = ToolExecutionContext(request.context.conversation_id, request.context.provider_id, request.context.model_id, tool_rounds, request.context.run_id)
                 started = time.monotonic()
                 event_id = request.event_sink.start_event("ACT", call["name"], {"tool": call["name"], "round": tool_rounds})
+                yield {"activity": {"type": "ACT", "status": "running", "tool": call["name"], "round": tool_rounds}}
                 status = "ok"
                 try:
                     arguments = json.loads(call["arguments"] or "{}")

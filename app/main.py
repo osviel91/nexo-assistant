@@ -728,6 +728,7 @@ async def chat(req: ChatIn):
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                 model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id)
                 if notebook_id:
+                    yield "data: " + json.dumps({"activity": {"type": "RETRIEVE", "status": "running"}}) + "\n\n"
                     retrieve_started = asyncio.get_running_loop().time()
                     retrieve_event = event_sink.start_event("RETRIEVE", "notebook retrieval", {"notebook_id": notebook_id, "retrieval_count": 0})
                     try:
@@ -767,6 +768,10 @@ async def chat(req: ChatIn):
                     if "trace" in event:
                         trace = event["trace"]
                         _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))
+                        yield "data: " + json.dumps({"trace": trace}) + "\n\n"
+                        continue
+                    if "activity" in event:
+                        yield "data: " + json.dumps({"activity": event["activity"]}) + "\n\n"
                         continue
                     if "delta" in event:
                         yield "data: " + json.dumps({"delta": event["delta"]}) + "\n\n"

@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { effectiveMessageIdentity } from './identity.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null };
+const state = { providers: [], agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -215,9 +215,33 @@ function renderMessages() {
     const runtime = message.runtime || {};
     const metrics = message.role === 'assistant' && (runtime.tokens_per_second != null || runtime.completion_tokens != null || runtime.context_used_tokens != null)
       ? `<div class="message-metrics">${runtime.tokens_per_second != null ? `${escapeHtml(runtime.tokens_per_second)} tok/s` : ''}${runtime.completion_tokens != null ? ` · ${escapeHtml(runtime.completion_tokens)} tok` : ''}${runtime.context_used_tokens != null && runtime.context_window != null ? ` · ctx ${escapeHtml(runtime.context_used_tokens)}/${escapeHtml(runtime.context_window)}` : ''}</div>` : '';
-    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${metrics}${attachments}${sourceList}${notebookList}</div></article>`;
+     const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
+     return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${activity}${metrics}${attachments}${sourceList}${notebookList}</div></article>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
+}
+
+function activityLabel(activity) {
+  if (activity.type === 'RETRIEVE') return 'Consultando el notebook';
+  if (activity.type === 'ACT') return `Usando herramienta ${activity.tool || ''}`.trim();
+  return 'Procesando respuesta';
+}
+
+function updateStreamingAnswer(answer) {
+  const content = $('#messages').querySelector('.message:last-child .message-content');
+  if (content) content.innerHTML = renderMarkdown(answer);
+  $('#messages').scrollTop = $('#messages').scrollHeight;
+}
+
+function updateStreamingActivity(activity) {
+  state.activity = activity;
+  const message = state.messages.at(-1);
+  if (!message || message.role !== 'assistant') return;
+  const body = $('#messages').querySelector('.message:last-child .message-body');
+  if (!body) return;
+  let element = body.querySelector('.message-activity');
+  if (!element) { element = document.createElement('div'); element.className = 'message-activity'; body.append(element); }
+  element.innerHTML = `<span class="activity-dot"></span>${escapeHtml(activityLabel(activity))}`;
 }
 
 async function openChat(id) {
@@ -250,6 +274,7 @@ async function send() {
   if (!text && !state.attachments.length) return;
    if (!effectiveChoice.provider && !state.agentProfileId) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
   state.busy = true;
+  state.activity = { type: 'REASON', status: 'running' };
   $('#send-button').disabled = true;
   $('#welcome').hidden = true;
   state.messages.push({ role: 'user', content: text, attachments: state.attachments.slice(), model_id: effectiveChoice.model });
@@ -279,9 +304,10 @@ async function send() {
         if (!line) continue;
         const data = JSON.parse(line.slice(6));
         if (data.error) throw Error(data.error);
-        if (data.status) toast(data.message);
-        if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; renderMessages(); }
-        if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
+         if (data.status) toast(data.message);
+         if (data.activity) updateStreamingActivity(data.activity);
+         if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; updateStreamingAnswer(answer); }
+         if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
       }
       if (done) break;
     }
@@ -292,6 +318,7 @@ async function send() {
     renderMessages();
     toast(error.message || 'No se pudo completar la respuesta.');
   } finally {
+    state.activity = null;
     state.busy = false;
     $('#send-button').disabled = false;
     $('#prompt').focus();

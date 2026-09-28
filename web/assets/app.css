@@ -91,6 +91,9 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 .config-inspector-button { margin-left: 8px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--muted); font: 9px var(--font-ui); }
 .config-inspector-button:hover { color: var(--text); border-color: var(--accent); }
 .message-metrics { margin-top: 7px; color: var(--muted); font: 10px var(--font-ui); }
+.message-activity { display: inline-flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--muted); font: 10px var(--font-ui); }
+.activity-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: activity-pulse 1.1s ease-in-out infinite; }
+@keyframes activity-pulse { 50% { opacity: .35; transform: scale(.75); } }
 .config-content { margin-top: 24px; }
 .config-block { padding: 14px 0; border-top: 1px solid var(--border); }
 .config-block:first-child { border-top: 0; }
