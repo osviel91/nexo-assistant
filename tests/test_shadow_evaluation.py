@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.decision.models import DecisionRequest
-from app.shadow_evaluation import WORDING_VARIANTS, evaluation_request, latency_summary, score_cases
+from app.shadow_evaluation import DIAGNOSTIC_MODES, DIAGNOSTIC_STATE_VARIANTS, WORDING_VARIANTS, diagnostic_request, evaluation_request, latency_summary, score_cases
 
 
 class ShadowEvaluationTests(unittest.TestCase):
@@ -39,6 +39,19 @@ class ShadowEvaluationTests(unittest.TestCase):
             import asyncio
             asyncio.run(runtime.decide(DecisionRequest(state={"message": "x"}, questions=[{"id": "check", "type": "boolean", "statement": "x"}])))
         self.assertEqual(post.call_args.kwargs["json"]["model"], "laya-english")
+
+    def test_diagnostic_requests_keep_production_wording_and_select_questions(self):
+        for mode, expected in (("batch-current", {"needs_web", "needs_tools", "task_type"}), ("needs-web-only", {"needs_web"}), ("needs-tools-only", {"needs_tools"})):
+            request = diagnostic_request("x", ["web_search"], mode, "production-state")
+            self.assertEqual({question.id for question in request.questions}, expected)
+            self.assertEqual(request.questions[0].statement, "Would this request materially benefit from current or external information obtained through web search?" if "needs_web" in expected else "Would solving this request materially benefit from using one of the available agent tools?")
+            self.assertEqual(request.state, {"message": "x", "available_tools": ["web_search"]})
+        self.assertEqual(set(DIAGNOSTIC_MODES), {"batch-current", "needs-web-only", "needs-tools-only"})
+        self.assertEqual(set(DIAGNOSTIC_STATE_VARIANTS), {"production-state", "message-only"})
+
+    def test_diagnostic_message_only_state_has_no_tools(self):
+        request = diagnostic_request("x", ["web_search"], "needs-web-only", "message-only")
+        self.assertEqual(request.state, {"message": "x"})
 
     def test_scores_booleans_tasks_and_confidence(self):
         cases = [{"id": "web", "expected": {"needs_web": True}}, {"id": "code", "expected": {"task_type": "coding"}}]

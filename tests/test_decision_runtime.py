@@ -250,8 +250,14 @@ class DecisionRuntimeTests(unittest.TestCase):
         provider = ArbiterDecisionProvider("http://arbiter:8000", "", 1, client_factory=lambda **_: FakeHttpClient(FakeResponse(raw), calls))
         asyncio.run(provider.decide(req))
         questions = calls[0][3]["questions"]
-        self.assertEqual(questions["task_type"]["criteria"], ["research", "coding"])
+        self.assertEqual(questions["task_type"]["criteria"], {"research": None, "coding": None})
         self.assertEqual(questions["complexity"]["criteria"], ["simple", "complex"])
+
+    def test_choice_criteria_preserve_rubrics_and_order(self):
+        question = {"id": "kind", "type": "choice", "statement": "Which?", "options": {"a": "First", "b": "Second"}}
+        payload = ArbiterDecisionProvider._question_payload(request(question).questions[0])
+        self.assertEqual(list(payload["criteria"]), ["a", "b"])
+        self.assertEqual(payload["criteria"], {"a": "First", "b": "Second"})
 
     def test_metadata_is_safe_optional_and_unknown_fields_are_ignored(self):
         req = request({"id": "x", "type": "boolean", "statement": "x"})

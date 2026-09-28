@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+from typing import Callable
 
 from app.decision.models import DecisionAnswer, DecisionRequest, DecisionResult
 
@@ -14,12 +15,13 @@ class ArbiterError(Exception):
 class ArbiterDecisionProvider:
     name = "arbiter"
 
-    def __init__(self, url: str, api_key: str, timeout: float, model: str = "jev-latest", client_factory=httpx.AsyncClient) -> None:
+    def __init__(self, url: str, api_key: str, timeout: float, model: str = "jev-latest", client_factory=httpx.AsyncClient, raw_response_sink: Callable[[object], None] | None = None) -> None:
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.model = model
         self.client_factory = client_factory
+        self.raw_response_sink = raw_response_sink
 
     @property
     def endpoint(self) -> str:
@@ -50,6 +52,8 @@ class ArbiterDecisionProvider:
             payload = response.json()
         except (ValueError, TypeError) as exc:
             raise ArbiterError("decision_invalid_response") from exc
+        if self.raw_response_sink is not None:
+            self.raw_response_sink(payload)
         return self._parse_response(payload, request)
 
     async def check_available(self) -> bool:
@@ -71,7 +75,9 @@ class ArbiterDecisionProvider:
             # System One intentionally calls the boolean primitive "noul".
             return {"type": "noul", "instructions": question.statement}
         if question.type == "choice":
-            return {"type": "choice", "instructions": question.statement, "criteria": question.options}
+            options = question.options
+            criteria = options if isinstance(options, dict) else {str(option): None for option in options}
+            return {"type": "choice", "instructions": question.statement, "criteria": criteria}
         return {"type": "score", "instructions": question.statement, "criteria": question.scale}
 
     @staticmethod

@@ -8,6 +8,15 @@ from app.decision.providers.arbiter import ArbiterDecisionProvider
 from app.decision.runtime import DecisionRuntime
 
 
+DIAGNOSTIC_CASES = [
+    ("web-positive", "Busca en la web las noticias de hoy sobre OpenAI."),
+    ("web-negative", "Explícame conceptualmente la diferencia entre TCP y UDP."),
+    ("tool-positive", "Usa la herramienta de búsqueda web para consultar las noticias de hoy."),
+]
+DIAGNOSTIC_MODES = ("batch-current", "needs-web-only", "needs-tools-only")
+DIAGNOSTIC_STATE_VARIANTS = ("production-state", "message-only")
+
+
 WORDING_VARIANTS = {
     "baseline": {},
     "candidate-a": {
@@ -34,9 +43,26 @@ def evaluation_request(message: str, available_tools: list[str], wording: str):
     return request
 
 
-def evaluation_runtime(url: str, api_key: str, timeout: float, model: str) -> DecisionRuntime:
+def evaluation_runtime(url: str, api_key: str, timeout: float, model: str, raw_response_sink=None) -> DecisionRuntime:
     """Build an evaluator-only runtime; production never calls this factory."""
-    return DecisionRuntime(ArbiterDecisionProvider(url, api_key, timeout, model=model), timeout)
+    return DecisionRuntime(ArbiterDecisionProvider(url, api_key, timeout, model=model, raw_response_sink=raw_response_sink), timeout)
+
+
+def diagnostic_request(message: str, available_tools: list[str], mode: str, state_variant: str):
+    from app.modules.decision_runtime import shadow_request
+
+    if mode not in DIAGNOSTIC_MODES:
+        raise ValueError(f"unknown diagnostic mode: {mode}")
+    if state_variant not in DIAGNOSTIC_STATE_VARIANTS:
+        raise ValueError(f"unknown diagnostic state variant: {state_variant}")
+    request = shadow_request(message, available_tools)
+    if mode == "needs-web-only":
+        request.questions = [question for question in request.questions if question.id == "needs_web"]
+    elif mode == "needs-tools-only":
+        request.questions = [question for question in request.questions if question.id == "needs_tools"]
+    if state_variant == "message-only":
+        request.state = {"message": message}
+    return request
 
 
 def score_cases(cases: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:
