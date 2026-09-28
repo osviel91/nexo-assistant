@@ -3,6 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 
+THINKING_CAPABILITIES = {"thinking", "thinking-budget", "reasoning-content"}
+
+
+def thinking_capabilities(capabilities: Any) -> dict[str, bool]:
+    values = {str(item) for item in capabilities} if isinstance(capabilities, (list, tuple, set)) else set()
+    return {name: name in values for name in THINKING_CAPABILITIES}
+
+
 def normalize_model_capabilities(model_payload: dict[str, Any], assume_tool_calling: bool = False) -> set[str]:
     raw = model_payload.get("capabilities", [])
     capabilities = {str(item) for item in raw} if isinstance(raw, list) else set()

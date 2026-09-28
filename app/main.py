@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits, EffectiveRunConfiguration
 from app.agent_model import OpenAICompatibleModelAdapter
-from app.capabilities import normalize_model_capabilities, preserve_model_capabilities
+from app.capabilities import normalize_model_capabilities, preserve_model_capabilities, thinking_capabilities
 from app.diagnostics import diagnostic, recent
 from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
@@ -156,6 +156,12 @@ class ChatIn(BaseModel):
     execution_mode: Literal["chat", "agent"] | None = None
     web_enabled: bool | None = None
     tools_enabled: bool | None = None
+    thinking: dict[str, Any] | None = None
+
+
+class PreferencesPatch(BaseModel):
+    last_chat_model: str | None = None
+    last_agent_profile: str | None = None
 
 
 class ConversationPatch(BaseModel):
@@ -261,7 +267,60 @@ def provider_dict(row: sqlite3.Row) -> dict[str, Any]:
         models = c.execute("SELECT id,label,capabilities FROM models WHERE provider_id=? ORDER BY label", (row["id"],)).fetchall()
         refreshed = c.execute("SELECT refreshed_at FROM capability_refreshes WHERE provider_id=?", (row["id"],)).fetchone()
     return {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
-            "has_api_key": bool(row["api_key"]), "capabilities_refreshed_at": refreshed["refreshed_at"] if refreshed else None, "models": [{**dict(m), "capabilities": json.loads(m["capabilities"])} for m in models]}
+             "has_api_key": bool(row["api_key"]), "capabilities_refreshed_at": refreshed["refreshed_at"] if refreshed else None, "models": [{**dict(m), "capabilities": json.loads(m["capabilities"])} for m in models]}
+
+
+def normalized_metrics(runtime: dict[str, Any]) -> dict[str, Any]:
+    """One safe shape for persisted provider/runtime telemetry."""
+    metrics = {key: runtime.get(key) for key in (
+        "input_tokens", "output_tokens", "total_tokens", "context_window", "context_utilization",
+        "ttft_ms", "thinking_duration_ms", "thinking_tokens", "generation_duration_ms",
+        "total_duration_ms", "tokens_per_second")}
+    metrics["input_tokens"] = runtime.get("input_tokens", runtime.get("prompt_tokens"))
+    metrics["output_tokens"] = runtime.get("output_tokens", runtime.get("completion_tokens"))
+    metrics["total_tokens"] = runtime.get("total_tokens")
+    if metrics["context_utilization"] is None and metrics["context_window"] and metrics["input_tokens"] is not None:
+        metrics["context_utilization"] = round(metrics["input_tokens"] / metrics["context_window"], 4)
+    return metrics
+
+
+def ensure_preferences(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE IF NOT EXISTS user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL)")
+
+
+def public_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+    result = dict(runtime)
+    result["metrics"] = normalized_metrics(runtime)
+    result["thinking"] = {
+        "available": bool(runtime.get("thinking_available")),
+        "content": runtime.get("thinking_content") if runtime.get("thinking_content_available") else None,
+        "duration_ms": runtime.get("thinking_duration_ms"),
+        "tokens": runtime.get("thinking_tokens"),
+        "budget": runtime.get("thinking_budget"),
+    }
+    result.pop("thinking_content", None)
+    return result
+
+
+@app.get("/api/preferences")
+def get_preferences():
+    with db() as connection:
+        ensure_preferences(connection)
+        rows = connection.execute("SELECT key,value FROM user_preferences WHERE key IN ('last_chat_model','last_agent_profile')").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+@app.patch("/api/preferences")
+def update_preferences(item: PreferencesPatch):
+    values = item.model_dump(exclude_unset=True)
+    with db() as connection:
+        ensure_preferences(connection)
+        for key, value in values.items():
+            if value is None:
+                connection.execute("DELETE FROM user_preferences WHERE key=?", (key,))
+            else:
+                connection.execute("INSERT INTO user_preferences(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, value, now()))
+    return get_preferences()
 
 
 @app.get("/api/health")
@@ -813,7 +872,7 @@ def get_conversation(cid: str):
         else:
             item["status"] = "valid"
         citation_map.setdefault(citation["message_id"], []).append(item)
-    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": json.loads(m["runtime_metadata"] or "{}"), "citations": citation_map.get(m["id"], [])} for m in msgs]}
+    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": public_runtime(json.loads(m["runtime_metadata"] or "{}")), "citations": citation_map.get(m["id"], [])} for m in msgs]}
 
 
 @app.delete("/api/conversations/{cid}")
@@ -847,6 +906,31 @@ def update_conversation(cid: str, item: ConversationPatch):
         return dict(c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id FROM conversations WHERE id=?", (cid,)).fetchone())
 
 
+@app.post("/api/conversations/{cid}/branch/{message_id}")
+def branch_conversation(cid: str, message_id: str):
+    with db() as connection:
+        conversation = connection.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+        if not conversation:
+            raise HTTPException(404, "Conversation not found")
+        selected = connection.execute("SELECT created_at FROM messages WHERE id=? AND conversation_id=?", (message_id, cid)).fetchone()
+        if not selected:
+            raise HTTPException(404, "Message not found")
+        branch_id = str(uuid.uuid4())
+        timestamp = now()
+        connection.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?,?)",
+                           (branch_id, f"Branch · {conversation['title']}", timestamp, timestamp, conversation["execution_mode"], conversation["agent_profile_id"], conversation["notebook_id"]))
+        messages = connection.execute("SELECT * FROM messages WHERE conversation_id=? AND created_at<=? ORDER BY created_at, id", (cid, selected["created_at"])).fetchall()
+        for message in messages:
+            new_id = str(uuid.uuid4())
+            connection.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (new_id, branch_id, message["role"], message["content"], message["provider_id"], message["model_id"], message["attachments"], message["sources"], message["runtime_metadata"], message["created_at"]))
+            citations = connection.execute("SELECT * FROM message_citations WHERE message_id=?", (message["id"],)).fetchall()
+            for citation in citations:
+                fields = [citation[key] for key in ("citation_key", "notebook_id", "source_id", "document_id", "chunk_id", "canonical_start", "canonical_end", "provenance", "document_content_hash", "chunk_content_hash")]
+                connection.execute("INSERT INTO message_citations(id,message_id,citation_key,notebook_id,source_id,document_id,chunk_id,canonical_start,canonical_end,provenance,document_content_hash,chunk_content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), new_id, *fields))
+    return {"id": branch_id}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
@@ -857,7 +941,8 @@ async def chat(req: ChatIn):
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
         # Omitted means inherit; explicit null is the normal Nexo selection.
-        mode = req.execution_mode if "execution_mode" in req.model_fields_set else (conv["execution_mode"] if conv else ("agent" if req.agent_profile_id else "chat"))
+        # Existing conversations own their execution mode; the request can only choose it for a new conversation.
+        mode = conv["execution_mode"] if conv else (req.execution_mode if "execution_mode" in req.model_fields_set else ("agent" if req.agent_profile_id else "chat"))
         profile_id = req.agent_profile_id if "agent_profile_id" in req.model_fields_set else (conv["agent_profile_id"] if conv else None)
         if mode == "agent" and not profile_id:
             raise HTTPException(400, "agent_profile_required")
@@ -939,7 +1024,12 @@ async def chat(req: ChatIn):
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
-        supports_tools = "tool-calling" in json.loads(model["capabilities"] or "[]")
+        model_capability_list = json.loads(model["capabilities"] or "[]")
+        supports_tools = "tool-calling" in model_capability_list
+        # Agent profiles remain authoritative; their current contract has no chat override.
+        thinking = req.thinking if mode == "chat" else None
+        thinking = thinking if isinstance(thinking, dict) else {}
+        thinking_flags = thinking_capabilities(model_capability_list)
         diagnostic(logger, "capability_policy", **{
             "model": selected_model_id,
             "reported_tool_capability": supports_tools,
@@ -962,7 +1052,10 @@ async def chat(req: ChatIn):
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
-                model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id)
+                model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id, {
+                    "supported": thinking_flags["thinking"], "budget_supported": thinking_flags["thinking-budget"],
+                    "reasoning_content": thinking_flags["reasoning-content"],
+                    "enabled": thinking.get("enabled"), "budget": thinking.get("budget")})
                 if notebook_id:
                     yield "data: " + json.dumps({"activity": {"type": "RETRIEVE", "status": "running"}}) + "\n\n"
                     retrieve_started = asyncio.get_running_loop().time()
@@ -1010,6 +1103,9 @@ async def chat(req: ChatIn):
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
                 runtime_snapshot["effective_tool_names"] = effective_tool_names
+                runtime_snapshot["thinking_available"] = thinking_flags["thinking"]
+                runtime_snapshot["thinking_budget"] = thinking.get("budget") if thinking_flags["thinking-budget"] else None
+                runtime_snapshot["thinking_content_available"] = thinking_flags["reasoning-content"]
                 if profile_config and profile_config.temperature is not None:
                     runtime_snapshot["temperature"] = profile_config.temperature
                 elif req.temperature is not None:
@@ -1050,6 +1146,9 @@ async def chat(req: ChatIn):
                         answer, sources = event["answer"], event["sources"]
                         telemetry = {key: value for key, value in event.get("telemetry", {}).items() if value is not None}
                         runtime_metadata = {**runtime_snapshot, **telemetry}
+                        runtime_metadata["input_tokens"] = runtime_metadata.get("prompt_tokens")
+                        runtime_metadata["output_tokens"] = runtime_metadata.get("completion_tokens")
+                        runtime_metadata["metrics"] = normalized_metrics(runtime_metadata)
                         _update_runtime_metadata(run_id, runtime_metadata)
                         execution = {"tools_used": event.get("tools_used", []), "tool_rounds": event.get("tool_rounds", 0), "web_search_used": "web_search" in event.get("tools_used", [])}
                         if not execution_future.done():
@@ -1070,7 +1169,10 @@ async def chat(req: ChatIn):
             _update_runtime_metadata(run_id, runtime_metadata)
             module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
             citation_payload = [{"citation_key": citation_key, "excerpt": result.get("content", "")[:1600], **{key: value for key, value in result.items() if key != "content"}} for citation_key, result in notebook_citations]
-            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "citations": citation_payload, "runtime": runtime_metadata}) + "\n\n"
+            live_runtime = public_runtime(runtime_metadata)
+            if thinking_flags["reasoning-content"] and model_adapter.reasoning_content:
+                live_runtime["thinking"]["content"] = model_adapter.reasoning_content
+            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "message_id": assistant_id, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "citations": citation_payload, "runtime": live_runtime}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"

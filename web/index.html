@@ -44,12 +44,12 @@
     <main class="main-panel">
       <header class="topbar">
         <button class="icon-button menu-button" id="open-sidebar" aria-label="Abrir navegación" aria-expanded="false">☰</button>
-         <div class="topbar-center">
-           <div class="mode-switch" role="group" aria-label="Execution mode"><button type="button" data-mode="chat" class="active">CHAT</button><button type="button" data-mode="agent">AGENT</button></div>
-           <label class="model-picker" id="model-picker"><span class="sr-only">Modelo activo</span><select id="model-select" aria-label="Modelo activo"><option value="">Añade un proveedor</option></select><span aria-hidden="true">⌄</span></label>
-           <button class="agent-picker" id="agent-picker" aria-haspopup="dialog" aria-expanded="false" hidden><span class="agent-picker-label">AGENT</span><strong id="agent-picker-name">Seleccionar agente</strong><span aria-hidden="true">⌄</span></button>
-         </div>
-         <button class="config-inspector-button" id="config-inspector" type="button">CONFIG</button>
+           <div class="topbar-center">
+             <div class="mode-switch" role="group" aria-label="Execution mode"><button type="button" data-mode="chat" class="active">Chat</button><button type="button" data-mode="agent">Agent</button></div>
+             <label class="model-picker" id="model-picker"><span class="sr-only">Raw model</span><select id="model-select" aria-label="Raw model"><option value="">Añade un proveedor</option></select><span aria-hidden="true">⌄</span></label>
+             <button class="agent-picker" id="agent-picker" aria-haspopup="dialog" aria-expanded="false" hidden><strong id="agent-picker-name">Seleccionar agente</strong><span aria-hidden="true">⌄</span></button>
+             <button class="config-inspector-button" id="config-inspector" type="button">Configuration</button>
+           </div>
         <button class="icon-button new-chat-top" id="new-chat-top" title="Nuevo chat" aria-label="Nuevo chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
       </header>
 
@@ -148,7 +148,7 @@
       </div>
       <div class="surface config-surface" id="config-surface" hidden role="dialog" aria-modal="true" aria-labelledby="config-title">
         <div class="surface-header"><div><span class="eyebrow">RUN CONFIGURATION</span><h2 id="config-title">Effective configuration</h2><p>What the last completed run actually used.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
-        <div id="config-content" class="config-content"></div>
+       <div id="config-content" class="config-content"></div>
       </div>
     </section>
   <div class="toast" id="toast" role="status"></div>

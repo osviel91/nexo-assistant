@@ -33,16 +33,23 @@ class ModelAdapter(Protocol):
 
 
 class OpenAICompatibleModelAdapter:
-    def __init__(self, client: httpx.AsyncClient, url: str, headers: dict[str, str], model_id: str) -> None:
+    def __init__(self, client: httpx.AsyncClient, url: str, headers: dict[str, str], model_id: str,
+                 thinking: dict[str, Any] | None = None) -> None:
         self.client = client
         self.url = url
         self.headers = headers
         self.model_id = model_id
+        self.thinking = thinking or {}
+        self.reasoning_content = ""
 
     async def stream(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], temperature: float | None = None) -> AsyncIterator[ModelStreamChunk]:
         payload: dict[str, Any] = {"model": self.model_id, "messages": messages, "stream": True}
         if temperature is not None:
             payload["temperature"] = temperature
+        if self.thinking.get("enabled") is not None and self.thinking.get("supported"):
+            payload["thinking"] = {"type": "enabled" if self.thinking["enabled"] else "disabled"}
+            if self.thinking.get("budget") is not None and self.thinking.get("budget_supported"):
+                payload["thinking"]["budget"] = self.thinking["budget"]
         if tools:
             payload["tools"] = tools
         diagnostic(logger, "provider_request", **{
@@ -72,6 +79,9 @@ class OpenAICompatibleModelAdapter:
                         choice = packet.get("choices", [{}])[0]
                         delta = choice.get("delta", {})
                         content = delta.get("content", "")
+                        reasoning = delta.get("reasoning_content", delta.get("reasoning", ""))
+                        if isinstance(reasoning, str) and self.thinking.get("reasoning_content"):
+                            self.reasoning_content += reasoning
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                         tool_calls = delta.get("tool_calls", []) or []

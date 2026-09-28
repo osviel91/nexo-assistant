@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { effectiveMessageIdentity } from './identity.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
+const state = { providers: [], knowledge: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -37,6 +37,7 @@ function toast(message) {
 
 function moduleEnabled(id) { return state.modules.some((module) => module.id === id); }
 function allModels() { return state.providers.flatMap((provider) => provider.models.map((model) => ({ provider, model }))); }
+async function savePreference(key, value) { state.preferences[key] = value; try { await api('/preferences', { method: 'PATCH', body: JSON.stringify({ [key]: value }) }); } catch (error) { toast(error.message); } }
 function selected() {
   const [providerId, ...modelParts] = $('#model-select').value.split('::');
   return { provider: state.providers.find((provider) => provider.id === providerId), model: modelParts.join('::') };
@@ -48,7 +49,8 @@ function renderSelect(keep = true) {
   select.innerHTML = state.providers.length
     ? state.providers.map((provider) => `<optgroup label="${escapeHtml(provider.name)}">${provider.models.map((model) => `<option value="${escapeHtml(provider.id)}::${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('') || '<option disabled>Sin modelos</option>'}</optgroup>`).join('')
     : '<option value="">Añade un proveedor</option>';
-  if (allModels().some(({ provider, model }) => `${provider.id}::${model.id}` === oldValue)) select.value = oldValue;
+   const preferred = oldValue || state.preferences.last_chat_model;
+   if (allModels().some(({ provider, model }) => `${provider.id}::${model.id}` === preferred)) select.value = preferred;
   updateComposerModel();
 }
 
@@ -69,6 +71,7 @@ async function loadProviders() {
   renderProviderList();
   renderLab();
 }
+async function loadPreferences() { state.preferences = await api('/preferences'); }
 
 async function loadKnowledge() {
   state.knowledge = await api('/settings/embeddings');
@@ -99,7 +102,7 @@ async function loadTools() {
   renderLab();
 }
 
-async function loadAgents() { state.agents = await api('/agents'); renderAgentPicker(); renderAgentList(); }
+async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
 async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); }
 function renderNotebooks() {
@@ -164,6 +167,8 @@ async function setExecutionMode(mode) {
   if (mode === state.executionMode) return;
   if (mode === 'agent' && !state.agentProfileId) { openSurface('agents'); toast('Selecciona un Agent Profile'); return; }
   state.executionMode = mode;
+  if (mode === 'chat' && $('#model-select').value) await savePreference('last_chat_model', $('#model-select').value);
+  if (mode === 'agent' && state.agentProfileId) await savePreference('last_agent_profile', state.agentProfileId);
   if (state.conversationId) {
     try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: mode, agent_profile_id: mode === 'agent' ? state.agentProfileId : null }) }); }
     catch (error) { state.executionMode = mode === 'agent' ? 'chat' : 'agent'; toast(error.message); }
@@ -171,18 +176,19 @@ async function setExecutionMode(mode) {
   renderExecutionMode(); renderAgentPicker(); renderChats();
 }
 function renderAgentList() {
-  const items = [{ id: '', name: 'Nexo', description: 'General assistant' }, ...state.agents];
+  const items = state.agents;
   $('#agent-list').innerHTML = `${items.map((agent) => {
     const stored = Boolean(agent.id);
     const warning = stored && !agent.model_available ? '<span class="status status-degraded">Model unavailable</span>' : stored && agent.unavailable_tools?.length ? `<span class="status status-degraded">${agent.unavailable_tools.length} tool${agent.unavailable_tools.length > 1 ? 's' : ''} unavailable</span>` : '';
     return `<div class="agent-option ${(!state.agentProfileId && !stored) || agent.id === state.agentProfileId ? 'selected' : ''}" data-agent-id="${escapeHtml(agent.id)}" role="button" tabindex="0"><span><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.description || '')}</small>${warning}</span>${stored ? `<span class="agent-actions"><span class="agent-tools-count">${agent.tool_names.length} tools</span><button type="button" data-edit-agent="${escapeHtml(agent.id)}">Edit</button><button type="button" data-delete-agent="${escapeHtml(agent.id)}">Delete</button></span>` : '<span class="agent-check">✓</span>'}</div>`;
-  }).join('')}<p class="agent-help">Select Nexo to clear this conversation's binding.</p>`;
+   }).join('') || '<div class="empty-providers">No Agent Profiles available.</div>';
   $('#agent-list').querySelectorAll('[data-agent-id]').forEach((button) => { button.onclick = () => selectAgent(button.dataset.agentId || null); });
   $('#agent-list').querySelectorAll('[data-edit-agent]').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); editAgent(button.dataset.editAgent); }; });
   $('#agent-list').querySelectorAll('[data-delete-agent]').forEach((button) => { button.onclick = async (event) => { event.stopPropagation(); await deleteAgent(button.dataset.deleteAgent); }; });
 }
 async function selectAgent(id) {
   state.agentProfileId = id || null;
+  if (id) await savePreference('last_agent_profile', id);
   if (id) state.executionMode = 'agent';
   renderAgentPicker(); renderAgentList();
   renderExecutionMode();
@@ -262,7 +268,7 @@ function beginChat() {
   state.conversationId = null;
   state.messages = [];
   state.attachments = [];
-  state.agentProfileId = null;
+  state.agentProfileId = state.preferences.last_agent_profile || null;
   state.executionMode = 'chat';
   state.webEnabled = false;
   state.toolsEnabled = false;
@@ -288,11 +294,17 @@ function renderMessages() {
     const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => { const location = citation.provenance?.map((item) => item.source_location || {}).find((item) => item.page != null || item.heading); const suffix = location?.page != null ? ` · page ${location.page}` : location?.heading ? ` · ${location.heading}` : ''; const excerpt = citation.excerpt ? `<details class="citation-excerpt"><summary>Retrieved excerpt</summary><p>${escapeHtml(citation.excerpt)}</p></details>` : ''; return `<div class="notebook-citation"><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}${escapeHtml(suffix)}<span>${escapeHtml(citation.status || 'Retrieved excerpt')}</span>${excerpt}</div>`; }).join('')}</details>` : '';
     const content = message.role === 'assistant' ? renderMarkdown(message.content) : escapeHtml(message.content).replace(/\n/g, '<br>');
     const runtime = message.runtime || {};
-    const metrics = message.role === 'assistant' && (runtime.tokens_per_second != null || runtime.completion_tokens != null || runtime.context_used_tokens != null)
-      ? `<div class="message-metrics">${runtime.tokens_per_second != null ? `${escapeHtml(runtime.tokens_per_second)} tok/s` : ''}${runtime.completion_tokens != null ? ` · ${escapeHtml(runtime.completion_tokens)} tok` : ''}${runtime.context_used_tokens != null && runtime.context_window != null ? ` · ctx ${escapeHtml(runtime.context_used_tokens)}/${escapeHtml(runtime.context_window)}` : ''}</div>` : '';
+     const metrics = runtime.metrics || runtime;
+     const summary = message.role === 'assistant' && (metrics.tokens_per_second != null || metrics.output_tokens != null || metrics.total_duration_ms != null)
+       ? `<div class="message-metrics">${metrics.output_tokens != null ? `${escapeHtml(metrics.output_tokens)} tokens` : ''}${metrics.tokens_per_second != null ? ` · ${escapeHtml(metrics.tokens_per_second)} tok/s` : ''}${metrics.total_duration_ms != null ? ` · ${(Number(metrics.total_duration_ms) / 1000).toFixed(2)} s` : ''}</div>` : '';
+     const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
+     const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button data-copy-message="${escapeHtml(message.id)}" type="button">Copy</button><button data-branch-message="${escapeHtml(message.id)}" type="button">Branch</button><button data-details-message="${escapeHtml(message.id)}" type="button">Details</button></div>` : '';
      const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
-     return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${activity}${metrics}${attachments}${sourceList}${notebookList}</div></article>`;
-  }).join('');
+      return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}<div class="message-content">${content}</div>${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
+   }).join('');
+   box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (message) { await navigator.clipboard.writeText(message.content); toast('Copied'); } }; });
+   box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
+   box.querySelectorAll('[data-details-message]').forEach((button) => { button.onclick = () => { state.lastRuntime = state.messages.find((item) => item.id === button.dataset.detailsMessage)?.runtime || null; $('#config-content').innerHTML = renderConfig(); openSurface('config'); }; });
   box.scrollTop = box.scrollHeight;
 }
 
@@ -337,6 +349,11 @@ async function openChat(id) {
   } catch (error) { toast(error.message); }
 }
 
+async function branchFrom(messageId) {
+  if (!state.conversationId) return;
+  try { const branch = await api(`/conversations/${state.conversationId}/branch/${messageId}`, { method: 'POST' }); await loadChats(); await openChat(branch.id); toast('Branched conversation created'); } catch (error) { toast(error.message); }
+}
+
 function renderAttachments() {
   $('#attachment-tray').innerHTML = state.attachments.map((attachment, index) => `<span class="attachment-chip">${escapeHtml(attachment.name)}<button data-index="${index}" aria-label="Quitar ${escapeHtml(attachment.name)}">×</button></span>`).join('');
   document.querySelectorAll('.attachment-chip button').forEach((button) => { button.onclick = () => { state.attachments.splice(Number(button.dataset.index), 1); renderAttachments(); }; });
@@ -368,7 +385,8 @@ async function send() {
      const chatPayload = { conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments };
       chatPayload.execution_mode = state.executionMode;
       chatPayload.web_enabled = state.webEnabled;
-      chatPayload.tools_enabled = state.toolsEnabled;
+       chatPayload.tools_enabled = state.toolsEnabled;
+       if (state.executionMode === 'chat') chatPayload.thinking = state.chatThinking;
       if (state.executionMode === 'agent') chatPayload.agent_profile_id = state.agentProfileId;
      if (state.currentNotebookId) chatPayload.notebook_id = state.currentNotebookId;
      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chatPayload) });
@@ -390,7 +408,7 @@ async function send() {
          if (data.status) toast(data.message);
          if (data.activity) updateStreamingActivity(data.activity);
          if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; updateStreamingAnswer(answer); }
-         if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
+          if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
       }
       if (done) break;
     }
@@ -421,11 +439,18 @@ function openSurface(name) {
 }
 
 function renderConfig() {
-  const runtime = state.lastRuntime;
-  if (!runtime) return '<div class="lab-empty">No completed run yet.</div>';
+  const runtime = state.lastRuntime || {};
   const row = (label, value) => value == null || value === '' ? '' : `<div class="config-value"><span>${label}</span> ${escapeHtml(value)}</div>`;
-  const knowledge = runtime.knowledge_available ? `${row('Notebook', runtime.notebook_name)}${row('Status', runtime.knowledge_retrieval_applied ? 'Ready' : 'Unavailable')}${row('Indexed sources', runtime.knowledge_indexed_sources)}${row('Retrieval', runtime.knowledge_retrieval_enabled ? 'Enabled' : 'Disabled')}${row('Embedding model', runtime.knowledge_embedding_model)}${row('Retrieved', runtime.retrieval_count != null ? `${runtime.retrieval_count} chunks` : null)}${row('Context', runtime.context_chars != null ? `${runtime.context_chars} chars` : null)}` : row('Knowledge', 'Not available');
-   return `<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Mode', runtime.agent_profile_id ? 'AGENT' : 'CHAT')}${row('Agent', runtime.agent_profile_name)}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider)}${row('Model', runtime.resolved_model_name || runtime.resolved_model)}${row('Instructions', runtime.system_instructions_applied ? 'Applied' : 'Not applied')}${row('Temperature', runtime.temperature)}</div><div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>TELEMETRY</h3>${row('Generation', runtime.completion_tokens != null ? `${runtime.completion_tokens} tokens` : null)}${row('Tokens/s', runtime.tokens_per_second)}${row('TTFT ms', runtime.ttft_ms)}${row('Model context', runtime.context_used_tokens != null && runtime.context_window != null ? `${runtime.context_used_tokens} / ${runtime.context_window}` : null)}${row('Top score', runtime.top_score)}${row('Truncated', runtime.context_truncated ? 'Yes' : runtime.retrieval_count != null ? 'No' : null)}</div><div class="config-block"><h3>TOOLS</h3>${row('Effective', (runtime.effective_tool_names || []).join(', ') || 'none')}</div>`;
+   const metrics = runtime.metrics || runtime;
+   const knowledge = runtime.knowledge_available ? `${row('Notebook', runtime.notebook_name)}${row('Status', runtime.knowledge_retrieval_applied ? 'Ready' : 'Unavailable')}${row('Retrieved chunks', runtime.retrieval_count)}${row('Cited sources', runtime.citation_count)}${row('Context size', runtime.context_chars)}` : row('Knowledge', 'Not available');
+    const selectedModel = selected().model;
+    const capabilities = selected().provider?.models.find((model) => model.id === selectedModel)?.capabilities || [];
+    const thinkingEditor = !runtime.agent_profile_id && capabilities.includes('thinking') ? `<div class="config-block"><h3>THINKING</h3><label class="config-toggle"><input id="thinking-enabled" type="checkbox" ${state.chatThinking.enabled ? 'checked' : ''}> Enable supported thinking</label>${capabilities.includes('thinking-budget') ? `<label class="config-value">Budget <input id="thinking-budget" type="number" min="1" step="1" value="${escapeHtml(state.chatThinking.budget ?? '')}"></label>` : ''}<small class="config-note">Only adapter-declared capabilities are shown.</small></div>` : '';
+    return `${state.lastRuntime ? '' : '<div class="lab-empty">No completed run yet. Current selection will be used for the next run.</div>'}<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Mode', runtime.agent_profile_id || state.executionMode === 'agent' ? 'AGENT' : 'CHAT')}${row('Agent', runtime.agent_profile_name || currentAgent()?.name)}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider || (state.executionMode === 'agent' ? currentAgent()?.provider_id : selected().provider?.name))}${row('Model', runtime.resolved_model_name || runtime.resolved_model || (state.executionMode === 'agent' ? currentAgent()?.model_id : selected().model))}${row('Soul / instructions', runtime.system_instructions_applied ? 'Applied' : state.executionMode === 'agent' ? 'Agent controlled' : 'Not applied')}${row('Parameters', [runtime.temperature, runtime.top_p, runtime.top_k].filter((value) => value != null).join(' · '))}${row('Tools', (runtime.effective_tool_names || []).length || state.executionMode === 'agent' ? 'Agent controlled' : 'none')}</div>${thinkingEditor}<div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>GENERATION METRICS</h3>${row('Input / output', metrics.input_tokens != null || metrics.output_tokens != null ? `${metrics.input_tokens ?? 'unknown'} / ${metrics.output_tokens ?? 'unknown'}` : null)}${row('Context utilization', metrics.context_utilization)}${row('TTFT ms', metrics.ttft_ms)}${row('Generation ms', metrics.generation_duration_ms)}${row('Tokens/sec', metrics.tokens_per_second)}${row('Total ms', metrics.total_duration_ms)}</div>`;
+}
+function bindConfig() {
+  $('#thinking-enabled')?.addEventListener('change', (event) => { state.chatThinking.enabled = event.target.checked; });
+  $('#thinking-budget')?.addEventListener('change', (event) => { state.chatThinking.budget = event.target.value ? Number(event.target.value) : null; });
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -495,7 +520,7 @@ function resetForm() { $('#provider-id').value = ''; $('#provider-name').value =
 function renderProviderList() {
   const list = $('#provider-list');
   if (!state.providers.length) { list.innerHTML = '<div class="empty-providers">Todavía no hay proveedores. Añade oMLX, OpenAI, DeepSeek o cualquier API compatible.</div>'; return; }
-   list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-list settings-model-list">${provider.models.map((model) => `<details class="settings-model"><summary><strong>${escapeHtml(model.id)}</strong><span>${(model.capabilities || []).map((capability) => escapeHtml(capability)).join(', ') || 'Generation'}</span><button type="button" class="model-menu" aria-label="Editar capacidades de ${escapeHtml(model.id)}">⋮</button></summary><div class="model-capabilities"><span>Capabilities</span><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="embedding" ${(model.capabilities || []).includes('embedding') ? 'checked' : ''}> Embeddings</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="tool-calling" ${(model.capabilities || []).includes('tool-calling') ? 'checked' : ''}> Tool calling</label><button type="button" class="text-button model-delete" data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}">Remove model</button></div></details>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
+    list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-list settings-model-list">${provider.models.map((model) => `<details class="settings-model"><summary><strong>${escapeHtml(model.id)}</strong><span>${(model.capabilities || []).map((capability) => escapeHtml(capability)).join(', ') || 'Generation'}</span><button type="button" class="model-menu" aria-label="Editar capacidades de ${escapeHtml(model.id)}">⋮</button></summary><div class="model-capabilities"><span>Capabilities</span><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="embedding" ${(model.capabilities || []).includes('embedding') ? 'checked' : ''}> Embeddings</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="tool-calling" ${(model.capabilities || []).includes('tool-calling') ? 'checked' : ''}> Tool calling</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="thinking" ${(model.capabilities || []).includes('thinking') ? 'checked' : ''}> Thinking</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="thinking-budget" ${(model.capabilities || []).includes('thinking-budget') ? 'checked' : ''}> Thinking budget</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="reasoning-content" ${(model.capabilities || []).includes('reasoning-content') ? 'checked' : ''}> Reasoning display</label><button type="button" class="text-button model-delete" data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}">Remove model</button></div></details>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
   list.querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => providerAction(button); });
 }
 
@@ -539,7 +564,7 @@ $('#notebook-form').onsubmit = async (event) => {
   try { await api(`/notebooks${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify({ name: $('#notebook-name').value, description: $('#notebook-description').value }) }); resetNotebookForm(); await loadNotebooks(); toast(id ? 'Notebook updated' : 'Notebook created'); } catch (error) { toast(error.message); }
 };
 
-$('#model-select').onchange = updateComposerModel;
+$('#model-select').onchange = () => { updateComposerModel(); if ($('#model-select').value) savePreference('last_chat_model', $('#model-select').value); };
 document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
 ['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; $(`#${id}`).setAttribute('aria-pressed', String(state[key])); }; });
 $('#notebook-picker').onchange = async (event) => {
@@ -547,7 +572,7 @@ $('#notebook-picker').onchange = async (event) => {
   if (!state.conversationId) return;
   try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ notebook_id: state.currentNotebookId }) }); await loadChats(); } catch (error) { toast(error.message); }
 };
-$('#config-inspector').onclick = () => { $('#config-content').innerHTML = renderConfig(); openSurface('config'); };
+$('#config-inspector').onclick = () => { $('#config-content').innerHTML = renderConfig(); openSurface('config'); bindConfig(); };
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
 $('#agent-picker').onclick = () => { openSurface('agents'); $('#agent-picker').setAttribute('aria-expanded', 'true'); };
@@ -577,4 +602,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));
+(async () => { await loadPreferences(); await Promise.all([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]); })().catch((error) => toast(error.message));
