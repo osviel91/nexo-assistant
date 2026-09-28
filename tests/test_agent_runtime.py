@@ -70,6 +70,8 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(seen[0][0], ToolExecutionContext("conversation", "provider", "model", 1))
         self.assertEqual(seen[0][1], {"q": "x"})
         self.assertEqual(events[-1]["sources"], [{"title": "Source", "url": "https://source.test"}])
+        self.assertEqual(events[-1]["tools_used"], ["test_tool"])
+        self.assertEqual(events[-1]["tool_rounds"], 1)
         self.assertIn("tools", client.payloads[0])
 
     def test_invalid_unknown_and_handler_errors_are_safe(self):
@@ -94,6 +96,16 @@ class AgentRuntimeTests(unittest.TestCase):
         client = Client([[{"content": "plain"}]])
         run(AgentRuntime(self.registry(handler)), client, set())
         self.assertNotIn("tools", client.payloads[0])
+
+    def test_shadow_branch_cannot_change_agent_payload(self):
+        async def handler(context, arguments):
+            return {}
+
+        first = Client([[{"content": "plain"}]])
+        second = Client([[{"content": "plain"}]])
+        run(AgentRuntime(self.registry(handler)), first, set())
+        run(AgentRuntime(self.registry(handler)), second, set())
+        self.assertEqual(first.payloads, second.payloads)
 
     def test_round_limit_and_output_limit(self):
         async def handler(context, arguments):

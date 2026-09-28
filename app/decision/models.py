@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -56,3 +57,13 @@ class DecisionResult(BaseModel):
     model: str | None = None
     answers: dict[str, DecisionAnswer]
     metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ShadowDecision:
+    mode: str
+    model: str | None
+    answers: dict[str, dict[str, Any]]
+    metadata: dict[str, Any]
+    latency_ms: float | None
+    error: str | None = None

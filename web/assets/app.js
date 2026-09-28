@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], conversations: [], modules: [], tools: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -131,6 +131,11 @@ async function loadProviders() {
 
 async function loadTools() {
   state.tools = await api('/tools');
+  renderLab();
+}
+
+async function loadShadow() {
+  state.shadow = await api('/lab/shadow?limit=20');
   renderLab();
 }
 
@@ -267,12 +272,23 @@ function closeSidebar() { $('#sidebar').classList.remove('open'); $('#sidebar-ba
 function renderLab() {
   const tabs = [{ id: 'models', label: 'Models' }];
   if (moduleEnabled('decision-runtime')) tabs.push({ id: 'decisions', label: 'Decisions' });
+  if (state.modules.find((module) => module.id === 'decision-runtime')?.status?.shadow_enabled) tabs.push({ id: 'shadow', label: 'Shadow' });
   if (state.tools.length || moduleEnabled('mcp')) tabs.push({ id: 'tools', label: 'Tools' });
   if (!tabs.some((tab) => tab.id === state.labTab)) state.labTab = tabs[0].id;
   $('#lab-tabs').innerHTML = tabs.map((tab) => `<button class="lab-tab ${tab.id === state.labTab ? 'active' : ''}" data-lab-tab="${tab.id}">${tab.label}</button>`).join('');
   $('#lab-tabs').querySelectorAll('[data-lab-tab]').forEach((button) => { button.onclick = () => { state.labTab = button.dataset.labTab; renderLab(); }; });
-  $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : renderDecisions();
+  $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : state.labTab === 'shadow' ? renderShadow() : renderDecisions();
   if (state.labTab === 'decisions') bindDecisionPlayground();
+}
+
+function renderShadow() {
+  const observations = state.shadow.map((item) => {
+    const answers = item.answers || {};
+    const answer = (id) => answers[id] ? `${answers[id].value === true ? 'Yes' : answers[id].value === false ? 'No' : answers[id].value} · ${Math.round((answers[id].confidence || 0) * 100)}%` : 'Unknown';
+    const actual = item.execution || {};
+    return `<article class="model-provider"><div class="model-provider-head"><div><h4>Decision observation</h4><span>${escapeHtml(item.created_at)} · ${escapeHtml(item.model || 'unknown model')}</span></div><span class="status ${item.error ? 'status-disabled' : 'status-ready'}">● ${item.error ? 'FAILED' : 'RECORDED'}</span></div><div class="model-list"><div class="model-row"><strong>Web needed</strong><span>${escapeHtml(answer('needs_web'))}</span></div><div class="model-row"><strong>Tools needed</strong><span>${escapeHtml(answer('needs_tools'))}</span></div><div class="model-row"><strong>Task</strong><span>${escapeHtml(answer('task_type'))}</span></div><div class="model-row"><strong>Actual execution</strong><span>${escapeHtml((actual.tools_used || []).join(', ') || 'No tools')} · ${actual.tool_rounds || 0} round(s)</span></div></div></article>`;
+  }).join('');
+  return `<section class="lab-section"><div class="lab-section-head"><div><span class="eyebrow">SHADOW DECISION</span><h3>Observation history</h3></div><span class="lab-count">${state.shadow.length} observations</span></div>${observations || '<div class="lab-empty">No hay observaciones shadow todavía.</div>'}</section>`;
 }
 
 function renderModels() {
@@ -350,4 +366,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadTools(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadTools(), loadShadow(), loadChats()]).catch((error) => toast(error.message));

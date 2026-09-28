@@ -120,6 +120,27 @@ class DecisionRuntimeTests(unittest.TestCase):
         output = asyncio.run(DecisionRuntime(provider, 1).decide(request(question)))
         self.assertTrue(output.answers["needs_web"].value)
 
+    def test_shadow_decision_uses_small_schema_and_preserves_probabilities(self):
+        from app.decision.models import DecisionResult
+
+        result = DecisionResult.model_validate({
+            "model": "laya-shadow",
+            "answers": {
+                "needs_web": {"type": "boolean", "value": True, "confidence": 0.96, "probabilities": {"true": 0.96, "false": 0.04}},
+                "needs_tools": {"type": "boolean", "value": True, "confidence": 0.84},
+                "task_type": {"type": "choice", "value": "research", "confidence": 0.88, "probabilities": {"research": 0.88}},
+            },
+        })
+        provider = FakeProvider(result)
+        module = DecisionRuntimeModule(provider=provider)
+        registry = ModuleRegistry(FastAPI(), {"decision_shadow": "true"})
+        self.assertTrue(registry.register(module))
+        output = asyncio.run(module.shadow_decide("latest news", ["web_search"]))
+        self.assertEqual(output.model, "laya-shadow")
+        self.assertEqual(output.answers["needs_web"]["probabilities"]["true"], 0.96)
+        request = provider.calls
+        self.assertEqual(request, 1)
+
     def test_runtime_timeout_is_typed(self):
         class SlowProvider(FakeProvider):
             async def decide(self, value):

@@ -130,6 +130,7 @@ NEXO_ARBITER_URL=http://arbiter:8000
 NEXO_ARBITER_API_KEY=replace-me
 NEXO_DECISION_MODEL=jev-latest
 NEXO_DECISION_TIMEOUT=10
+NEXO_DECISION_SHADOW=false
 ```
 
 The experimental `POST /api/decisions` endpoint accepts `state` and a list of
@@ -151,6 +152,13 @@ route. When enabled, an unavailable Arbiter is reported by `GET /api/modules`
 and does not block Nexo startup. Decision failures are isolated and returned as
 safe typed errors; API keys and decision payloads are not logged or included in
 module diagnostics. See `docs/adr/0003-runtime-opcional-de-decisiones.md`.
+
+Set `NEXO_DECISION_SHADOW=true` to run the three-question Laya/Arbiter decision
+(`needs_web`, `needs_tools`, `task_type`) beside normal chat execution. Shadow
+results are observational only and are stored locally in SQLite. Inspect recent
+records with `GET /api/lab/shadow`; the Lab exposes the same read-only view.
+Shadow defaults to `false`, and setting it without enabling `decision-runtime`
+records an unavailable observation without affecting chat.
 
 ## Next milestones
 

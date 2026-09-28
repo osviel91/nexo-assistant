@@ -37,6 +37,7 @@ class AgentRuntime:
     ) -> AsyncIterator[dict[str, Any]]:
         answer = ""
         sources: list[dict[str, Any]] = []
+        tools_used: list[str] = []
         tool_rounds = 0
         for _ in range(self.limits.max_tool_rounds + 1):
             payload = {"model": model_id, "messages": messages, "stream": True}
@@ -81,7 +82,7 @@ class AgentRuntime:
                 return
 
             if not tool_calls:
-                yield {"complete": True, "answer": answer, "sources": sources}
+                yield {"complete": True, "answer": answer, "sources": sources, "tools_used": tools_used, "tool_rounds": tool_rounds}
                 return
             if tool_rounds >= self.limits.max_tool_rounds:
                 yield {"error": "Se alcanzó el límite de rondas de herramientas."}
@@ -94,6 +95,7 @@ class AgentRuntime:
             })
             tool_rounds += 1
             for call in tool_calls.values():
+                tools_used.append(call["name"])
                 tool_context = ToolExecutionContext(context.conversation_id, context.provider_id, context.model_id, tool_rounds)
                 started = time.monotonic()
                 status = "ok"

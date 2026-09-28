@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import logging
 import os
 import re
 import sqlite3
@@ -17,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import AgentRuntime, AgentRuntimeLimits
 from app.capabilities import normalize_model_capabilities
+from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
 from app.modules.mcp import MCPModule
@@ -29,6 +32,7 @@ DB_PATH = DATA_DIR / "nexo.sqlite3"
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 MAX_UPLOAD = int(os.getenv("NEXO_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 app = FastAPI(title="Nexo Chat", version="0.1.0")
+logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
 agent_runtime = AgentRuntime(module_registry, AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
 enabled_modules = enabled_module_ids()
@@ -51,6 +55,7 @@ if "decision-runtime" in enabled_modules:
         "decision_provider": os.getenv("NEXO_DECISION_PROVIDER", "arbiter"),
         "decision_timeout": os.getenv("NEXO_DECISION_TIMEOUT", "10"),
         "decision_model": os.getenv("NEXO_DECISION_MODEL", "jev-latest"),
+        "decision_shadow": os.getenv("NEXO_DECISION_SHADOW", "false"),
         "arbiter_url": os.getenv("NEXO_ARBITER_URL", ""),
         "arbiter_api_key": os.getenv("NEXO_ARBITER_API_KEY", ""),
     })
@@ -87,6 +92,12 @@ def startup() -> None:
            id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
            role TEXT NOT NULL, content TEXT NOT NULL, provider_id TEXT, model_id TEXT,
            attachments TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shadow_observations (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
+          mode TEXT NOT NULL, model TEXT, answers TEXT NOT NULL DEFAULT '{}',
+          execution TEXT NOT NULL DEFAULT '{}', metadata TEXT NOT NULL DEFAULT '{}',
+          latency_ms REAL, error TEXT, created_at TEXT NOT NULL
         );
         """)
         model_columns = {row["name"] for row in c.execute("PRAGMA table_info(models)")}
@@ -141,6 +152,21 @@ def modules():
 def tools():
     """Return the registered tools without exposing executable handlers."""
     return module_registry.tool_catalog()
+
+
+@app.get("/api/lab/shadow")
+def shadow_observations(conversation_id: str | None = None, limit: int = 20):
+    limit = min(max(limit, 1), 100)
+    query = "SELECT * FROM shadow_observations"
+    params: list[Any] = []
+    if conversation_id:
+        query += " WHERE conversation_id=?"
+        params.append(conversation_id)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with db() as c:
+        rows = c.execute(query, params).fetchall()
+    return [{**dict(row), "answers": json.loads(row["answers"]), "execution": json.loads(row["execution"]), "metadata": json.loads(row["metadata"])} for row in rows]
 
 
 @app.get("/api/providers")
@@ -262,7 +288,8 @@ async def chat(req: ChatIn):
                 elif a.get("kind") == "text":
                     parts.append({"type": "text", "text": f"\n\n[Archivo: {a.get('name','document')} ]\n{a.get('text','')[:120000]}"})
             user_content = parts
-        c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "user", req.content, req.provider_id, req.model_id, json.dumps(req.attachments), now()))
+        message_id = str(uuid.uuid4())
+        c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, req.provider_id, req.model_id, json.dumps(req.attachments), now()))
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
@@ -270,6 +297,9 @@ async def chat(req: ChatIn):
         supports_tools = "tool-calling" in json.loads(model["capabilities"] or "[]")
     execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0)
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
+    execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    if _shadow_configured():
+        asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future))
 
     async def events():
         headers = {"Authorization": f"Bearer {key}"} if key else {}
@@ -285,6 +315,9 @@ async def chat(req: ChatIn):
                         return
                     elif event.get("complete"):
                         answer, sources = event["answer"], event["sources"]
+                        execution = {"tools_used": event.get("tools_used", []), "tool_rounds": event.get("tool_rounds", 0), "web_search_used": "web_search" in event.get("tools_used", [])}
+                        if not execution_future.done():
+                            execution_future.set_result(execution)
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             with db() as c:
@@ -295,6 +328,33 @@ async def chat(req: ChatIn):
         except httpx.RequestError as e:
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
+
+
+def _shadow_configured() -> bool:
+    return str(os.getenv("NEXO_DECISION_SHADOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]]) -> None:
+    started = datetime.now(timezone.utc)
+    service = module_registry.service("decision-shadow")
+    result = ShadowDecision("shadow", None, {}, {}, None)
+    error = None
+    try:
+        if service is None or not getattr(service, "shadow_enabled", False):
+            raise RuntimeError("decision_runtime_unavailable")
+        logger.info("shadow decision started", extra={"conversation_id": conversation_id, "message_id": message_id})
+        result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
+        logger.info("shadow decision completed", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms})
+    except Exception as exc:
+        error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
+        result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
+        logger.warning("shadow decision failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error": error, "latency_ms": result.latency_ms})
+    try:
+        execution = await asyncio.wait_for(asyncio.shield(execution_future), timeout=1)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        execution = {"tools_used": [], "tool_rounds": 0, "web_search_used": False}
+    with db() as c:
+        c.execute("INSERT INTO shadow_observations(id,conversation_id,message_id,mode,model,answers,execution,metadata,latency_ms,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, message_id, result.mode, result.model, json.dumps(result.answers), json.dumps(execution), json.dumps(result.metadata), result.latency_ms, error, now()))
 
 
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
