@@ -309,13 +309,18 @@ async def test_embedding():
     configuration = embedding_configuration()
     if not configuration:
         raise HTTPException(400, "embedding configuration is not available")
+    with db() as connection:
+        provider = connection.execute("SELECT name FROM providers WHERE id=?", (configuration.provider_id,)).fetchone()
+        model = connection.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (configuration.provider_id, configuration.model_id)).fetchone()
+    if not provider or not model or "embedding" not in json.loads(model["capabilities"] or "[]"):
+        raise HTTPException(400, "model must be explicitly designated with embedding capability")
     started = asyncio.get_running_loop().time()
     try:
         async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
             service = retrieval_service(client)
             batch = await service.provider.embed(["Nexo embedding connectivity test"])
         dimension = len(batch.vectors[0]) if batch.vectors else 0
-        return {"ok": True, "provider": configuration.provider_id, "model": configuration.model_id, "dimension": dimension, "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
+        return {"ok": True, "provider": provider["name"], "provider_id": configuration.provider_id, "model": configuration.model_id, "status": "Ready", "dimension": dimension, "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
     except Exception as error:
         raise HTTPException(502, f"Embedding test failed: {str(error)[:180]}")
 
@@ -746,6 +751,9 @@ async def refresh_models(pid: str):
     with db() as c:
         for model in models:
             capabilities = normalize_model_capabilities(model, _tool_calling_fallback())
+            existing = c.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (pid, str(model["id"]))).fetchone()
+            if existing and "embedding" in json.loads(existing["capabilities"] or "[]"):
+                capabilities.add("embedding")
             diagnostic(logger, "model_capabilities", **{
                 "model": str(model["id"]),
                 "raw_capabilities": model.get("capabilities"),

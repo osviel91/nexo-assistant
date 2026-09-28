@@ -73,7 +73,7 @@ async function loadProviders() {
 async function loadKnowledge() {
   state.knowledge = await api('/settings/embeddings');
   const config = state.knowledge.configuration;
-  const providers = state.knowledge.providers || state.providers;
+  const providers = (state.knowledge.providers || state.providers).map((provider) => ({ ...provider, models: provider.models.filter((model) => (model.capabilities || []).includes('embedding')) })).filter((provider) => provider.models.length);
   $('#embedding-provider').innerHTML = providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
   const renderModels = () => { const provider = providers.find((item) => item.id === $('#embedding-provider').value); $('#embedding-model').innerHTML = (provider?.models || []).map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join(''); };
   $('#embedding-provider').onchange = renderModels;
@@ -467,16 +467,17 @@ function resetForm() { $('#provider-id').value = ''; $('#provider-name').value =
 function renderProviderList() {
   const list = $('#provider-list');
   if (!state.providers.length) { list.innerHTML = '<div class="empty-providers">Todavía no hay proveedores. Añade oMLX, OpenAI, DeepSeek o cualquier API compatible.</div>'; return; }
-  list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-pills">${provider.models.map((model) => `<span class="model-pill">${escapeHtml(model.id)}<button data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" aria-label="Quitar ${escapeHtml(model.id)}">×</button></span>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
+   list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-pills">${provider.models.map((model) => `<span class="model-pill"><span>${escapeHtml(model.id)}</span><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="embedding" ${(model.capabilities || []).includes('embedding') ? 'checked' : ''}> Embeddings</label><button data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" aria-label="Quitar ${escapeHtml(model.id)}">×</button></span>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
   list.querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => providerAction(button); });
 }
 
 async function providerAction(button) {
   const provider = state.providers.find((item) => item.id === button.dataset.id);
   try {
-    if (button.dataset.action === 'refresh') { button.textContent = '…'; await api(`/providers/${provider.id}/refresh`, { method: 'POST' }); await loadProviders(); toast('Modelos actualizados'); }
+    if (button.dataset.action === 'refresh') { button.textContent = '…'; await api(`/providers/${provider.id}/refresh`, { method: 'POST' }); await loadProviders(); await loadKnowledge(); toast('Modelos actualizados'); }
     if (button.dataset.action === 'delete' && confirm(`¿Eliminar ${provider.name} y sus modelos?`)) { await api(`/providers/${provider.id}`, { method: 'DELETE' }); await loadProviders(); }
     if (button.dataset.action === 'model-delete') { await api(`/providers/${provider.id}/models/${encodeURIComponent(button.dataset.model)}`, { method: 'DELETE' }); await loadProviders(); }
+    if (button.dataset.action === 'model-capability') { const model = provider.models.find((item) => item.id === button.dataset.model); const capabilities = new Set(model?.capabilities || []); button.checked ? capabilities.add(button.dataset.capability) : capabilities.delete(button.dataset.capability); await api(`/providers/${provider.id}/models/${encodeURIComponent(button.dataset.model)}`, { method: 'PATCH', body: JSON.stringify({ capabilities: [...capabilities] }) }); await loadProviders(); await loadKnowledge(); toast(button.checked ? 'Embedding capability enabled' : 'Embedding capability disabled'); }
     if (button.dataset.action === 'edit') { $('#provider-id').value = provider.id; $('#provider-name').value = provider.name; $('#provider-url').value = provider.base_url; $('#provider-key').value = ''; $('#provider-models').value = provider.models.map((model) => model.id).join('\n'); $('#form-title').textContent = 'Editar proveedor'; $('#save-provider').textContent = 'Guardar cambios'; $('#cancel-edit').hidden = false; $('#provider-name').focus(); }
   } catch (error) { toast(error.message); }
 }
@@ -493,7 +494,7 @@ $('#embedding-form').onsubmit = async (event) => {
   const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_top_k: Number($('#embedding-top-k').value), retrieval_max_context_chars: Number($('#embedding-context').value) };
   try { const result = await api('/settings/embeddings', { method: 'PUT', body: JSON.stringify(body) }); await loadKnowledge(); toast(result.invalidated ? 'Saved; indexes are outdated' : 'Knowledge configuration saved'); } catch (error) { toast(error.message); }
 };
-$('#test-embedding').onclick = async () => { try { const result = await api('/settings/embeddings/test', { method: 'POST' }); toast(`Embedding OK · ${result.dimension}d · ${result.latency_ms}ms`); } catch (error) { toast(error.message); } };
+$('#test-embedding').onclick = async () => { try { const result = await api('/settings/embeddings/test', { method: 'POST' }); toast(`${result.provider} / ${result.model} · ${result.status} · ${result.dimension}d · ${result.latency_ms}ms`); } catch (error) { toast(error.message); } };
 
 $('#agent-form').onsubmit = async (event) => {
   event.preventDefault();
