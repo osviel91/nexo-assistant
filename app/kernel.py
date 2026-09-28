@@ -18,6 +18,7 @@ class ToolExecutionContext:
     provider_id: str
     model_id: str
     round: int
+    run_id: str | None = None
 
 
 ToolHandler = Callable[[ToolExecutionContext, dict[str, Any]], Awaitable[dict[str, Any]]]

@@ -4,7 +4,7 @@ import unittest
 
 from fastapi import FastAPI
 
-from app.agent import AgentRuntime
+from app.agent_model import OpenAICompatibleModelAdapter
 from app.kernel import ModuleRegistry, ToolDefinition, ToolExecutionContext
 
 
@@ -46,11 +46,9 @@ class ProviderSerializationTests(unittest.TestCase):
         client = Client()
 
         async def run():
-            return [event async for event in AgentRuntime(registry).stream(
-                client, "https://omlx.example/v1/chat/completions", {},
-                [{"role": "user", "content": "current news"}], "Cyber-Tiel",
-                {"tool-calling"}, ToolExecutionContext("conversation", "provider", "Cyber-Tiel", 0),
-            )]
+            adapter = OpenAICompatibleModelAdapter(client, "https://omlx.example/v1/chat/completions", {}, "Cyber-Tiel")
+            tools = registry.tool_definitions(ToolExecutionContext("conversation", "provider", "Cyber-Tiel", 0), {"tool-calling"})
+            return [event async for event in adapter.stream([{"role": "user", "content": "current news"}], tools)]
 
         asyncio.run(run())
         method, endpoint, payload = client.calls[0]

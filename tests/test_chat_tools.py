@@ -82,6 +82,12 @@ class ChatToolTests(unittest.TestCase):
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="sin herramientas")))
                 asyncio.run(self.collect(response.body_iterator))
+                FakeClient.payloads = []
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="adjunto", attachments=[{"kind": "text", "name": "note.txt", "text": "contexto"}])))
+                asyncio.run(self.collect(response.body_iterator))
+                attachment_payload = FakeClient.payloads[0]
+                with main.db() as connection:
+                    stored_attachment = connection.execute("SELECT attachments FROM messages WHERE content='adjunto'").fetchone()[0]
             finally:
                 main.httpx.AsyncClient = old_client
                 main.DB_PATH = old_db
@@ -93,6 +99,8 @@ class ChatToolTests(unittest.TestCase):
             self.assertIn("Respuesta con fuente", body)
             self.assertEqual(tool_result_payload["messages"][-1]["role"], "tool")
             self.assertNotIn("tools", FakeClient.payloads[0])
+            self.assertEqual(attachment_payload["messages"][-1]["content"][1]["text"], "\n\n[Archivo: note.txt ]\ncontexto")
+            self.assertIn("note.txt", stored_attachment)
 
     async def collect(self, iterator):
         chunks = []

@@ -2,50 +2,32 @@ import asyncio
 import json
 import unittest
 
-from app.agent import AgentRuntime, AgentRuntimeLimits
+from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits
+from app.agent_model import ModelAdapterError, ModelStreamChunk
 from app.kernel import ModuleRegistry, ToolDefinition, ToolExecutionContext
 from fastapi import FastAPI
 
 
-class Response:
-    status_code = 200
-
-    def __init__(self, chunks):
-        self.chunks = chunks
-
-    async def aiter_lines(self):
-        for chunk in self.chunks:
-            yield "data: " + json.dumps({"choices": [{"delta": chunk}]})
-        yield "data: [DONE]"
-
-
-class Stream:
-    def __init__(self, response):
-        self.response = response
-
-    async def __aenter__(self):
-        return self.response
-
-    async def __aexit__(self, *args):
-        return None
-
-
-class Client:
+class Adapter:
     def __init__(self, responses):
         self.responses = iter(responses)
         self.payloads = []
+        self.model_id = "model"
 
-    def stream(self, method, url, headers, json):
-        self.payloads.append(json)
-        return Stream(Response(next(self.responses)))
+    async def stream(self, messages, tools, temperature=None):
+        payload = {"model": self.model_id, "messages": messages}
+        if tools:
+            payload["tools"] = tools
+        self.payloads.append(payload)
+        for chunk in next(self.responses):
+            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"))
 
 
-def run(runtime, client, capabilities={"tool-calling"}):
+def run(runtime, adapter, registry, capabilities={"tool-calling"}):
     async def collect():
-        return [event async for event in runtime.stream(
-            client, "http://provider/chat", {}, [{"role": "user", "content": "x"}], "model",
-            capabilities, ToolExecutionContext("conversation", "provider", "model", 0),
-        )]
+        context = ToolExecutionContext("conversation", "provider", "model", 0)
+        request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], registry.tool_definitions(context, capabilities), registry.context.tools, context)
+        return [event async for event in runtime.stream(request)]
     return asyncio.run(collect())
 
 
@@ -62,11 +44,12 @@ class AgentRuntimeTests(unittest.TestCase):
             seen.append((context, arguments))
             return {"results": [{"title": "Source", "url": "https://source.test"}]}
 
-        client = Client([
+        adapter = Adapter([
             [{"tool_calls": [{"index": 0, "id": "call", "function": {"name": "test_tool", "arguments": '{"q":"x"}'}}]}],
             [{"content": "answer [1]"}],
         ])
-        events = run(AgentRuntime(self.registry(handler)), client)
+        registry = self.registry(handler)
+        events = run(AgentRuntime(), adapter, registry)
         self.assertEqual(seen[0][0], ToolExecutionContext("conversation", "provider", "model", 1))
         self.assertEqual(seen[0][1], {"q": "x"})
         self.assertEqual(events[-1]["sources"], [{"title": "Source", "url": "https://source.test"}])
@@ -75,7 +58,7 @@ class AgentRuntimeTests(unittest.TestCase):
         trace_events = [event["trace"] for event in events if "trace" in event]
         self.assertEqual([event["type"] for event in trace_events], ["REASON", "ACT", "REASON"])
         self.assertNotIn("arguments", json.dumps(trace_events))
-        self.assertIn("tools", client.payloads[0])
+        self.assertIn("tools", adapter.payloads[0])
 
     def test_invalid_unknown_and_handler_errors_are_safe(self):
         async def broken(context, arguments):
@@ -83,31 +66,49 @@ class AgentRuntimeTests(unittest.TestCase):
 
         for name, arguments, code in (("missing", "{}", "unknown_tool"), ("test_tool", "not-json", "invalid_arguments"), ("test_tool", "{}", "tool_execution_error")):
             registry = self.registry(broken)
-            client = Client([
+            adapter = Adapter([
                 [{"tool_calls": [{"index": 0, "id": "call", "function": {"name": name, "arguments": arguments}}]}],
                 [{"content": "continued"}],
             ])
-            events = run(AgentRuntime(registry), client)
+            events = run(AgentRuntime(), adapter, registry)
             self.assertTrue(any(event.get("status") == "tool_error" for event in events))
-            self.assertNotIn("secret", json.dumps(client.payloads[1]))
-            self.assertIn(code, client.payloads[1]["messages"][-1]["content"])
+            self.assertNotIn("secret", json.dumps(adapter.payloads[1]))
+            self.assertIn(code, adapter.payloads[1]["messages"][-1]["content"])
 
     def test_models_without_tool_capability_do_not_receive_tools(self):
         async def handler(context, arguments):
             return {}
 
-        client = Client([[{"content": "plain"}]])
-        run(AgentRuntime(self.registry(handler)), client, set())
-        self.assertNotIn("tools", client.payloads[0])
+        adapter = Adapter([[{"content": "plain"}]])
+        registry = self.registry(handler)
+        run(AgentRuntime(), adapter, registry, set())
+        self.assertNotIn("tools", adapter.payloads[0])
+
+    def test_provider_failure_is_safe_and_trace_has_no_request_content(self):
+        class BrokenAdapter:
+            model_id = "model"
+
+            async def stream(self, messages, tools, temperature=None):
+                raise ModelAdapterError("Provider connection failed: offline")
+                yield
+
+        registry = self.registry(lambda _context, _arguments: {"secret": "result"})
+        events = run(AgentRuntime(), BrokenAdapter(), registry, set())
+        trace = next(event["trace"] for event in events if "trace" in event)
+        self.assertEqual(events[-1]["error"], "Provider connection failed: offline")
+        self.assertNotIn("content", json.dumps(trace))
+        self.assertNotIn("secret", json.dumps(trace))
 
     def test_shadow_branch_cannot_change_agent_payload(self):
         async def handler(context, arguments):
             return {}
 
-        first = Client([[{"content": "plain"}]])
-        second = Client([[{"content": "plain"}]])
-        run(AgentRuntime(self.registry(handler)), first, set())
-        run(AgentRuntime(self.registry(handler)), second, set())
+        first = Adapter([[{"content": "plain"}]])
+        second = Adapter([[{"content": "plain"}]])
+        first_registry = self.registry(handler)
+        second_registry = self.registry(handler)
+        run(AgentRuntime(), first, first_registry, set())
+        run(AgentRuntime(), second, second_registry, set())
         self.assertEqual(first.payloads, second.payloads)
 
     def test_round_limit_and_output_limit(self):
@@ -115,11 +116,12 @@ class AgentRuntimeTests(unittest.TestCase):
             return {"value": "x" * 1000}
 
         responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "test_tool", "arguments": "{}"}}]}] for i in range(4)]
-        client = Client(responses)
-        events = run(AgentRuntime(self.registry(handler), AgentRuntimeLimits(3, 100)), client)
-        self.assertEqual(len(client.payloads), 4)
+        adapter = Adapter(responses)
+        registry = self.registry(handler)
+        events = run(AgentRuntime(AgentRuntimeLimits(3, 100)), adapter, registry)
+        self.assertEqual(len(adapter.payloads), 4)
         self.assertEqual(events[-1]["error"], "Se alcanzó el límite de rondas de herramientas.")
-        self.assertLessEqual(len(client.payloads[1]["messages"][-1]["content"]), 100)
+        self.assertLessEqual(len(adapter.payloads[1]["messages"][-1]["content"]), 100)
 
 
 if __name__ == "__main__":

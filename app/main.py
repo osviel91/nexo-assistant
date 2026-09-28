@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.agent import AgentRuntime, AgentRuntimeLimits
+from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits
+from app.agent_model import OpenAICompatibleModelAdapter
 from app.capabilities import normalize_model_capabilities
 from app.diagnostics import diagnostic, recent
 from app.decision.models import ShadowDecision
@@ -26,6 +27,7 @@ from app.modules.attachments import AttachmentsModule
 from app.modules.mcp import MCPModule
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
+from app.migrations import migrate
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,7 +37,7 @@ MAX_UPLOAD = int(os.getenv("NEXO_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
-agent_runtime = AgentRuntime(module_registry, AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
+agent_runtime = AgentRuntime(AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
 shadow_tasks: set[asyncio.Task[None]] = set()
 enabled_modules = enabled_module_ids()
 if "attachments" in enabled_modules:
@@ -78,45 +80,7 @@ def now() -> str:
 @app.on_event("startup")
 def startup() -> None:
     with db() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS providers (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
-          api_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS models (
-           id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-           label TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(provider_id,id)
-        );
-        CREATE TABLE IF NOT EXISTS conversations (
-          id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS messages (
-           id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-           role TEXT NOT NULL, content TEXT NOT NULL, provider_id TEXT, model_id TEXT,
-           attachments TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shadow_observations (
-          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
-          mode TEXT NOT NULL, model TEXT, answers TEXT NOT NULL DEFAULT '{}',
-          execution TEXT NOT NULL DEFAULT '{}', metadata TEXT NOT NULL DEFAULT '{}',
-          latency_ms REAL, error TEXT, created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS runtime_trace_events (
-          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
-          sequence INTEGER NOT NULL, type TEXT NOT NULL, started_at TEXT NOT NULL,
-          duration_ms REAL, status TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS capability_refreshes (
-          provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
-          refreshed_at TEXT NOT NULL
-        );
-        """)
-        model_columns = {row["name"] for row in c.execute("PRAGMA table_info(models)")}
-        if "capabilities" not in model_columns:
-            c.execute("ALTER TABLE models ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
-        message_columns = {row["name"] for row in c.execute("PRAGMA table_info(messages)")}
-        if "sources" not in message_columns:
-            c.execute("ALTER TABLE messages ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
+        migrate(c)
     module_registry.startup()
     try:
         asyncio.get_running_loop().create_task(_refresh_all_provider_capabilities())
@@ -351,6 +315,7 @@ async def chat(req: ChatIn):
                     parts.append({"type": "text", "text": f"\n\n[Archivo: {a.get('name','document')} ]\n{a.get('text','')[:120000]}"})
             user_content = parts
         message_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
         c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, req.provider_id, req.model_id, json.dumps(req.attachments), now()))
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
@@ -363,12 +328,12 @@ async def chat(req: ChatIn):
             "fallback_enabled": _tool_calling_fallback(),
             "effective_tool_capability": supports_tools,
         })
-    execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0)
+    execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0, run_id)
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     if _shadow_configured():
-        trace_id = _insert_trace_event(cid, message_id, "DECIDE", "running", {"model": None})
-        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future, trace_id))
+        trace_id = _insert_trace_event(cid, message_id, "DECIDE", "running", {"model": None, "run_id": run_id})
+        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future, trace_id, run_id))
         shadow_tasks.add(task)
         task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
@@ -376,7 +341,10 @@ async def chat(req: ChatIn):
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
-                async for event in agent_runtime.stream(client, url, headers, messages, req.model_id, {"tool-calling"} if supports_tools else set(), execution_context, req.temperature):
+                model_adapter = OpenAICompatibleModelAdapter(client, url, headers, req.model_id)
+                tool_definitions = module_registry.tool_definitions(execution_context, {"tool-calling"} if supports_tools else set())
+                run_request = AgentRunRequest(model_adapter, messages, tool_definitions, module_registry.context.tools, execution_context, req.temperature)
+                async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
                         _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))
@@ -438,7 +406,7 @@ def _update_trace_event(event_id: str, status: str, metadata: dict[str, Any], du
         c.execute("UPDATE runtime_trace_events SET status=?,duration_ms=?,metadata=? WHERE id=?", (status, duration_ms, json.dumps(metadata), event_id))
 
 
-async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]], trace_id: str | None = None) -> None:
+async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]], trace_id: str | None = None, run_id: str | None = None) -> None:
     started = datetime.now(timezone.utc)
     service = module_registry.service("decision-shadow")
     result = ShadowDecision("shadow", None, {}, {}, None)
@@ -449,13 +417,13 @@ async def _run_shadow_observation(message_id: str, conversation_id: str, message
         diagnostic(logger, "shadow_started", conversation_id=conversation_id, message_id=message_id, latency_ms=None, error_code=None)
         result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
         if trace_id:
-            _update_trace_event(trace_id, "success", {"model": result.model, "answers": result.answers, "confidence": {key: answer.get("confidence") for key, answer in result.answers.items()}, "probabilities": {key: answer.get("probabilities") for key, answer in result.answers.items() if answer.get("probabilities")}}, result.latency_ms)
+            _update_trace_event(trace_id, "success", {"model": result.model, "run_id": run_id, "answers": result.answers, "confidence": {key: answer.get("confidence") for key, answer in result.answers.items()}, "probabilities": {key: answer.get("probabilities") for key, answer in result.answers.items() if answer.get("probabilities")}}, result.latency_ms)
         diagnostic(logger, "shadow_completed", conversation_id=conversation_id, message_id=message_id, latency_ms=result.latency_ms, error_code=None)
     except Exception as exc:
         error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
         result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
         if trace_id:
-            _update_trace_event(trace_id, "error", {"error": error}, result.latency_ms)
+            _update_trace_event(trace_id, "error", {"error": error, "run_id": run_id}, result.latency_ms)
         diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code=error, latency_ms=result.latency_ms)
     try:
         execution = await asyncio.shield(execution_future)
