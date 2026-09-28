@@ -17,7 +17,9 @@ class MigrationTests(unittest.TestCase):
                 version_count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
             self.assertIn("providers", tables)
             self.assertIn("runtime_trace_events", tables)
-            self.assertEqual(version_count, 1)
+            self.assertIn("runtime_runs", tables)
+            self.assertIn("runtime_events", tables)
+            self.assertEqual(version_count, 2)
 
     def test_existing_database_gets_missing_columns_without_replacing_data(self):
         with tempfile.TemporaryDirectory() as directory:

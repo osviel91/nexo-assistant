@@ -29,6 +29,7 @@ from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor
+from app.runtime_trace import RuntimeEventSink, safe_metadata
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -157,24 +158,82 @@ def diagnostics(limit: int = 50):
 
 
 @app.get("/api/lab/traces")
-def traces(conversation_id: str | None = None, limit: int = 20):
+def traces(conversation_id: str | None = None, message_id: str | None = None, run_id: str | None = None, limit: int = 20):
     limit = min(max(limit, 1), 100)
-    query = "SELECT * FROM runtime_trace_events"
+    query = """SELECT e.id, r.conversation_id, r.message_id, e.sequence, e.kind AS type,
+        e.started_at, e.completed_at, e.duration_ms, e.status, e.safe_metadata AS metadata,
+        e.run_id FROM runtime_events e JOIN runtime_runs r ON r.id=e.run_id"""
     params: list[Any] = []
     if conversation_id:
-        query += " WHERE conversation_id=?"
+        query += " WHERE r.conversation_id=?"
         params.append(conversation_id)
-    query += " ORDER BY started_at DESC, sequence DESC LIMIT ?"
+    if message_id:
+        query += " AND " if conversation_id else " WHERE "
+        query += "r.message_id=?"
+        params.append(message_id)
+    if run_id:
+        query += " AND " if conversation_id or message_id else " WHERE "
+        query += "e.run_id=?"
+        params.append(run_id)
+    query += " ORDER BY e.started_at DESC, e.sequence DESC LIMIT ?"
     params.append(limit)
     with db() as c:
         rows = c.execute(query, params).fetchall()
+        if not rows:
+            legacy = "SELECT * FROM runtime_trace_events"
+            legacy_params: list[Any] = []
+            legacy_filters = []
+            if conversation_id:
+                legacy_filters.append("conversation_id=?"); legacy_params.append(conversation_id)
+            if message_id:
+                legacy_filters.append("message_id=?"); legacy_params.append(message_id)
+            if legacy_filters: legacy += " WHERE " + " AND ".join(legacy_filters)
+            legacy += " ORDER BY started_at DESC, sequence DESC LIMIT ?"
+            legacy_params.append(limit)
+            rows = c.execute(legacy, legacy_params).fetchall()
     return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
+@app.get("/api/lab/runs")
+def runtime_runs(conversation_id: str | None = None, message_id: str | None = None, run_id: str | None = None, limit: int = 20):
+    limit = min(max(limit, 1), 100)
+    query = "SELECT * FROM runtime_runs"
+    params: list[Any] = []
+    filters = []
+    if conversation_id:
+        filters.append("conversation_id=?"); params.append(conversation_id)
+    if message_id:
+        filters.append("message_id=?"); params.append(message_id)
+    if run_id:
+        filters.append("id=?"); params.append(run_id)
+    if filters: query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY started_at DESC LIMIT ?"; params.append(limit)
+    with db() as c: rows = c.execute(query, params).fetchall()
+    return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
+@app.get("/api/lab/runs/{run_id}")
+def runtime_run(run_id: str):
+    with db() as c:
+        run = c.execute("SELECT * FROM runtime_runs WHERE id=?", (run_id,)).fetchone()
+        if not run: raise HTTPException(404, "Runtime run not found")
+        events = c.execute("SELECT * FROM runtime_events WHERE run_id=? ORDER BY sequence", (run_id,)).fetchall()
+    return {"run": {**dict(run), "metadata": json.loads(run["metadata"])}, "events": [{**dict(event), "safe_metadata": json.loads(event["safe_metadata"])} for event in events]}
+
+
+@app.get("/api/lab/runs/{run_id}/events")
+def runtime_run_events(run_id: str):
+    return runtime_run(run_id)["events"]
 
 
 @app.get("/api/lab/traces/{message_id}")
 def message_trace(message_id: str):
     with db() as c:
-        rows = c.execute("SELECT * FROM runtime_trace_events WHERE message_id=? ORDER BY sequence", (message_id,)).fetchall()
+        rows = c.execute("""SELECT e.id, r.conversation_id, r.message_id, e.sequence, e.kind AS type,
+            e.started_at, e.completed_at, e.duration_ms, e.status, e.safe_metadata AS metadata, e.run_id
+            FROM runtime_events e JOIN runtime_runs r ON r.id=e.run_id WHERE r.message_id=? ORDER BY e.sequence""", (message_id,)).fetchall()
+        if not rows:
+            rows = c.execute("SELECT * FROM runtime_trace_events WHERE message_id=? ORDER BY sequence", (message_id,)).fetchall()
     return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
 
 
@@ -320,6 +379,7 @@ async def chat(req: ChatIn):
         run_id = str(uuid.uuid4())
         c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, req.provider_id, req.model_id, json.dumps(req.attachments), now()))
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
+        c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", req.model_id, json.dumps({"provider": req.provider_id})))
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
@@ -331,11 +391,13 @@ async def chat(req: ChatIn):
             "effective_tool_capability": supports_tools,
         })
     execution_context = ToolExecutionContext(cid, req.provider_id, req.model_id, 0, run_id)
+    event_sink = SQLiteRuntimeEventSink(run_id)
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     if _shadow_configured():
         trace_id = _insert_trace_event(cid, message_id, "DECIDE", "running", {"model": None, "run_id": run_id})
-        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future, trace_id, run_id))
+        decide_event_id = event_sink.start_event("DECIDE", "decision shadow", {"round": 0})
+        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future, trace_id, run_id, event_sink, decide_event_id))
         shadow_tasks.add(task)
         task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
@@ -346,7 +408,7 @@ async def chat(req: ChatIn):
                 model_adapter = OpenAICompatibleModelAdapter(client, url, headers, req.model_id)
                 catalog = module_registry.tool_catalog_view()
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set())
-                run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context, req.temperature)
+                run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context, req.temperature, event_sink)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
@@ -357,6 +419,7 @@ async def chat(req: ChatIn):
                     elif "status" in event:
                         yield "data: " + json.dumps({"status": event["status"], "message": event["message"]}) + "\n\n"
                     elif "error" in event:
+                        run_status = "failed"
                         yield "data: " + json.dumps({"error": event["error"]}) + "\n\n"
                         return
                     elif event.get("complete"):
@@ -364,6 +427,7 @@ async def chat(req: ChatIn):
                         execution = {"tools_used": event.get("tools_used", []), "tool_rounds": event.get("tool_rounds", 0), "web_search_used": "web_search" in event.get("tools_used", [])}
                         if not execution_future.done():
                             execution_future.set_result(execution)
+                        run_status = "completed"
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             with db() as c:
@@ -372,8 +436,10 @@ async def chat(req: ChatIn):
             module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
             yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id, "sources": sources}) + "\n\n"
         except httpx.RequestError as e:
+            run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
         finally:
+            _finish_runtime_run(run_id, locals().get("run_status", "failed"))
             if not execution_future.done():
                 execution_future.set_result({"tools_used": [], "tool_rounds": 0, "web_search_used": False})
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
@@ -396,20 +462,54 @@ def _finish_shadow_task(task: asyncio.Task[None], conversation_id: str, message_
         diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="shadow_task_failed")
 
 
+class SQLiteRuntimeEventSink:
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+
+    def start_event(self, kind: str, name: str, metadata: dict[str, Any] | None = None, parent_event_id: str | None = None) -> str:
+        event_id = str(uuid.uuid4())
+        try:
+            with db() as c:
+                sequence = c.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM runtime_events WHERE run_id=?", (self.run_id,)).fetchone()[0]
+                c.execute("INSERT INTO runtime_events(id,run_id,sequence,parent_event_id,kind,name,started_at,status,safe_metadata) VALUES(?,?,?,?,?,?,?,?,?)", (event_id, self.run_id, sequence, parent_event_id, kind, name, now(), "running", json.dumps(safe_metadata(metadata))))
+        except sqlite3.Error:
+            logger.exception("runtime event start failed", extra={"run_id": self.run_id, "kind": kind})
+            return ""
+        return event_id
+
+    def finish_event(self, event_id: str | None, status: str, metadata: dict[str, Any] | None = None, duration_ms: float | None = None) -> None:
+        if not event_id:
+            return
+        status = {"success": "completed", "ok": "completed", "error": "failed", "tool_execution_error": "failed", "tool_not_available": "failed", "invalid_arguments": "failed"}.get(status, status)
+        try:
+            with db() as c:
+                c.execute("UPDATE runtime_events SET completed_at=?,duration_ms=?,status=?,safe_metadata=? WHERE id=?", (now(), duration_ms, status, json.dumps(safe_metadata(metadata)), event_id))
+        except sqlite3.Error:
+            logger.exception("runtime event finalization failed", extra={"run_id": self.run_id, "event_id": event_id})
+
+
+def _finish_runtime_run(run_id: str, status: str) -> None:
+    try:
+        with db() as c:
+            c.execute("UPDATE runtime_runs SET completed_at=?,status=? WHERE id=? AND completed_at IS NULL", (now(), status, run_id))
+    except sqlite3.Error:
+        logger.exception("runtime run finalization failed", extra={"run_id": run_id})
+
+
 def _insert_trace_event(conversation_id: str, message_id: str, event_type: str, status: str, metadata: dict[str, Any], duration_ms: float | None = None) -> str:
     event_id = str(uuid.uuid4())
     with db() as c:
         sequence = c.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM runtime_trace_events WHERE message_id=?", (message_id,)).fetchone()[0]
-        c.execute("INSERT INTO runtime_trace_events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, conversation_id, message_id, sequence, event_type, now(), duration_ms, status, json.dumps(metadata)))
+        c.execute("INSERT INTO runtime_trace_events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, conversation_id, message_id, sequence, event_type, now(), duration_ms, status, json.dumps(safe_metadata(metadata))))
     return event_id
 
 
 def _update_trace_event(event_id: str, status: str, metadata: dict[str, Any], duration_ms: float | None = None) -> None:
     with db() as c:
-        c.execute("UPDATE runtime_trace_events SET status=?,duration_ms=?,metadata=? WHERE id=?", (status, duration_ms, json.dumps(metadata), event_id))
+        c.execute("UPDATE runtime_trace_events SET status=?,duration_ms=?,metadata=? WHERE id=?", (status, duration_ms, json.dumps(safe_metadata(metadata)), event_id))
 
 
-async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]], trace_id: str | None = None, run_id: str | None = None) -> None:
+async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]], trace_id: str | None = None, run_id: str | None = None, event_sink: RuntimeEventSink | None = None, event_id: str | None = None) -> None:
     started = datetime.now(timezone.utc)
     service = module_registry.service("decision-shadow")
     result = ShadowDecision("shadow", None, {}, {}, None)
@@ -421,12 +521,16 @@ async def _run_shadow_observation(message_id: str, conversation_id: str, message
         result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
         if trace_id:
             _update_trace_event(trace_id, "success", {"model": result.model, "run_id": run_id, "answers": result.answers, "confidence": {key: answer.get("confidence") for key, answer in result.answers.items()}, "probabilities": {key: answer.get("probabilities") for key, answer in result.answers.items() if answer.get("probabilities")}}, result.latency_ms)
+        if event_sink:
+            event_sink.finish_event(event_id, "completed", {"model": result.model, "answers": result.answers, "confidence": {key: answer.get("confidence") for key, answer in result.answers.items()}}, result.latency_ms)
         diagnostic(logger, "shadow_completed", conversation_id=conversation_id, message_id=message_id, latency_ms=result.latency_ms, error_code=None)
     except Exception as exc:
         error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
         result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
         if trace_id:
             _update_trace_event(trace_id, "error", {"error": error, "run_id": run_id}, result.latency_ms)
+        if event_sink:
+            event_sink.finish_event(event_id, "failed", {"error_code": error}, result.latency_ms)
         diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code=error, latency_ms=result.latency_ms)
     try:
         execution = await asyncio.shield(execution_future)

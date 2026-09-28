@@ -1,7 +1,7 @@
 import { renderMarkdown } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -73,7 +73,7 @@ async function loadShadow() {
 }
 
 async function loadTraces() {
-  state.traces = await api('/lab/traces?limit=30');
+  [state.traces, state.runs] = await Promise.all([api('/lab/traces?limit=30'), api('/lab/runs?limit=10')]);
   renderLab();
 }
 
@@ -232,13 +232,14 @@ function renderShadow() {
 }
 
 function renderRuntime() {
-  const events = state.traces.map((event) => {
+  const runs = state.runs.map((run) => `<details class="model-provider" ${state.runs[0] === run ? 'open' : ''}><summary class="model-provider-head"><div><h4>RUN · ${escapeHtml(run.status)}</h4><span>${escapeHtml(run.model || 'unknown model')} · ${escapeHtml(run.id)}</span></div><span class="status ${run.status === 'completed' ? 'status-ready' : 'status-disabled'}">${escapeHtml(run.status)}</span></summary><div class="model-list">${state.traces.filter((event) => event.run_id === run.id).map((event) => `<div class="model-row"><strong>${String(event.sequence).padStart(2, '0')} ${escapeHtml(event.type)}</strong><span>${escapeHtml(event.metadata?.tool || event.metadata?.model || event.type)} · ${escapeHtml(String(event.duration_ms ?? 0))}ms</span></div>`).join('') || '<div class="lab-empty">No events</div>'}</div></details>`).join('');
+  const events = state.traces.filter((event) => !event.run_id).map((event) => {
     const metadata = event.metadata || {};
     const label = event.type === 'ACT' ? metadata.tool || 'tool' : event.type === 'REASON' ? `${metadata.model || 'model'} · round ${metadata.round || '?'}` : metadata.model || 'shadow decision';
     const details = event.type === 'DECIDE' && metadata.answers ? Object.entries(metadata.answers).map(([key, answer]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(answer.value === true ? 'YES' : answer.value === false ? 'NO' : answer.value)} · ${Math.round((answer.confidence || 0) * 100)}%</div>`).join('') : '';
     return `<article class="trace-event"><div class="trace-index">${String(event.sequence).padStart(2, '0')}</div><div class="trace-main"><div class="trace-head"><strong>${escapeHtml(event.type)}</strong><span>${escapeHtml(String(event.duration_ms ?? 0))}ms · ${escapeHtml(event.status)}</span></div><div class="trace-label">${escapeHtml(label)}</div>${details}</div></article>`;
   }).join('');
-  return `<section class="lab-section runtime-trace"><div class="lab-section-head"><div><span class="eyebrow">RUNTIME TRACE</span><h3>Observable execution</h3></div><span class="lab-count">${state.traces.length} events</span></div>${events || '<div class="lab-empty">No hay trazas todavía.</div>'}</section>`;
+  return `<section class="lab-section runtime-trace"><div class="lab-section-head"><div><span class="eyebrow">RUNTIME TRACE</span><h3>Observable execution</h3></div><span class="lab-count">${state.runs.length} runs</span></div>${runs}${events}${runs || events ? '' : '<div class="lab-empty">No hay trazas todavía.</div>'}</section>`;
 }
 
 function renderModels() {

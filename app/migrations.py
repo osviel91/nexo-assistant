@@ -54,6 +54,30 @@ def _migration_1(connection: sqlite3.Connection) -> None:
 MIGRATIONS: tuple[tuple[int, Migration], ...] = ((1, _migration_1),)
 
 
+def _migration_2(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS runtime_runs (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT,
+      status TEXT NOT NULL, model TEXT, metadata TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE IF NOT EXISTS runtime_events (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runtime_runs(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL, parent_event_id TEXT REFERENCES runtime_events(id),
+      kind TEXT NOT NULL, name TEXT NOT NULL, started_at TEXT NOT NULL,
+      completed_at TEXT, duration_ms REAL, status TEXT NOT NULL,
+      safe_metadata TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_runs_conversation ON runtime_runs(conversation_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_runtime_runs_message ON runtime_runs(message_id);
+    CREATE INDEX IF NOT EXISTS idx_runtime_events_run_sequence ON runtime_events(run_id, sequence);
+    CREATE INDEX IF NOT EXISTS idx_runtime_events_started ON runtime_events(started_at);
+    """)
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2))
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

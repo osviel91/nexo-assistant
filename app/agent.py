@@ -10,6 +10,7 @@ from app.agent_model import ModelAdapter, ModelAdapterError
 from app.diagnostics import diagnostic
 from app.kernel import ToolExecutionContext
 from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
+from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
 
 logger = logging.getLogger("nexo.agent")
 
@@ -28,6 +29,7 @@ class AgentRunRequest:
     tool_executor: ToolExecutor
     context: ToolExecutionContext
     temperature: float | None = None
+    event_sink: RuntimeEventSink = NullRuntimeEventSink()
 
 
 class AgentRuntime:
@@ -44,6 +46,7 @@ class AgentRuntime:
         tool_rounds = 0
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
+            reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, {"model": request.model.model_id, "round": tool_rounds + 1})
             definitions = request.effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
@@ -68,7 +71,9 @@ class AgentRuntime:
                         current["name"] += function.get("name", "") or ""
                         current["arguments"] += function.get("arguments", "") or ""
             except ModelAdapterError as exc:
-                yield {"trace": {"type": "REASON", "duration_ms": round((time.perf_counter() - reason_started) * 1000, 2), "status": "error", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
+                duration_ms = round((time.perf_counter() - reason_started) * 1000, 2)
+                request.event_sink.finish_event(reason_event_id, "failed", {"error_code": "provider_failure", "model": request.model.model_id, "round": tool_rounds + 1}, duration_ms)
+                yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
                 yield {"error": str(exc)}
                 return
 
@@ -78,7 +83,9 @@ class AgentRuntime:
                 "tool_calls_present": bool(tool_calls),
                 "tool_call_names": [call["name"] for call in tool_calls.values() if call["name"]],
             })
-            yield {"trace": {"type": "REASON", "duration_ms": round((time.perf_counter() - reason_started) * 1000, 2), "status": "success", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
+            duration_ms = round((time.perf_counter() - reason_started) * 1000, 2)
+            request.event_sink.finish_event(reason_event_id, "completed", {"model": request.model.model_id, "round": tool_rounds + 1}, duration_ms)
+            yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "success", "metadata": {"model": request.model.model_id, "round": tool_rounds + 1, "run_id": request.context.run_id}}}
 
             if not tool_calls:
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
@@ -98,6 +105,7 @@ class AgentRuntime:
                 tools_used.append(call["name"])
                 tool_context = ToolExecutionContext(request.context.conversation_id, request.context.provider_id, request.context.model_id, tool_rounds, request.context.run_id)
                 started = time.monotonic()
+                event_id = request.event_sink.start_event("ACT", call["name"], {"tool": call["name"], "round": tool_rounds})
                 status = "ok"
                 try:
                     arguments = json.loads(call["arguments"] or "{}")
@@ -119,7 +127,10 @@ class AgentRuntime:
                 if not isinstance(result, dict):
                     result = {"error": {"code": "tool_execution_error", "message": "La herramienta devolvió un resultado inválido."}}
                     status = "tool_execution_error"
-                yield {"trace": {"type": "ACT", "duration_ms": round(time.monotonic() - started, 4) * 1000, "status": "success" if status == "ok" and not result.get("error") else status, "metadata": {"tool": call["name"], "round": tool_rounds, "run_id": request.context.run_id}}}
+                duration_ms = round(time.monotonic() - started, 4) * 1000
+                event_status = "success" if status == "ok" and not result.get("error") else status
+                request.event_sink.finish_event(event_id, event_status, {"tool": call["name"], "round": tool_rounds, **({"error_code": result.get("error", {}).get("code")} if result.get("error") else {})}, duration_ms)
+                yield {"trace": {"type": "ACT", "duration_ms": duration_ms, "status": event_status, "metadata": {"tool": call["name"], "round": tool_rounds, "run_id": request.context.run_id}}}
                 if isinstance(result.get("results"), list):
                     numbered = []
                     for item in result["results"]:
