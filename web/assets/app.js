@@ -1,4 +1,5 @@
 import { renderMarkdown } from './markdown.js';
+import { effectiveMessageIdentity } from './identity.js';
 
 const $ = (selector) => document.querySelector(selector);
 const state = { providers: [], agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null };
@@ -107,7 +108,6 @@ function currentAgent() { return state.agents.find((agent) => agent.id === state
 function renderAgentPicker() {
   const agent = currentAgent();
   $('#agent-picker-name').textContent = agent?.name || 'Nexo';
-  $('#composer-agent').textContent = agent?.name || 'Nexo';
 }
 function renderAgentList() {
   const items = [{ id: '', name: 'Nexo', description: 'General assistant' }, ...state.agents];
@@ -205,7 +205,7 @@ function renderMessages() {
     const runtime = message.runtime || {};
     const metrics = message.role === 'assistant' && (runtime.tokens_per_second != null || runtime.completion_tokens != null || runtime.context_used_tokens != null)
       ? `<div class="message-metrics">${runtime.tokens_per_second != null ? `${escapeHtml(runtime.tokens_per_second)} tok/s` : ''}${runtime.completion_tokens != null ? ` · ${escapeHtml(runtime.completion_tokens)} tok` : ''}${runtime.context_used_tokens != null && runtime.context_window != null ? ` · ctx ${escapeHtml(runtime.context_used_tokens)}/${escapeHtml(runtime.context_window)}` : ''}</div>` : '';
-    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">NEXO · ${escapeHtml(message.model_id || '')}</div>` : ''}<div class="message-content">${content}</div>${metrics}${attachments}${sourceList}</div></article>`;
+    return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}<div class="message-content">${content}</div>${metrics}${attachments}${sourceList}</div></article>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
 }
@@ -302,7 +302,7 @@ function renderConfig() {
   const runtime = state.lastRuntime;
   if (!runtime) return '<div class="lab-empty">No completed run yet.</div>';
   const row = (label, value) => value == null || value === '' ? '' : `<div class="config-value"><span>${label}</span> ${escapeHtml(value)}</div>`;
-  return `<div class="config-block">${row('Agent', runtime.agent_profile_name || 'Nexo')}${row('Model', runtime.resolved_model)}${row('Provider', runtime.resolved_provider)}${row('System instructions', runtime.system_instructions_applied ? 'applied' : 'none')}</div><div class="config-block"><h3>TELEMETRY</h3>${row('Generation', runtime.completion_tokens != null ? `${runtime.completion_tokens} tokens` : null)}${row('Tokens/s', runtime.tokens_per_second)}${row('TTFT ms', runtime.ttft_ms)}${row('Context', runtime.context_used_tokens != null && runtime.context_window != null ? `${runtime.context_used_tokens} / ${runtime.context_window}` : null)}</div><div class="config-block"><h3>PARAMETERS</h3>${row('temperature', runtime.temperature)}${row('top_p', runtime.top_p)}${row('top_k', runtime.top_k)}</div><div class="config-block"><h3>TOOLS</h3>${row('effective', (runtime.effective_tool_names || []).join(', ') || 'none')}</div>`;
+  return `<div class="config-block">${row('Agent', runtime.agent_profile_name || 'Nexo')}${row('Provider', runtime.resolved_provider)}${row('Model', runtime.resolved_model)}${row('Instructions', runtime.system_instructions_applied ? 'Applied' : 'Not applied')}</div><div class="config-block"><h3>TELEMETRY</h3>${row('Generation', runtime.completion_tokens != null ? `${runtime.completion_tokens} tokens` : null)}${row('Tokens/s', runtime.tokens_per_second)}${row('TTFT ms', runtime.ttft_ms)}${row('Context', runtime.context_used_tokens != null && runtime.context_window != null ? `${runtime.context_used_tokens} / ${runtime.context_window}` : null)}</div><div class="config-block"><h3>PARAMETERS</h3>${row('temperature', runtime.temperature)}${row('top_p', runtime.top_p)}${row('top_k', runtime.top_k)}</div><div class="config-block"><h3>TOOLS</h3>${row('effective', (runtime.effective_tool_names || []).join(', ') || 'none')}</div>`;
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -413,7 +413,6 @@ $('#config-inspector').onclick = () => { $('#config-content').innerHTML = render
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
 $('#agent-picker').onclick = () => { openSurface('agents'); $('#agent-picker').setAttribute('aria-expanded', 'true'); };
-$('#composer-agent').onclick = () => openSurface('agents');
 $('#open-lab').onclick = () => { closeSidebar(); openSurface('lab'); };
 $('#open-notebooks').onclick = () => { closeSidebar(); openSurface('notebooks'); };
 $('#new-chat').onclick = beginChat;

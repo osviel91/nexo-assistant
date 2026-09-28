@@ -137,12 +137,20 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["temperature"], 0.7)
             self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})
             self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible"])
+            done = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done")][0]
+            self.assertEqual(done["model_id"], "m")
+            self.assertEqual(done["runtime"]["agent_profile_name"], "Research")
+            self.assertEqual(done["runtime"]["resolved_provider"], "p")
+            self.assertEqual(done["runtime"]["resolved_model"], "m")
+            self.assertTrue(done["runtime"]["system_instructions_applied"])
             self.assertEqual(seen, [{}])
             self.assertIn("continued", body)
             with main.db() as db:
                 run = db.execute("SELECT * FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()
+                assistant = db.execute("SELECT * FROM messages WHERE role='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()
             metadata = json.loads(run["metadata"])
             self.assertEqual(metadata["agent_profile_id"], profile["id"])
+            self.assertEqual(json.loads(assistant["runtime_metadata"])["agent_profile_name"], "Research")
             self.assertNotIn("Be brief", json.dumps(metadata))
             self.assertNotIn("provider-secret", json.dumps(metadata))
         finally:
