@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits
+from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits, EffectiveRunConfiguration
 from app.agent_model import OpenAICompatibleModelAdapter
 from app.capabilities import normalize_model_capabilities
 from app.diagnostics import diagnostic, recent
@@ -654,6 +654,8 @@ async def chat(req: ChatIn):
             raise HTTPException(404, "agent_profile_not_found")
         if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
             raise HTTPException(404, "notebook_not_found")
+        notebook = c.execute("SELECT name FROM notebooks WHERE id=?", (notebook_id,)).fetchone() if notebook_id else None
+        indexed_sources = c.execute("SELECT COUNT(*) FROM notebook_sources WHERE notebook_id=? AND indexing_status='ready'", (notebook_id,)).fetchone()[0] if notebook_id else 0
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
             c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?)", (cid, title, now(), now(), profile_id, notebook_id))
@@ -694,9 +696,16 @@ async def chat(req: ChatIn):
             "agent_profile_id": profile_config.profile_id if profile_config else None,
             "agent_profile_name": profile_config.profile_name if profile_config else None,
             "resolved_provider": selected_provider_id,
+            "resolved_provider_name": provider["name"],
             "resolved_model": selected_model_id,
+            "resolved_model_name": model["label"],
             "system_instructions_applied": bool(profile_config and profile_config.system_instructions),
             "notebook_id": notebook_id,
+            "notebook_name": notebook["name"] if notebook else None,
+            "knowledge_available": bool(notebook_id),
+            "knowledge_retrieval_enabled": bool(notebook_id),
+            "knowledge_indexed_sources": indexed_sources,
+            "knowledge_embedding_model": os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model") if notebook_id else None,
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
@@ -737,15 +746,17 @@ async def chat(req: ChatIn):
                         retrieval = await retrieval_service(client).search(notebook_id, req.content, top_k)
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": len(grounded_context.retrieval_results),
-                                             "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
-                                             "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
-                                             "context_chars": grounded_context.context_chars, "context_truncated": grounded_context.truncated}
+                                              "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                              "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
+                                              "context_chars": grounded_context.context_chars, "context_truncated": grounded_context.truncated,
+                                              "knowledge_retrieval_applied": True}
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
                     except (RetrievalError, ValueError, EmbeddingError):
                         grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": 0,
-                                             "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
-                                             "context_chars": 0, "context_truncated": False}
+                                              "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                              "context_chars": 0, "context_truncated": False,
+                                              "knowledge_retrieval_applied": False}
                         event_sink.finish_event(retrieve_event, "failed", {**retrieval_metadata, "error_code": "retrieval_unavailable"}, retrieval_metadata["retrieval_duration_ms"])
                     runtime_snapshot.update(retrieval_metadata)
                     _update_runtime_metadata(run_id, runtime_snapshot)
@@ -758,12 +769,18 @@ async def chat(req: ChatIn):
                 elif req.temperature is not None:
                     runtime_snapshot["temperature"] = req.temperature
                 _update_runtime_metadata(run_id, runtime_snapshot)
+                effective_configuration = EffectiveRunConfiguration(
+                    profile_config,
+                    effective_tools,
+                    grounded_context,
+                    profile_config.temperature if profile_config else req.temperature,
+                )
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
                                               profile_config.profile_id if profile_config else None,
                                                profile_config.profile_name if profile_config else None,
-                                               runtime_snapshot, grounded_context)
+                                               runtime_snapshot, grounded_context, effective_configuration)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]

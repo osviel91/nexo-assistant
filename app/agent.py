@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from app.agent_model import ModelAdapter, ModelAdapterError
+from app.agent_profiles import AgentRunConfiguration
 from app.diagnostics import diagnostic
 from app.kernel import ToolExecutionContext
 from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
@@ -36,6 +37,17 @@ class AgentRunRequest:
     profile_name: str | None = None
     runtime_snapshot: dict[str, Any] | None = None
     grounded_context: GroundedContext | None = None
+    effective_configuration: "EffectiveRunConfiguration | None" = None
+
+
+@dataclass(frozen=True)
+class EffectiveRunConfiguration:
+    """Immutable Agent + Knowledge snapshot for one execution."""
+
+    agent: AgentRunConfiguration | None
+    tools: EffectiveToolSet
+    grounded_context: GroundedContext | None
+    temperature: float | None
 
 
 class AgentRuntime:
@@ -46,12 +58,17 @@ class AgentRuntime:
         self,
         request: AgentRunRequest,
     ) -> AsyncIterator[dict[str, Any]]:
+        configuration = request.effective_configuration
+        system_instructions = configuration.agent.system_instructions if configuration and configuration.agent else request.system_instructions
+        grounded_context = configuration.grounded_context if configuration else request.grounded_context
+        effective_tools = configuration.tools if configuration else request.effective_tools
+        temperature = configuration.temperature if configuration else request.temperature
         messages = list(request.messages)
-        if request.system_instructions:
-            messages.insert(0, {"role": "system", "content": request.system_instructions})
-        if request.grounded_context is not None:
-            messages.insert(1 if request.system_instructions else 0, {"role": "system", "content": GROUNDING_INSTRUCTIONS})
-            messages.insert(2 if request.system_instructions else 1, {"role": "system", "content": request.grounded_context.serialize()})
+        if system_instructions:
+            messages.insert(0, {"role": "system", "content": system_instructions})
+        if grounded_context is not None:
+            grounding = f"{GROUNDING_INSTRUCTIONS}\n\n{grounded_context.serialize()}"
+            messages.insert(1 if system_instructions else 0, {"role": "system", "content": grounding})
         answer = ""
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []
@@ -66,7 +83,7 @@ class AgentRuntime:
                                **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
             reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
             yield {"activity": {"type": "REASON", "status": "running", "round": tool_rounds + 1}}
-            definitions = request.effective_tools.definitions()
+            definitions = effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
                 "tools_exposed": len(definitions),
@@ -76,7 +93,7 @@ class AgentRuntime:
             round_content = ""
             finish_reason = None
             try:
-                async for chunk in request.model.stream(messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], request.temperature):
+                async for chunk in request.model.stream(messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], temperature):
                     finish_reason = chunk.finish_reason or finish_reason
                     if chunk.usage:
                         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -150,7 +167,7 @@ class AgentRuntime:
                     status = "invalid_arguments"
                 else:
                     try:
-                        result = await request.tool_executor.invoke(request.effective_tools, call["name"], tool_context, arguments)
+                        result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
                     except ToolNotAvailableError:
                         result = {"error": {"code": "tool_not_available", "message": "La herramienta no está disponible para esta ejecución."}}
                         status = "tool_not_available"
