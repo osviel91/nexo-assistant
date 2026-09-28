@@ -103,11 +103,16 @@ class NotebookRepository:
 
     def set_indexing_status(self, source_id: str, status: str, error: str | None = None,
                             chunk_count: int | None = None, embedding_batches: int | None = None,
-                            embedding_duration_ms: float | None = None, indexing_duration_ms: float | None = None) -> None:
+                            embedding_duration_ms: float | None = None, indexing_duration_ms: float | None = None,
+                            embedding_count: int | None = None, vector_count: int | None = None,
+                            embedding_dimension: int | None = None, embedding_config_version: int | None = None,
+                            indexing_identity: str | None = None) -> None:
         with self.connection_factory() as connection:
             connection.execute("""UPDATE notebook_sources SET indexing_status=?, indexing_error=?, chunk_count=?,
-                embedding_batches=?, embedding_duration_ms=?, indexing_duration_ms=?, indexed_at=?, updated_at=? WHERE id=?""",
+                embedding_batches=?, embedding_duration_ms=?, indexing_duration_ms=?, embedding_count=?, vector_count=?,
+                embedding_dimension=?, embedding_config_version=?, indexing_identity=?, indexed_at=?, updated_at=? WHERE id=?""",
                 (status, error, chunk_count, embedding_batches, embedding_duration_ms, indexing_duration_ms,
+                 embedding_count, vector_count, embedding_dimension, embedding_config_version, indexing_identity,
                  self.now() if status == "ready" else None, self.now(), source_id))
 
     def replace_canonical(self, source: sqlite3.Row, data: Any) -> dict[str, Any]:
@@ -133,7 +138,8 @@ class NotebookRepository:
                 [(str(uuid.uuid4()), document_id, span.start_offset, span.end_offset, span.source_type, json.dumps(span.source_location)) for span in data.spans])
             connection.execute("""UPDATE notebook_sources SET indexing_status='not_indexed', indexing_error=NULL,
                 chunk_count=NULL, embedding_batches=NULL, embedding_duration_ms=NULL, indexing_duration_ms=NULL,
-                indexed_at=NULL WHERE id=?""", (source["id"],))
+                embedding_count=NULL, vector_count=NULL, embedding_dimension=NULL, embedding_config_version=NULL,
+                indexing_identity=NULL, indexed_at=NULL WHERE id=?""", (source["id"],))
             return self.canonical(source["notebook_id"], source["id"], connection=connection)
 
     def canonical(self, notebook_id: str, source_id: str, connection: sqlite3.Connection | None = None):

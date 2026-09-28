@@ -222,7 +222,42 @@ def _migration_9(connection: sqlite3.Connection) -> None:
     """)
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9))
+def _migration_10(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS embedding_configurations (
+      id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL REFERENCES providers(id),
+      model_id TEXT NOT NULL,
+      target_chunk_size INTEGER NOT NULL,
+      max_chunk_size INTEGER NOT NULL,
+      overlap INTEGER NOT NULL,
+      batch_size INTEGER NOT NULL,
+      retrieval_top_k INTEGER NOT NULL,
+      retrieval_max_context_chars INTEGER NOT NULL,
+      config_version INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS vector_index_identities (
+      document_id TEXT PRIMARY KEY REFERENCES canonical_documents(id) ON DELETE CASCADE,
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      dimension INTEGER NOT NULL,
+      embedding_config_version INTEGER NOT NULL,
+      chunking_config_hash TEXT NOT NULL,
+      document_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    """)
+    _add_column_if_missing(connection, "notebook_sources", "embedding_count", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "vector_count", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "embedding_dimension", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "embedding_config_version", "INTEGER")
+    _add_column_if_missing(connection, "notebook_sources", "indexing_identity", "TEXT")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

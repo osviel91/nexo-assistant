@@ -27,9 +27,9 @@ class VectorSearchResult:
 
 
 class VectorIndex(Protocol):
-    def upsert(self, chunks: list[DocumentChunk], vectors: list[list[float]]) -> int: ...
+    def upsert(self, chunks: list[DocumentChunk], vectors: list[list[float]], identity: dict | None = None) -> int: ...
     def delete_document(self, document_id: str) -> None: ...
-    def search(self, notebook_id: str, vector: list[float], limit: int) -> list[VectorSearchResult]: ...
+    def search(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[VectorSearchResult]: ...
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -41,7 +41,7 @@ class SQLiteVectorIndex:
     def __init__(self, connection_factory, now) -> None:
         self.connection_factory, self.now = connection_factory, now
 
-    def upsert(self, chunks: list[DocumentChunk], vectors: list[list[float]]) -> int:
+    def upsert(self, chunks: list[DocumentChunk], vectors: list[list[float]], identity: dict | None = None) -> int:
         if not chunks:
             return 0
         dimension = validate_batch(EmbeddingBatch(vectors), len(chunks))
@@ -59,24 +59,38 @@ class SQLiteVectorIndex:
                  chunk.content_hash, json.dumps(vector), dimension, self.now())
                 for chunk, vector in zip(chunks, vectors)
             ])
+            if identity:
+                connection.execute("""INSERT INTO vector_index_identities
+                    (document_id,provider_id,model_id,dimension,embedding_config_version,chunking_config_hash,document_hash,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(document_id) DO UPDATE SET provider_id=excluded.provider_id,model_id=excluded.model_id,
+                    dimension=excluded.dimension,embedding_config_version=excluded.embedding_config_version,
+                    chunking_config_hash=excluded.chunking_config_hash,document_hash=excluded.document_hash,updated_at=excluded.updated_at""",
+                    (document_id, identity["provider_id"], identity["model_id"], dimension, identity["embedding_config_version"],
+                     identity["chunking_config_hash"], identity["document_hash"], self.now(), self.now()))
         return len(chunks)
 
     def delete_document(self, document_id: str) -> None:
         with self.connection_factory() as connection:
             connection.execute("DELETE FROM document_chunks WHERE document_id=?", (document_id,))
+            connection.execute("DELETE FROM vector_index_identities WHERE document_id=?", (document_id,))
 
-    def search(self, notebook_id: str, vector: list[float], limit: int) -> list[VectorSearchResult]:
+    def search(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[VectorSearchResult]:
         if not vector or limit <= 0:
             return []
         with self.connection_factory() as connection:
-            rows = connection.execute("""SELECT document_chunks.*, notebook_sources.title AS source_title,
+            query = """SELECT document_chunks.*, notebook_sources.title AS source_title,
                                        canonical_documents.content_hash AS document_content_hash
                                        FROM document_chunks
                                        JOIN notebook_sources ON notebook_sources.id=document_chunks.source_id
                                        JOIN canonical_documents ON canonical_documents.id=document_chunks.document_id
-                                      WHERE document_chunks.notebook_id=? AND document_chunks.embedding IS NOT NULL
-                                      AND notebook_sources.indexing_status='ready'""",
-                                      (notebook_id,)).fetchall()
+                                       WHERE document_chunks.notebook_id=? AND document_chunks.embedding IS NOT NULL
+                                       AND notebook_sources.indexing_status='ready'"""
+            params: list = [notebook_id]
+            if identity:
+                query += " AND EXISTS (SELECT 1 FROM vector_index_identities vii WHERE vii.document_id=document_chunks.document_id AND vii.provider_id=? AND vii.model_id=? AND vii.embedding_config_version=? AND vii.chunking_config_hash=? AND vii.document_hash=canonical_documents.content_hash)"
+                params.extend([identity["provider_id"], identity["model_id"], identity["embedding_config_version"], identity["chunking_config_hash"]])
+            rows = connection.execute(query, params).fetchall()
         results = []
         for row in rows:
             candidate = json.loads(row["embedding"])

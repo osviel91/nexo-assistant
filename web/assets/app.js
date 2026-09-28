@@ -2,7 +2,7 @@ import { renderMarkdown } from './markdown.js';
 import { effectiveMessageIdentity } from './identity.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
+const state = { providers: [], knowledge: null, agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -68,6 +68,17 @@ async function loadProviders() {
   renderSelect();
   renderProviderList();
   renderLab();
+}
+
+async function loadKnowledge() {
+  state.knowledge = await api('/settings/embeddings');
+  const config = state.knowledge.configuration;
+  const providers = state.knowledge.providers || state.providers;
+  $('#embedding-provider').innerHTML = providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
+  const renderModels = () => { const provider = providers.find((item) => item.id === $('#embedding-provider').value); $('#embedding-model').innerHTML = (provider?.models || []).map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join(''); };
+  $('#embedding-provider').onchange = renderModels;
+  if (config) { $('#embedding-provider').value = config.provider_id; renderModels(); $('#embedding-model').value = config.model_id; const fields = { target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_top_k: 'embedding-top-k', retrieval_max_context_chars: 'embedding-context' }; Object.entries(fields).forEach(([key, id]) => { $(`#${id}`).value = config[key]; }); }
+  $('#knowledge-health').textContent = `${state.knowledge.health.ready} ready · ${state.knowledge.health.outdated} outdated · ${state.knowledge.health.failed} failed`;
 }
 
 async function loadTools() {
@@ -436,6 +447,13 @@ $('#provider-form').onsubmit = async (event) => {
   try { await api(`/providers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); resetForm(); await loadProviders(); toast(id ? 'Proveedor actualizado' : 'Proveedor añadido'); } catch (error) { toast(error.message); }
 };
 
+$('#embedding-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_top_k: Number($('#embedding-top-k').value), retrieval_max_context_chars: Number($('#embedding-context').value) };
+  try { const result = await api('/settings/embeddings', { method: 'PUT', body: JSON.stringify(body) }); await loadKnowledge(); toast(result.invalidated ? 'Saved; indexes are outdated' : 'Knowledge configuration saved'); } catch (error) { toast(error.message); }
+};
+$('#test-embedding').onclick = async () => { try { const result = await api('/settings/embeddings/test', { method: 'POST' }); toast(`Embedding OK · ${result.dimension}d · ${result.latency_ms}ms`); } catch (error) { toast(error.message); } };
+
 $('#agent-form').onsubmit = async (event) => {
   event.preventDefault();
   const id = $('#agent-id').value;
@@ -487,4 +505,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));

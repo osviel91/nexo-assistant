@@ -38,6 +38,8 @@ from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
 from app.retrieval import RetrievalError, RetrievalService
 from app.vector_index import SQLiteVectorIndex
 from app.grounding import GroundedContext, cited_results
+from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
+from app.chunking import ChunkingConfig
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,15 +97,27 @@ ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_roo
 
 
 def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
+    configuration = embedding_configuration()
+    if configuration:
+        with db() as connection:
+            provider_row = connection.execute("SELECT * FROM providers WHERE id=?", (configuration.provider_id,)).fetchone()
+        if not provider_row:
+            raise RetrievalError("embedding provider is not configured")
+        base_url, model_id, api_key = provider_row["base_url"], configuration.model_id, provider_row["api_key"]
+        headers = {"Content-Type": "application/json"} | ({"Authorization": f"Bearer {api_key}"} if api_key else {})
+        provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, model_id)
+        return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider,
+                                ChunkingConfig(configuration.target_chunk_size, configuration.max_chunk_size, configuration.overlap),
+                                configuration.batch_size, configuration, configuration.provider_id, configuration.model_id)
     base_url = os.getenv("NEXO_EMBEDDING_BASE_URL", "").strip()
     if not base_url:
         raise RetrievalError("embedding provider is not configured")
     headers = {"Content-Type": "application/json"}
     if os.getenv("NEXO_EMBEDDING_API_KEY", ""):
         headers["Authorization"] = f"Bearer {os.getenv('NEXO_EMBEDDING_API_KEY')}"
-    provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model"))
-    return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider,
-                            batch_size=int(os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32")))
+    model_id = os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model")
+    provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, model_id)
+    return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider, batch_size=int(os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32")))
 
 
 @app.on_event("startup")
@@ -183,6 +197,51 @@ class RetrievalIn(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
 
 
+class EmbeddingConfigurationIn(BaseModel):
+    provider_id: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    target_chunk_size: int = Field(default=400, ge=1, le=10000)
+    max_chunk_size: int = Field(default=600, ge=1, le=20000)
+    overlap: int = Field(default=40, ge=0, le=5000)
+    batch_size: int = Field(default=32, ge=1, le=256)
+    retrieval_top_k: int = Field(default=5, ge=1, le=50)
+    retrieval_max_context_chars: int = Field(default=12000, ge=1000, le=1000000)
+
+
+def embedding_configuration() -> EmbeddingConfiguration | None:
+    with db() as connection:
+        migrate(connection)
+        row = connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()
+        if row:
+            return EmbeddingConfiguration(**dict(row))
+        values = bootstrap_values()
+        provider_id = values["provider_id"]
+        if not provider_id:
+            provider = connection.execute("SELECT id FROM providers WHERE base_url=? ORDER BY created_at LIMIT 1", (os.getenv("NEXO_EMBEDDING_BASE_URL", "").rstrip("/"),)).fetchone()
+            provider_id = provider["id"] if provider else ""
+        if not provider_id:
+            return None
+        values["provider_id"] = provider_id
+        try:
+            values = validate_configuration(values)
+        except KnowledgeConfigurationError:
+            return None
+        timestamp = now()
+        connection.execute("""INSERT INTO embedding_configurations
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], 1, timestamp, timestamp))
+        return EmbeddingConfiguration(**dict(connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()))
+
+
+def knowledge_health() -> dict[str, int]:
+    with db() as connection:
+        migrate(connection)
+        rows = connection.execute("SELECT indexing_status, COUNT(*) AS count FROM notebook_sources GROUP BY indexing_status").fetchall()
+        totals = connection.execute("SELECT COUNT(*) AS documents, COALESCE(SUM(chunk_count),0) AS chunks, COALESCE(SUM(vector_count),0) AS vectors FROM notebook_sources WHERE status='ready'").fetchone()
+    counts = {row["indexing_status"]: row["count"] for row in rows}
+    return {"ready": counts.get("ready", 0), "outdated": counts.get("outdated", 0), "failed": counts.get("failed", 0), "not_indexed": counts.get("not_indexed", 0), "legacy": counts.get("legacy", 0), "documents": totals["documents"], "chunks": totals["chunks"], "vectors": totals["vectors"]}
+
+
 def profile_input(item: AgentProfileIn) -> AgentProfileInput:
     return AgentProfileInput(item.name, item.description, item.provider_id, item.model_id, item.system_instructions,
                              item.model_parameters, item.enabled, tuple(item.tool_names))
@@ -203,6 +262,70 @@ def provider_dict(row: sqlite3.Row) -> dict[str, Any]:
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/api/settings/embeddings")
+def get_embedding_settings():
+    configuration = embedding_configuration()
+    with db() as connection:
+        providers_rows = connection.execute("SELECT * FROM providers ORDER BY name").fetchall()
+    health = knowledge_health()
+    return {"configuration": configuration.public() if configuration else None, "providers": [provider_dict(row) for row in providers_rows], "health": health}
+
+
+@app.put("/api/settings/embeddings")
+def save_embedding_settings(item: EmbeddingConfigurationIn):
+    try:
+        values = validate_configuration(item.model_dump())
+    except KnowledgeConfigurationError as error:
+        raise HTTPException(400, str(error))
+    with db() as connection:
+        provider = connection.execute("SELECT id FROM providers WHERE id=?", (values["provider_id"],)).fetchone()
+        model = connection.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (values["provider_id"], values["model_id"])).fetchone()
+        if not provider or not model:
+            raise HTTPException(400, "provider_id and model_id must reference an existing provider model")
+        if "embedding" not in json.loads(model["capabilities"] or "[]"):
+            raise HTTPException(400, "model must be explicitly designated with embedding capability")
+        old = connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()
+        version = (old["config_version"] + 1) if old else 1
+        timestamp = now()
+        connection.execute("""INSERT INTO embedding_configurations
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], version, old["created_at"] if old else timestamp, timestamp))
+        affecting = not old or any(old[key] != values[key] for key in ("provider_id", "model_id", "target_chunk_size", "max_chunk_size", "overlap"))
+        if affecting and old:
+            connection.execute("UPDATE notebook_sources SET indexing_status='outdated', indexing_error=NULL, updated_at=? WHERE indexing_status='ready'", (timestamp,))
+        row = connection.execute("SELECT * FROM embedding_configurations WHERE config_version=?", (version,)).fetchone()
+    return {"configuration": EmbeddingConfiguration(**dict(row)).public(), "invalidated": affecting, "outdated_sources": knowledge_health()["outdated"]}
+
+
+@app.post("/api/settings/embeddings/test")
+async def test_embedding():
+    configuration = embedding_configuration()
+    if not configuration:
+        raise HTTPException(400, "embedding configuration is not available")
+    started = asyncio.get_running_loop().time()
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
+            service = retrieval_service(client)
+            batch = await service.provider.embed(["Nexo embedding connectivity test"])
+        dimension = len(batch.vectors[0]) if batch.vectors else 0
+        return {"ok": True, "provider": configuration.provider_id, "model": configuration.model_id, "dimension": dimension, "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
+    except Exception as error:
+        raise HTTPException(502, f"Embedding test failed: {str(error)[:180]}")
+
+
+@app.patch("/api/providers/{pid}/models/{model_id:path}")
+def update_model_capability(pid: str, model_id: str, item: dict[str, Any]):
+    capabilities = item.get("capabilities")
+    if not isinstance(capabilities, list) or any(not isinstance(value, str) for value in capabilities):
+        raise HTTPException(400, "capabilities must be a list of strings")
+    with db() as connection:
+        if not connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (pid, model_id)).fetchone():
+            raise HTTPException(404, "Model not found")
+        connection.execute("UPDATE models SET capabilities=? WHERE provider_id=? AND id=?", (json.dumps(sorted(set(capabilities))), pid, model_id))
+        provider = connection.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
+    return provider_dict(provider)
 
 
 @app.get("/api/modules")
@@ -319,6 +442,38 @@ def get_canonical_document(notebook_id: str, source_id: str):
     try:
         document = notebooks.canonical(notebook_id, source_id)
         return document or {"status": "not_ready", "document": None}
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+
+
+@app.get("/api/notebooks/{notebook_id}/sources/{source_id}/index")
+def get_source_index(notebook_id: str, source_id: str):
+    try:
+        source = notebooks.source(notebook_id, source_id)
+        document = notebooks.canonical(notebook_id, source_id)
+        with db() as connection:
+            identity = connection.execute("SELECT * FROM vector_index_identities WHERE document_id=?", (document["id"],)).fetchone() if document else None
+            vectors = connection.execute("SELECT COUNT(*) FROM document_chunks WHERE document_id=? AND embedding IS NOT NULL", (document["id"],)).fetchone()[0] if document else 0
+        result = dict(source)
+        result["indexing_identity"] = dict(identity) if identity else None
+        result["vector_count_actual"] = vectors
+        if source["indexing_status"] == "ready" and not identity:
+            result["indexing_status"] = "legacy"
+        return result
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+
+
+@app.get("/api/notebooks/{notebook_id}/sources/{source_id}/integrity")
+def source_integrity(notebook_id: str, source_id: str):
+    try:
+        notebooks.source(notebook_id, source_id)
+        configuration = embedding_configuration()
+        service = RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), object(),
+                                   ChunkingConfig(configuration.target_chunk_size, configuration.max_chunk_size, configuration.overlap) if configuration else None,
+                                   configuration.batch_size if configuration else 32, configuration,
+                                   configuration.provider_id if configuration else None, configuration.model_id if configuration else None)
+        return service.integrity(notebook_id, source_id)
     except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
         raise notebook_error(error)
 
@@ -656,7 +811,14 @@ async def chat(req: ChatIn):
         if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
             raise HTTPException(404, "notebook_not_found")
         notebook = c.execute("SELECT name FROM notebooks WHERE id=?", (notebook_id,)).fetchone() if notebook_id else None
-        indexed_sources = c.execute("SELECT COUNT(*) FROM notebook_sources WHERE notebook_id=? AND indexing_status='ready'", (notebook_id,)).fetchone()[0] if notebook_id else 0
+        knowledge_config = embedding_configuration()
+        if notebook_id and knowledge_config:
+            indexed_sources = c.execute("""SELECT COUNT(*) FROM notebook_sources ns JOIN canonical_documents cd ON cd.source_id=ns.id
+                JOIN vector_index_identities vii ON vii.document_id=cd.id
+                WHERE ns.notebook_id=? AND ns.indexing_status='ready' AND vii.provider_id=? AND vii.model_id=? AND vii.embedding_config_version=? AND vii.chunking_config_hash=? AND vii.document_hash=cd.content_hash""",
+                (notebook_id, knowledge_config.provider_id, knowledge_config.model_id, knowledge_config.config_version, knowledge_config.chunking_hash())).fetchone()[0]
+        else:
+            indexed_sources = c.execute("SELECT COUNT(*) FROM notebook_sources WHERE notebook_id=? AND indexing_status='ready'", (notebook_id,)).fetchone()[0] if notebook_id else 0
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
             c.execute("INSERT INTO conversations(id,title,created_at,updated_at,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?)", (cid, title, now(), now(), profile_id, notebook_id))
@@ -706,7 +868,7 @@ async def chat(req: ChatIn):
             "knowledge_available": bool(notebook_id),
             "knowledge_retrieval_enabled": bool(notebook_id),
             "knowledge_indexed_sources": indexed_sources,
-            "knowledge_embedding_model": os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model") if notebook_id else None,
+            "knowledge_embedding_model": knowledge_config.model_id if notebook_id and knowledge_config else None,
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
@@ -742,8 +904,9 @@ async def chat(req: ChatIn):
                     retrieve_started = asyncio.get_running_loop().time()
                     retrieve_event = event_sink.start_event("RETRIEVE", "notebook retrieval", {"notebook_id": notebook_id, "retrieval_count": 0})
                     try:
-                        top_k = min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
-                        max_chars = min(max(int(os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000")), 1000), 100000)
+                        config = embedding_configuration()
+                        top_k = config.retrieval_top_k if config else min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
+                        max_chars = config.retrieval_max_context_chars if config else min(max(int(os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000")), 1000), 100000)
                         retrieval = await retrieval_service(client).search(notebook_id, req.content, top_k)
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_count": len(grounded_context.retrieval_results),
