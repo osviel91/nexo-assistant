@@ -72,22 +72,21 @@ class ToolRegistry:
         })
         if capabilities is not None and "tool-calling" not in capabilities:
             return []
-        return [
-            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
-            for t in self._tools.values()
-        ]
+        return self.catalog_view().resolve().definitions()
 
     def catalog(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-                "source": tool.source,
-                "module_id": tool.module_id or None,
-            }
-            for tool in self._tools.values()
-        ]
+        return self.catalog_view().as_dicts()
+
+    def registered_tools(self) -> tuple[ToolDefinition, ...]:
+        return tuple(self._tools.values())
+
+    def has(self, name: str) -> bool:
+        return name in self._tools
+
+    def catalog_view(self):
+        from app.tools import ToolCatalog
+
+        return ToolCatalog(self.registered_tools())
 
     async def invoke(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
@@ -179,6 +178,9 @@ class ModuleRegistry:
 
     def tool_catalog(self) -> list[dict[str, Any]]:
         return self.context.tools.catalog()
+
+    def tool_catalog_view(self):
+        return self.context.tools.catalog_view()
 
     async def invoke_tool(self, name: str, context: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
         return await self.context.tools.invoke(name, context, arguments)

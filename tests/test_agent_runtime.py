@@ -5,6 +5,7 @@ import unittest
 from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits
 from app.agent_model import ModelAdapterError, ModelStreamChunk
 from app.kernel import ModuleRegistry, ToolDefinition, ToolExecutionContext
+from app.tools import ExposurePolicy, ToolExecutor
 from fastapi import FastAPI
 
 
@@ -26,7 +27,8 @@ class Adapter:
 def run(runtime, adapter, registry, capabilities={"tool-calling"}):
     async def collect():
         context = ToolExecutionContext("conversation", "provider", "model", 0)
-        request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], registry.tool_definitions(context, capabilities), registry.context.tools, context)
+        effective_tools = ExposurePolicy().resolve(registry.tool_catalog_view(), capabilities)
+        request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], effective_tools, ToolExecutor(), context)
         return [event async for event in runtime.stream(request)]
     return asyncio.run(collect())
 
@@ -64,7 +66,7 @@ class AgentRuntimeTests(unittest.TestCase):
         async def broken(context, arguments):
             raise RuntimeError("secret")
 
-        for name, arguments, code in (("missing", "{}", "unknown_tool"), ("test_tool", "not-json", "invalid_arguments"), ("test_tool", "{}", "tool_execution_error")):
+        for name, arguments, code in (("missing", "{}", "tool_not_available"), ("test_tool", "not-json", "invalid_arguments"), ("test_tool", "{}", "tool_execution_error")):
             registry = self.registry(broken)
             adapter = Adapter([
                 [{"tool_calls": [{"index": 0, "id": "call", "function": {"name": name, "arguments": arguments}}]}],

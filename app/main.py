@@ -28,6 +28,7 @@ from app.modules.mcp import MCPModule
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
+from app.tools import ExposurePolicy, ToolExecutor
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,7 @@ app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
 agent_runtime = AgentRuntime(AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
+exposure_policy = ExposurePolicy()
 shadow_tasks: set[asyncio.Task[None]] = set()
 enabled_modules = enabled_module_ids()
 if "attachments" in enabled_modules:
@@ -342,8 +344,9 @@ async def chat(req: ChatIn):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                 model_adapter = OpenAICompatibleModelAdapter(client, url, headers, req.model_id)
-                tool_definitions = module_registry.tool_definitions(execution_context, {"tool-calling"} if supports_tools else set())
-                run_request = AgentRunRequest(model_adapter, messages, tool_definitions, module_registry.context.tools, execution_context, req.temperature)
+                catalog = module_registry.tool_catalog_view()
+                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set())
+                run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context, req.temperature)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]

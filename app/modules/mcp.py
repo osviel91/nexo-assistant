@@ -125,7 +125,7 @@ class MCPModule:
         if name not in server["allowed_tools"]:
             return
         exposed_name = namespace(server["id"], name)
-        if exposed_name in context.tools._tools:
+        if context.tools.has(exposed_name):
             self._diagnose(server, "tool_name_collision")
             return
 

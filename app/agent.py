@@ -8,7 +8,8 @@ from typing import Any, AsyncIterator
 
 from app.agent_model import ModelAdapter, ModelAdapterError
 from app.diagnostics import diagnostic
-from app.kernel import ToolExecutionContext, ToolRegistry
+from app.kernel import ToolExecutionContext
+from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 
 logger = logging.getLogger("nexo.agent")
 
@@ -23,8 +24,8 @@ class AgentRuntimeLimits:
 class AgentRunRequest:
     model: ModelAdapter
     messages: list[dict[str, Any]]
-    tool_definitions: list[dict[str, Any]]
-    tool_registry: ToolRegistry
+    effective_tools: EffectiveToolSet
+    tool_executor: ToolExecutor
     context: ToolExecutionContext
     temperature: float | None = None
 
@@ -43,7 +44,7 @@ class AgentRuntime:
         tool_rounds = 0
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
-            definitions = request.tool_definitions
+            definitions = request.effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
                 "tools_exposed": len(definitions),
@@ -107,10 +108,10 @@ class AgentRuntime:
                     status = "invalid_arguments"
                 else:
                     try:
-                        result = await request.tool_registry.invoke(call["name"], tool_context, arguments)
-                    except KeyError:
-                        result = {"error": {"code": "unknown_tool", "message": "Herramienta desconocida."}}
-                        status = "unknown_tool"
+                        result = await request.tool_executor.invoke(request.effective_tools, call["name"], tool_context, arguments)
+                    except ToolNotAvailableError:
+                        result = {"error": {"code": "tool_not_available", "message": "La herramienta no está disponible para esta ejecución."}}
+                        status = "tool_not_available"
                     except Exception:
                         result = {"error": {"code": "tool_execution_error", "message": "La herramienta no pudo completar la operación."}}
                         status = "tool_execution_error"
