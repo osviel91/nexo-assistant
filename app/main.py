@@ -35,7 +35,7 @@ from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentP
 from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookRepository, NotebookService, NotebookSourceNotFoundError, NotebookValidationError
 from app.ingestion import NotebookIngestionService
 from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
-from app.retrieval import RetrievalError, RetrievalService
+from app.retrieval import IndexingInProgressError, RetrievalError, RetrievalService
 from app.vector_index import SQLiteVectorIndex
 from app.grounding import GroundedContext, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
@@ -517,6 +517,8 @@ async def index_notebook_source(notebook_id: str, source_id: str):
         return {"source": notebooks.source(notebook_id, source_id), "index": result}
     except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
         raise notebook_error(error)
+    except IndexingInProgressError as error:
+        raise HTTPException(409, str(error))
     except (RetrievalError, EmbeddingError) as error:
         raise HTTPException(400, str(error))
 
@@ -540,8 +542,12 @@ async def inspect_notebook_retrieval(notebook_id: str, item: RetrievalIn):
         notebooks.get(notebook_id)
         async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
             candidates = await retrieval_service(client).inspect_search(notebook_id, item.query, item.limit)
-        return {"candidate_count": len(candidates), "accepted_count": sum(item["accepted"] for item in candidates),
-                "rejected_count": sum(not item["accepted"] for item in candidates), "candidates": candidates}
+        visible = candidates[:max(20, item.limit)]
+        return {"candidate_count": len(candidates), "accepted_count": sum(candidate["accepted"] for candidate in candidates),
+                "rejected_count": sum(not candidate["accepted"] for candidate in candidates),
+                "content_match_ranks": {term: [candidate["rank"] for candidate in candidates if candidate["content_matches"][term]]
+                                        for term in ("tostada", "pan", "mantequilla")},
+                "candidates": visible}
     except NotebookNotFoundError as error:
         raise notebook_error(error)
     except (RetrievalError, EmbeddingError) as error:
@@ -789,6 +795,7 @@ def get_conversation(cid: str):
     citation_map: dict[str, list[dict[str, Any]]] = {}
     with db() as c:
         all_citations = c.execute("""SELECT mc.*, ns.title AS source_title,
+            dc.content AS excerpt,
             cd.content_hash AS current_document_content_hash, dc.content_hash AS current_chunk_content_hash
             FROM message_citations mc
             LEFT JOIN notebook_sources ns ON ns.id=mc.source_id
@@ -1062,7 +1069,7 @@ async def chat(req: ChatIn):
                 c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
             _update_runtime_metadata(run_id, runtime_metadata)
             module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
-            citation_payload = [{"citation_key": citation_key, **{key: value for key, value in result.items() if key != "content"}} for citation_key, result in notebook_citations]
+            citation_payload = [{"citation_key": citation_key, "excerpt": result.get("content", "")[:1600], **{key: value for key, value in result.items() if key != "content"}} for citation_key, result in notebook_citations]
             yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "citations": citation_payload, "runtime": runtime_metadata}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"

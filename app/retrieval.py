@@ -15,6 +15,10 @@ class RetrievalError(ValueError):
     pass
 
 
+class IndexingInProgressError(RetrievalError):
+    pass
+
+
 class RetrievalService:
     def __init__(self, repository: Any, index: VectorIndex, provider: EmbeddingProvider,
                  config: ChunkingConfig | None = None, batch_size: int = 32,
@@ -31,6 +35,8 @@ class RetrievalService:
         document = self.repository.canonical(notebook_id, source_id)
         if document is None or source["status"] != "ready":
             raise RetrievalError("canonical document is not ready")
+        if not self.repository.claim_indexing(source_id):
+            raise IndexingInProgressError("indexing already in progress")
         with self.repository.connection_factory() as connection:
             existing_hash = connection.execute("SELECT metadata FROM document_chunks WHERE document_id=? LIMIT 1", (document["id"],)).fetchone()
             identity = connection.execute("SELECT * FROM vector_index_identities WHERE document_id=?", (document["id"],)).fetchone()
@@ -43,7 +49,6 @@ class RetrievalService:
         if reusable:
             self.repository.set_indexing_status(source_id, "ready", chunk_count=self._chunk_count(document["id"]))
             return self.status(source_id) | {"skipped": True}
-        self.repository.set_indexing_status(source_id, "indexing")
         started = time.monotonic()
         chunks = chunk_document(document, self.config)
         vectors: list[list[float]] = []
@@ -79,12 +84,21 @@ class RetrievalService:
         batch = await self.provider.embed([query])
         validate_batch(batch, 1)
         identity = self._identity({"content_hash": ""}) if self.embedding_config else None
+        vector_results = self.index.search_candidates(notebook_id, batch.vectors[0], identity) if hasattr(self.index, "search_candidates") else self.index.search(notebook_id, batch.vectors[0], limit, identity)
+        lexical_results = self.index.lexical_search(notebook_id, query, len(vector_results), identity) if hasattr(self.index, "lexical_search") else []
+        ranked: dict[str, tuple[Any, float]] = {}
+        for rank, item in enumerate(vector_results, 1):
+            ranked[item.chunk_id] = (item, 1 / (60 + rank))
+        for rank, item in enumerate(lexical_results, 1):
+            current = ranked.get(item.chunk_id)
+            ranked[item.chunk_id] = (current[0] if current else item, (current[1] if current else 0) + 1 / (60 + rank))
+        results = [item for item, _ in sorted(ranked.values(), key=lambda value: (-value[1], -value[0].score, value[0].chunk_id))[:limit]]
         return [{"chunk_id": item.chunk_id, "source_id": item.source_id, "document_id": item.document_id,
                   "score": round(item.score, 6), "content": item.content, "canonical_start": item.canonical_start,
                   "canonical_end": item.canonical_end, "provenance": item.provenance,
                   "document_content_hash": item.document_content_hash, "chunk_content_hash": item.chunk_content_hash,
                   "source_title": item.source_title}
-                 for item in self.index.search(notebook_id, batch.vectors[0], limit, identity)]
+                  for item in results]
 
     async def inspect_search(self, notebook_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if not query.strip():
@@ -96,7 +110,7 @@ class RetrievalService:
         inspect = getattr(self.index, "inspect", None)
         if inspect is None:
             return []
-        return inspect(notebook_id, batch.vectors[0], limit, identity)
+        return inspect(notebook_id, batch.vectors[0], max(1000, limit), identity)
 
     def status(self, source_id: str) -> dict[str, Any]:
         with self.repository.connection_factory() as connection:

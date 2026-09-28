@@ -115,6 +115,15 @@ class NotebookRepository:
                  embedding_count, vector_count, embedding_dimension, embedding_config_version, indexing_identity,
                  self.now() if status == "ready" else None, self.now(), source_id))
 
+    def claim_indexing(self, source_id: str) -> bool:
+        with self.connection_factory() as connection:
+            updated = connection.execute("""UPDATE notebook_sources SET indexing_status='indexing',
+                indexing_error=NULL, chunk_count=NULL, embedding_batches=NULL, embedding_duration_ms=NULL,
+                indexing_duration_ms=NULL, embedding_count=NULL, vector_count=NULL, embedding_dimension=NULL,
+                embedding_config_version=NULL, indexing_identity=NULL, indexed_at=NULL, updated_at=?
+                WHERE id=? AND indexing_status != 'indexing'""", (self.now(), source_id)).rowcount
+            return updated == 1
+
     def replace_canonical(self, source: sqlite3.Row, data: Any) -> dict[str, Any]:
         document_id = str(uuid.uuid4())
         timestamp = self.now()

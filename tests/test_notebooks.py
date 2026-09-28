@@ -51,6 +51,13 @@ class NotebookTests(unittest.TestCase):
         with self.assertRaises(NotebookValidationError):
             self.service.add_file(first["id"], "Bad", "../../secret.txt", "text/plain", b"x")
 
+    def test_indexing_claim_is_persisted_and_only_one_request_wins(self):
+        notebook = self.service.create(NotebookInput("Knowledge"))
+        source = self.service.add_file(notebook["id"], "Notes", "notes.txt", "text/plain", b"notes")
+        self.assertTrue(self.service.repository.claim_indexing(source["id"]))
+        self.assertEqual(self.service.source(notebook["id"], source["id"])["indexing_status"], "indexing")
+        self.assertFalse(self.service.repository.claim_indexing(source["id"]))
+
     def test_api_crud_and_upload_limit(self):
         import app.main as main
         old_path, old_service = main.DB_PATH, main.notebooks

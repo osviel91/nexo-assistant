@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.embeddings import EmbeddingBatch
+from app.embeddings import EmbeddingBatch, EmbeddingError
 from app.ingestion import NotebookIngestionService
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, validate_configuration
 from app.migrations import migrate
@@ -25,6 +25,11 @@ class CountingEmbeddings(Embeddings):
     async def embed(self, texts):
         self.calls.append(texts)
         return await super().embed(texts)
+
+
+class FailingEmbeddings(Embeddings):
+    async def embed(self, texts):
+        raise RuntimeError("provider unavailable")
 
 
 class Stage7C1KnowledgeTests(unittest.TestCase):
@@ -92,6 +97,34 @@ class Stage7C1KnowledgeTests(unittest.TestCase):
             reused = asyncio.run(current.index_source(notebook["id"], source["id"]))
             self.assertTrue(reused["skipped"])
             self.assertEqual(len(provider.calls), calls)
+
+    def test_indexing_success_and_failure_are_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "db.sqlite3"
+            def connection():
+                result = sqlite3.connect(path)
+                result.row_factory = sqlite3.Row
+                result.execute("PRAGMA foreign_keys=ON")
+                return result
+            with connection() as database:
+                migrate(database)
+            repository = NotebookRepository(connection, lambda: "now")
+            notebooks = NotebookService(repository, Path(directory) / "sources")
+            ingestion = NotebookIngestionService(repository, Path(directory) / "sources", lambda: "now")
+            notebook = notebooks.create(NotebookInput("Knowledge"))
+            source = notebooks.add_file(notebook["id"], "Notes", "notes.txt", "text/plain", b"one two three")
+            ingestion.ingest(notebook["id"], source["id"])
+            service = RetrievalService(repository, SQLiteVectorIndex(connection, lambda: "now"), Embeddings())
+            result = asyncio.run(service.index_source(notebook["id"], source["id"]))
+            self.assertEqual(result["indexing_status"], "ready")
+            self.assertEqual(result["chunk_count"], 1)
+
+            failed = notebooks.add_file(notebook["id"], "Other", "other.txt", "text/plain", b"failure")
+            ingestion.ingest(notebook["id"], failed["id"])
+            failing = RetrievalService(repository, SQLiteVectorIndex(connection, lambda: "now"), FailingEmbeddings())
+            with self.assertRaises(EmbeddingError):
+                asyncio.run(failing.index_source(notebook["id"], failed["id"]))
+            self.assertEqual(notebooks.source(notebook["id"], failed["id"])["indexing_status"], "failed")
 
     def test_candidate_inspection_explains_identity_rejection_without_vectors(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -22,6 +22,11 @@ class FakeEmbeddings:
         return EmbeddingBatch([[float(len(text)), 1.0] for text in texts], "fake")
 
 
+class LexicalRecoveryEmbeddings:
+    async def embed(self, texts):
+        return EmbeddingBatch([[0.0, 1.0] if text.startswith("¿") else [float("tostada" in text), 1.0] for text in texts], "fake")
+
+
 class Stage7CRetrievalTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -84,6 +89,26 @@ class Stage7CRetrievalTests(unittest.TestCase):
         for batch in (EmbeddingBatch([[float("nan")]]), EmbeddingBatch([[1.0], [1.0, 2.0]])):
             with self.assertRaises(EmbeddingError):
                 validate_batch(batch, 1)
+
+    def test_hybrid_retrieval_recovers_lexical_match_below_vector_top_k(self):
+        notebook = self.notebooks.create(NotebookInput("Murphy"))
+        content = "\n\n".join(["generic material"] * 12 + ["tostada pan mantequilla"])
+        source = self.notebooks.add_file(notebook["id"], "Leyes de Murphy.pdf", "murphy.txt", "text/plain", content.encode())
+        self.ingestion.ingest(notebook["id"], source["id"])
+        retrieval = RetrievalService(self.repository, SQLiteVectorIndex(self.connection, lambda: "now"), LexicalRecoveryEmbeddings(),
+                                     ChunkingConfig(target_tokens=5, max_tokens=5, overlap_tokens=0), batch_size=32)
+        asyncio.run(retrieval.index_source(notebook["id"], source["id"]))
+
+        diagnostics = asyncio.run(retrieval.inspect_search(notebook["id"], "¿Cuál es la ley de Murphy sobre la tostada?", 20))
+        relevant = next(item for item in diagnostics if item["content_matches"]["tostada"])
+        self.assertGreater(relevant["rank"], 5)
+        self.assertEqual(relevant["candidate_count"], 13)
+        self.assertTrue(relevant["has_valid_embedding"])
+
+        results = asyncio.run(retrieval.search(notebook["id"], "¿Cuál es la ley de Murphy sobre la tostada?", 5))
+        self.assertTrue(any("tostada" in result["content"] and "mantequilla" in result["content"] for result in results))
+        for query in ("tostada", "tostada mantequilla", "pan mantequilla", "ley de Murphy tostada mantequilla"):
+            self.assertTrue(any("tostada" in result["content"] for result in asyncio.run(retrieval.search(notebook["id"], query, 5))))
 
 
 if __name__ == "__main__":

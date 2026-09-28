@@ -121,7 +121,22 @@ async function deleteNotebook(id) {
   try { await api(`/notebooks/${id}`, { method: 'DELETE' }); if (state.currentNotebookId === id) { state.currentNotebookId = null; $('#notebook-detail').hidden = true; } await loadNotebooks(); toast('Notebook deleted'); } catch (error) { toast(error.message); }
 }
 async function openNotebook(id) {
-  try { const [notebook, sources] = await Promise.all([api(`/notebooks/${id}`), api(`/notebooks/${id}/sources`)]); state.currentNotebookId = id; state.notebookSources = sources; $('#notebook-detail').hidden = false; renderNotebookDetail(notebook); } catch (error) { toast(error.message); }
+  try { const [notebook, sources] = await Promise.all([api(`/notebooks/${id}`), api(`/notebooks/${id}/sources`)]); state.currentNotebookId = id; state.notebookSources = sources; $('#notebook-detail').hidden = false; renderNotebookDetail(notebook); sources.filter((source) => source.indexing_status === 'indexing').forEach((source) => setIndexingRow(source.id, true)); sources.filter((source) => source.indexing_status === 'ready').forEach((source) => { const button = $('#notebook-detail').querySelector(`[data-source-index="${CSS.escape(source.id)}"]`); if (button) button.textContent = 'Re-index'; }); } catch (error) { toast(error.message); }
+}
+function setIndexingRow(sourceId, indexing) {
+  const article = $('#notebook-detail').querySelector(`[data-source-delete="${CSS.escape(sourceId)}"]`)?.closest('.notebook-source');
+  if (!article) return;
+  let button = article.querySelector('[data-source-index]');
+  if (indexing && !button) {
+    button = document.createElement('button');
+    button.className = 'text-button';
+    button.dataset.sourceIndex = sourceId;
+    article.lastElementChild.prepend(button);
+    button.onclick = async () => { setIndexingRow(sourceId, true); try { await api(`/notebooks/${state.currentNotebookId}/sources/${sourceId}/index`, { method: 'POST' }); await openNotebook(state.currentNotebookId); } catch (error) { await openNotebook(state.currentNotebookId); toast(error.message); } };
+  }
+  if (indexing && button) { button.disabled = true; button.innerHTML = '<span class="index-spinner" aria-hidden="true"></span> Indexing…'; }
+  const small = article.querySelector('small');
+  if (indexing && small && !small.querySelector('.index-progress')) { small.append(' · '); const progress = document.createElement('span'); progress.className = 'index-progress'; progress.textContent = 'Indexing…'; small.append(progress); }
 }
 function renderNotebookDetail(notebook) {
   const status = { added: ['○ Added', 'status-disabled'], pending: ['○ Pending', 'status-disabled'], extracting: ['◌ Processing', 'status-connected'], ready: ['✓ Ready', 'status-ready'], failed: ['⚠ Extraction failed', 'status-error'] };
@@ -131,7 +146,7 @@ function renderNotebookDetail(notebook) {
   $('#notebook-file-form').onsubmit = async (event) => { event.preventDefault(); const file = $('#notebook-file').files[0]; if (!file) return; const form = new FormData(); form.append('file', file); try { const source = await api(`/notebooks/${state.currentNotebookId}/sources`, { method: 'POST', body: form }); await ingestSource(source.id); toast('File processed'); } catch (error) { toast(error.message); } };
   $('#notebook-web-form').onsubmit = async (event) => { event.preventDefault(); try { const source = await api(`/notebooks/${state.currentNotebookId}/sources`, { method: 'POST', body: JSON.stringify({ type: 'web', title: $('#notebook-web-title').value, url: $('#notebook-url').value }) }); await ingestSource(source.id); } catch (error) { toast(error.message); } };
   $('#notebook-detail').querySelectorAll('[data-source-ingest]').forEach((button) => { button.onclick = () => ingestSource(button.dataset.sourceIngest); });
-  $('#notebook-detail').querySelectorAll('[data-source-index]').forEach((button) => { button.onclick = async () => { try { await api(`/notebooks/${state.currentNotebookId}/sources/${button.dataset.sourceIndex}/index`, { method: 'POST' }); await openNotebook(state.currentNotebookId); } catch (error) { toast(error.message); } }; });
+  $('#notebook-detail').querySelectorAll('[data-source-index]').forEach((button) => { button.onclick = async () => { const sourceId = button.dataset.sourceIndex; setIndexingRow(sourceId, true); try { await api(`/notebooks/${state.currentNotebookId}/sources/${sourceId}/index`, { method: 'POST' }); await openNotebook(state.currentNotebookId); } catch (error) { await openNotebook(state.currentNotebookId); toast(error.message); } }; });
   $('#notebook-detail').querySelectorAll('[data-source-delete]').forEach((button) => { button.onclick = async () => { try { await api(`/notebooks/${state.currentNotebookId}/sources/${button.dataset.sourceDelete}`, { method: 'DELETE' }); await openNotebook(state.currentNotebookId); await loadNotebooks(); } catch (error) { toast(error.message); } }; });
 }
 
@@ -270,7 +285,7 @@ function renderMessages() {
       ? `<img class="attachment-preview" src="${escapeHtml(attachment.data_url)}" alt="${escapeHtml(attachment.name)}">`
       : `<span class="message-model">Adjunto: ${escapeHtml(attachment.name)}</span>`).join('');
     const sourceList = sources.length ? `<details class="message-sources"><summary>Sources · ${sources.length}</summary>${sources.map((source) => `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}<span>${escapeHtml(source.url)}</span></a>`).join('')}</details>` : '';
-    const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => `<div><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}<span>${escapeHtml(citation.status || citation.provenance?.[0]?.heading || 'Retrieved excerpt')}</span></div>`).join('')}</details>` : '';
+    const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => { const location = citation.provenance?.map((item) => item.source_location || {}).find((item) => item.page != null || item.heading); const suffix = location?.page != null ? ` · page ${location.page}` : location?.heading ? ` · ${location.heading}` : ''; const excerpt = citation.excerpt ? `<details class="citation-excerpt"><summary>Retrieved excerpt</summary><p>${escapeHtml(citation.excerpt)}</p></details>` : ''; return `<div class="notebook-citation"><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}${escapeHtml(suffix)}<span>${escapeHtml(citation.status || 'Retrieved excerpt')}</span>${excerpt}</div>`; }).join('')}</details>` : '';
     const content = message.role === 'assistant' ? renderMarkdown(message.content) : escapeHtml(message.content).replace(/\n/g, '<br>');
     const runtime = message.runtime || {};
     const metrics = message.role === 'assistant' && (runtime.tokens_per_second != null || runtime.completion_tokens != null || runtime.context_used_tokens != null)
