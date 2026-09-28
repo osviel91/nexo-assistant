@@ -1,7 +1,7 @@
 import { renderMarkdown } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], labTab: 'models', conversationId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -69,6 +69,11 @@ async function loadTools() {
 
 async function loadShadow() {
   state.shadow = await api('/lab/shadow?limit=20');
+  renderLab();
+}
+
+async function loadTraces() {
+  state.traces = await api('/lab/traces?limit=30');
   renderLab();
 }
 
@@ -207,11 +212,12 @@ function renderLab() {
   const tabs = [{ id: 'models', label: 'Models' }];
   if (moduleEnabled('decision-runtime')) tabs.push({ id: 'decisions', label: 'Decisions' });
   if (state.modules.find((module) => module.id === 'decision-runtime')?.status?.shadow_enabled) tabs.push({ id: 'shadow', label: 'Shadow' });
+  tabs.push({ id: 'runtime', label: 'Runtime' });
   if (state.tools.length || moduleEnabled('mcp')) tabs.push({ id: 'tools', label: 'Tools' });
   if (!tabs.some((tab) => tab.id === state.labTab)) state.labTab = tabs[0].id;
   $('#lab-tabs').innerHTML = tabs.map((tab) => `<button class="lab-tab ${tab.id === state.labTab ? 'active' : ''}" data-lab-tab="${tab.id}">${tab.label}</button>`).join('');
   $('#lab-tabs').querySelectorAll('[data-lab-tab]').forEach((button) => { button.onclick = () => { state.labTab = button.dataset.labTab; renderLab(); }; });
-  $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : state.labTab === 'shadow' ? renderShadow() : renderDecisions();
+   $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : state.labTab === 'shadow' ? renderShadow() : state.labTab === 'runtime' ? renderRuntime() : renderDecisions();
   if (state.labTab === 'decisions') bindDecisionPlayground();
 }
 
@@ -223,6 +229,16 @@ function renderShadow() {
     return `<article class="model-provider"><div class="model-provider-head"><div><h4>Decision observation</h4><span>${escapeHtml(item.created_at)} · ${escapeHtml(item.model || 'unknown model')}</span></div><span class="status ${item.error ? 'status-disabled' : 'status-ready'}">● ${item.error ? 'FAILED' : 'RECORDED'}</span></div><div class="model-list"><div class="model-row"><strong>Web needed</strong><span>${escapeHtml(answer('needs_web'))}</span></div><div class="model-row"><strong>Tools needed</strong><span>${escapeHtml(answer('needs_tools'))}</span></div><div class="model-row"><strong>Task</strong><span>${escapeHtml(answer('task_type'))}</span></div><div class="model-row"><strong>Actual execution</strong><span>${escapeHtml((actual.tools_used || []).join(', ') || 'No tools')} · ${actual.tool_rounds || 0} round(s)</span></div></div></article>`;
   }).join('');
   return `<section class="lab-section"><div class="lab-section-head"><div><span class="eyebrow">SHADOW DECISION</span><h3>Observation history</h3></div><span class="lab-count">${state.shadow.length} observations</span></div>${observations || '<div class="lab-empty">No hay observaciones shadow todavía.</div>'}</section>`;
+}
+
+function renderRuntime() {
+  const events = state.traces.map((event) => {
+    const metadata = event.metadata || {};
+    const label = event.type === 'ACT' ? metadata.tool || 'tool' : event.type === 'REASON' ? `${metadata.model || 'model'} · round ${metadata.round || '?'}` : metadata.model || 'shadow decision';
+    const details = event.type === 'DECIDE' && metadata.answers ? Object.entries(metadata.answers).map(([key, answer]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(answer.value === true ? 'YES' : answer.value === false ? 'NO' : answer.value)} · ${Math.round((answer.confidence || 0) * 100)}%</div>`).join('') : '';
+    return `<article class="trace-event"><div class="trace-index">${String(event.sequence).padStart(2, '0')}</div><div class="trace-main"><div class="trace-head"><strong>${escapeHtml(event.type)}</strong><span>${escapeHtml(String(event.duration_ms ?? 0))}ms · ${escapeHtml(event.status)}</span></div><div class="trace-label">${escapeHtml(label)}</div>${details}</div></article>`;
+  }).join('');
+  return `<section class="lab-section runtime-trace"><div class="lab-section-head"><div><span class="eyebrow">RUNTIME TRACE</span><h3>Observable execution</h3></div><span class="lab-count">${state.traces.length} events</span></div>${events || '<div class="lab-empty">No hay trazas todavía.</div>'}</section>`;
 }
 
 function renderModels() {
@@ -300,4 +316,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadTools(), loadShadow(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadTools(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));

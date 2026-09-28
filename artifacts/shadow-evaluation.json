@@ -1,0 +1,240 @@
+{
+  "model": null,
+  "cases": 25,
+  "results": [
+    {
+      "case_id": "web-01",
+      "category": "explicit_web",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "web-02",
+      "category": "explicit_web",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "web-03",
+      "category": "explicit_web",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "web-04",
+      "category": "explicit_web",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "current-01",
+      "category": "current_information",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "current-02",
+      "category": "current_information",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "knowledge-01",
+      "category": "timeless_knowledge",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "knowledge-02",
+      "category": "timeless_knowledge",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "knowledge-03",
+      "category": "timeless_knowledge",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "knowledge-04",
+      "category": "timeless_knowledge",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "coding-01",
+      "category": "coding",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "coding-02",
+      "category": "coding",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "coding-03",
+      "category": "coding",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "analysis-01",
+      "category": "analysis",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "analysis-02",
+      "category": "analysis",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "analysis-03",
+      "category": "analysis",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "conversation-01",
+      "category": "conversation",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "conversation-02",
+      "category": "conversation",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "conversation-03",
+      "category": "conversation",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "tool-01",
+      "category": "explicit_tool",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "tool-02",
+      "category": "explicit_tool",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "ambiguous-01",
+      "category": "ambiguous",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "ambiguous-02",
+      "category": "ambiguous",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "ambiguous-03",
+      "category": "ambiguous",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    },
+    {
+      "case_id": "ambiguous-04",
+      "category": "ambiguous",
+      "answers": {},
+      "model": null,
+      "latency_ms": 0.0,
+      "error": "decision_runtime_unavailable"
+    }
+  ],
+  "metrics": {
+    "boolean": {
+      "needs_web": {
+        "correct": 0,
+        "incorrect": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "accuracy": null
+      },
+      "needs_tools": {
+        "correct": 0,
+        "incorrect": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "accuracy": null
+      }
+    },
+    "task_type": {
+      "correct": 0,
+      "incorrect": 0,
+      "confusion": {},
+      "accuracy": null
+    },
+    "confidence": {
+      "correct": null,
+      "incorrect": null
+    }
+  },
+  "latency_ms": {
+    "min": 0.0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+  }
+}

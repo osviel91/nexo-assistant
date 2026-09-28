@@ -17,6 +17,17 @@ from app.kernel import InterfaceExtension, ModuleContext, ModuleManifest
 logger = logging.getLogger("nexo.decision.module")
 
 
+def shadow_request(message: str, available_tools: list[str]) -> DecisionRequest:
+    return DecisionRequest(
+        state={"message": message, "available_tools": available_tools},
+        questions=[
+            {"id": "needs_web", "type": "boolean", "statement": "Would this request materially benefit from current or external information obtained through web search?"},
+            {"id": "needs_tools", "type": "boolean", "statement": "Would solving this request materially benefit from using one of the available agent tools?"},
+            {"id": "task_type", "type": "choice", "statement": "What is the primary type of this request?", "options": ["conversation", "knowledge", "research", "coding", "analysis", "other"]},
+        ],
+    )
+
+
 class DecisionRuntimeModule:
     manifest = ModuleManifest(
         id="decision-runtime",
@@ -83,14 +94,7 @@ class DecisionRuntimeModule:
 
     async def shadow_decide(self, message: str, available_tools: list[str]) -> ShadowDecision:
         started = time.perf_counter()
-        request = DecisionRequest(
-            state={"message": message, "available_tools": available_tools},
-            questions=[
-                {"id": "needs_web", "type": "boolean", "statement": "Would this request materially benefit from current or external information obtained through web search?"},
-                {"id": "needs_tools", "type": "boolean", "statement": "Would solving this request materially benefit from using one of the available agent tools?"},
-                {"id": "task_type", "type": "choice", "statement": "What is the primary type of this request?", "options": ["conversation", "knowledge", "research", "coding", "analysis", "other"]},
-            ],
-        )
+        request = shadow_request(message, available_tools)
         result = await self.runtime.decide(request)
         metadata = result.metadata or {}
         return ShadowDecision("shadow", result.model, {key: value.model_dump(exclude_none=True) for key, value in result.answers.items()}, {key: metadata[key] for key in ("routing", "latency_ms") if key in metadata}, round((time.perf_counter() - started) * 1000, 2))

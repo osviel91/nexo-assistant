@@ -6,6 +6,24 @@ from pathlib import Path
 
 
 class ShadowObservationTests(unittest.TestCase):
+    def test_trace_events_are_ordered_and_safe(self):
+        from app import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_db = main.DB_PATH
+            main.DB_PATH = Path(directory) / "trace.sqlite3"
+            try:
+                main.startup()
+                first = main._insert_trace_event("conversation-1", "message-1", "DECIDE", "running", {"model": "laya"})
+                main._insert_trace_event("conversation-1", "message-1", "ACT", "success", {"tool": "web_search"}, 12)
+                main._update_trace_event(first, "success", {"model": "laya", "answers": {"needs_web": {"value": True, "confidence": .8}}}, 8)
+                with main.db() as connection:
+                    rows = connection.execute("SELECT * FROM runtime_trace_events ORDER BY sequence").fetchall()
+                self.assertEqual([row["type"] for row in rows], ["DECIDE", "ACT"])
+                self.assertNotIn("Authorization", json.dumps([dict(row) for row in rows]))
+            finally:
+                main.DB_PATH = old_db
+
     def test_observation_links_message_and_keeps_execution_facts_without_secrets(self):
         from app import main
 

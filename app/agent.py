@@ -41,6 +41,7 @@ class AgentRuntime:
         tools_used: list[str] = []
         tool_rounds = 0
         for _ in range(self.limits.max_tool_rounds + 1):
+            reason_started = time.perf_counter()
             payload = {"model": model_id, "messages": messages, "stream": True}
             if temperature is not None:
                 payload["temperature"] = temperature
@@ -96,6 +97,7 @@ class AgentRuntime:
                         except (ValueError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
                             continue
             except httpx.RequestError as exc:
+                yield {"trace": {"type": "REASON", "duration_ms": round((time.perf_counter() - reason_started) * 1000, 2), "status": "error", "metadata": {"model": model_id, "round": tool_rounds + 1}}}
                 yield {"error": f"Provider connection failed: {str(exc)[:180]}"}
                 return
 
@@ -105,6 +107,7 @@ class AgentRuntime:
                 "tool_calls_present": bool(tool_calls),
                 "tool_call_names": [call["name"] for call in tool_calls.values() if call["name"]],
             })
+            yield {"trace": {"type": "REASON", "duration_ms": round((time.perf_counter() - reason_started) * 1000, 2), "status": "success", "metadata": {"model": model_id, "round": tool_rounds + 1}}}
 
             if not tool_calls:
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
@@ -145,6 +148,7 @@ class AgentRuntime:
                 if not isinstance(result, dict):
                     result = {"error": {"code": "tool_execution_error", "message": "La herramienta devolvió un resultado inválido."}}
                     status = "tool_execution_error"
+                yield {"trace": {"type": "ACT", "duration_ms": round(time.monotonic() - started, 4) * 1000, "status": "success" if status == "ok" and not result.get("error") else status, "metadata": {"tool": call["name"], "round": tool_rounds}}}
                 if isinstance(result.get("results"), list):
                     numbered = []
                     for item in result["results"]:

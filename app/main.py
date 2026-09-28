@@ -101,6 +101,15 @@ def startup() -> None:
           execution TEXT NOT NULL DEFAULT '{}', metadata TEXT NOT NULL DEFAULT '{}',
           latency_ms REAL, error TEXT, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS runtime_trace_events (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL, type TEXT NOT NULL, started_at TEXT NOT NULL,
+          duration_ms REAL, status TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS capability_refreshes (
+          provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+          refreshed_at TEXT NOT NULL
+        );
         """)
         model_columns = {row["name"] for row in c.execute("PRAGMA table_info(models)")}
         if "capabilities" not in model_columns:
@@ -109,6 +118,10 @@ def startup() -> None:
         if "sources" not in message_columns:
             c.execute("ALTER TABLE messages ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
     module_registry.startup()
+    try:
+        asyncio.get_running_loop().create_task(_refresh_all_provider_capabilities())
+    except RuntimeError:
+        pass
 
 
 @app.on_event("shutdown")
@@ -136,8 +149,9 @@ class ChatIn(BaseModel):
 def provider_dict(row: sqlite3.Row) -> dict[str, Any]:
     with db() as c:
         models = c.execute("SELECT id,label,capabilities FROM models WHERE provider_id=? ORDER BY label", (row["id"],)).fetchall()
+        refreshed = c.execute("SELECT refreshed_at FROM capability_refreshes WHERE provider_id=?", (row["id"],)).fetchone()
     return {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
-            "has_api_key": bool(row["api_key"]), "models": [{**dict(m), "capabilities": json.loads(m["capabilities"])} for m in models]}
+            "has_api_key": bool(row["api_key"]), "capabilities_refreshed_at": refreshed["refreshed_at"] if refreshed else None, "models": [{**dict(m), "capabilities": json.loads(m["capabilities"])} for m in models]}
 
 
 @app.get("/api/health")
@@ -176,6 +190,28 @@ def diagnostics(limit: int = 50):
     return recent(limit)
 
 
+@app.get("/api/lab/traces")
+def traces(conversation_id: str | None = None, limit: int = 20):
+    limit = min(max(limit, 1), 100)
+    query = "SELECT * FROM runtime_trace_events"
+    params: list[Any] = []
+    if conversation_id:
+        query += " WHERE conversation_id=?"
+        params.append(conversation_id)
+    query += " ORDER BY started_at DESC, sequence DESC LIMIT ?"
+    params.append(limit)
+    with db() as c:
+        rows = c.execute(query, params).fetchall()
+    return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
+@app.get("/api/lab/traces/{message_id}")
+def message_trace(message_id: str):
+    with db() as c:
+        rows = c.execute("SELECT * FROM runtime_trace_events WHERE message_id=? ORDER BY sequence", (message_id,)).fetchall()
+    return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
 @app.get("/api/providers")
 def providers():
     with db() as c:
@@ -188,7 +224,7 @@ def add_provider(item: ProviderIn):
     pid = str(uuid.uuid4())
     url = item.base_url.strip().rstrip("/")
     with db() as c:
-        c.execute("INSERT INTO providers VALUES(?,?,?,?,?)", (pid, item.name.strip(), url, item.api_key, now()))
+        c.execute("INSERT INTO providers(id,name,base_url,api_key,created_at) VALUES(?,?,?,?,?)", (pid, item.name.strip(), url, item.api_key, now()))
         c.executemany("INSERT OR IGNORE INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", [(m.strip(), pid, m.strip(), json.dumps(item.model_capabilities.get(m.strip(), []))) for m in item.models if m.strip()])
         row = c.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
     return provider_dict(row)
@@ -229,6 +265,16 @@ async def provider_request(provider_id: str, path: str, **kwargs):
         raise HTTPException(502, f"Could not reach provider: {str(e)[:180]}")
 
 
+async def _refresh_all_provider_capabilities() -> None:
+    with db() as c:
+        provider_ids = [row["id"] for row in c.execute("SELECT id FROM providers")]
+    for provider_id in provider_ids:
+        try:
+            await refresh_models(provider_id)
+        except Exception as exc:
+            diagnostic(logger, "capability_refresh_failed", provider_id=provider_id, error_code=type(exc).__name__)
+
+
 @app.post("/api/providers/{pid}/refresh")
 async def refresh_models(pid: str):
     payload = await provider_request(pid, "/models")
@@ -246,6 +292,7 @@ async def refresh_models(pid: str):
                 "normalized_capabilities": sorted(capabilities),
             })
             c.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?) ON CONFLICT(provider_id,id) DO UPDATE SET capabilities=excluded.capabilities", (str(model["id"]), pid, str(model["id"]), json.dumps(sorted(capabilities))))
+        c.execute("INSERT INTO capability_refreshes(provider_id,refreshed_at) VALUES(?,?) ON CONFLICT(provider_id) DO UPDATE SET refreshed_at=excluded.refreshed_at", (pid, now()))
         row = c.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
     return provider_dict(row)
 
@@ -320,7 +367,8 @@ async def chat(req: ChatIn):
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     if _shadow_configured():
-        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future))
+        trace_id = _insert_trace_event(cid, message_id, "DECIDE", "running", {"model": None})
+        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future, trace_id))
         shadow_tasks.add(task)
         task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
@@ -329,6 +377,10 @@ async def chat(req: ChatIn):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                 async for event in agent_runtime.stream(client, url, headers, messages, req.model_id, {"tool-calling"} if supports_tools else set(), execution_context, req.temperature):
+                    if "trace" in event:
+                        trace = event["trace"]
+                        _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))
+                        continue
                     if "delta" in event:
                         yield "data: " + json.dumps({"delta": event["delta"]}) + "\n\n"
                     elif "status" in event:
@@ -373,7 +425,20 @@ def _finish_shadow_task(task: asyncio.Task[None], conversation_id: str, message_
         diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code="shadow_task_failed")
 
 
-async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]]) -> None:
+def _insert_trace_event(conversation_id: str, message_id: str, event_type: str, status: str, metadata: dict[str, Any], duration_ms: float | None = None) -> str:
+    event_id = str(uuid.uuid4())
+    with db() as c:
+        sequence = c.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM runtime_trace_events WHERE message_id=?", (message_id,)).fetchone()[0]
+        c.execute("INSERT INTO runtime_trace_events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, conversation_id, message_id, sequence, event_type, now(), duration_ms, status, json.dumps(metadata)))
+    return event_id
+
+
+def _update_trace_event(event_id: str, status: str, metadata: dict[str, Any], duration_ms: float | None = None) -> None:
+    with db() as c:
+        c.execute("UPDATE runtime_trace_events SET status=?,duration_ms=?,metadata=? WHERE id=?", (status, duration_ms, json.dumps(metadata), event_id))
+
+
+async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]], trace_id: str | None = None) -> None:
     started = datetime.now(timezone.utc)
     service = module_registry.service("decision-shadow")
     result = ShadowDecision("shadow", None, {}, {}, None)
@@ -383,10 +448,14 @@ async def _run_shadow_observation(message_id: str, conversation_id: str, message
             raise RuntimeError("decision_runtime_unavailable")
         diagnostic(logger, "shadow_started", conversation_id=conversation_id, message_id=message_id, latency_ms=None, error_code=None)
         result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
+        if trace_id:
+            _update_trace_event(trace_id, "success", {"model": result.model, "answers": result.answers, "confidence": {key: answer.get("confidence") for key, answer in result.answers.items()}, "probabilities": {key: answer.get("probabilities") for key, answer in result.answers.items() if answer.get("probabilities")}}, result.latency_ms)
         diagnostic(logger, "shadow_completed", conversation_id=conversation_id, message_id=message_id, latency_ms=result.latency_ms, error_code=None)
     except Exception as exc:
         error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
         result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
+        if trace_id:
+            _update_trace_event(trace_id, "error", {"error": error}, result.latency_ms)
         diagnostic(logger, "shadow_failed", conversation_id=conversation_id, message_id=message_id, error_code=error, latency_ms=result.latency_ms)
     try:
         execution = await asyncio.shield(execution_future)

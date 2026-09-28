@@ -72,6 +72,9 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(events[-1]["sources"], [{"title": "Source", "url": "https://source.test"}])
         self.assertEqual(events[-1]["tools_used"], ["test_tool"])
         self.assertEqual(events[-1]["tool_rounds"], 1)
+        trace_events = [event["trace"] for event in events if "trace" in event]
+        self.assertEqual([event["type"] for event in trace_events], ["REASON", "ACT", "REASON"])
+        self.assertNotIn("arguments", json.dumps(trace_events))
         self.assertIn("tools", client.payloads[0])
 
     def test_invalid_unknown_and_handler_errors_are_safe(self):
