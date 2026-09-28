@@ -2,10 +2,22 @@ import unittest
 from unittest.mock import patch
 
 from app.decision.models import DecisionRequest
-from app.shadow_evaluation import latency_summary, score_cases
+from app.shadow_evaluation import WORDING_VARIANTS, evaluation_request, latency_summary, score_cases
 
 
 class ShadowEvaluationTests(unittest.TestCase):
+    def test_baseline_wording_matches_production_and_candidates_only_change_booleans(self):
+        baseline = evaluation_request("x", ["web_search"], "baseline")
+        self.assertEqual(baseline.questions[0].statement, "Would this request materially benefit from current or external information obtained through web search?")
+        self.assertEqual(baseline.questions[1].statement, "Would solving this request materially benefit from using one of the available agent tools?")
+        self.assertEqual(baseline.questions[2].statement, "What is the primary type of this request?")
+        for variant in ("candidate-a", "candidate-b"):
+            request = evaluation_request("x", ["web_search"], variant)
+            self.assertNotEqual(request.questions[0].statement, baseline.questions[0].statement)
+            self.assertNotEqual(request.questions[1].statement, baseline.questions[1].statement)
+            self.assertEqual(request.questions[2].statement, baseline.questions[2].statement)
+        self.assertEqual(set(WORDING_VARIANTS), {"baseline", "candidate-a", "candidate-b"})
+
     def test_evaluation_runtime_override_sets_only_provider_model(self):
         from app.shadow_evaluation import evaluation_runtime
 

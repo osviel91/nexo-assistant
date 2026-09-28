@@ -9,13 +9,13 @@ import time
 from pathlib import Path
 
 from app.decision.models import ShadowDecision
-from app.modules.decision_runtime import shadow_request
-from app.shadow_evaluation import evaluation_runtime, latency_summary, score_cases
+from app.shadow_evaluation import WORDING_VARIANTS, evaluation_request, evaluation_runtime, latency_summary, score_cases
 
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the developer Shadow evaluation.")
     parser.add_argument("--model", choices=("laya-english", "laya-multilingual"), help="Evaluator-only Arbiter model override.")
+    parser.add_argument("--wording", choices=tuple(WORDING_VARIANTS), default="baseline", help="Evaluator-only boolean wording variant.")
     parser.add_argument("--arbiter-url", default=os.getenv("NEXO_ARBITER_URL", ""))
     parser.add_argument("--api-key", default=os.getenv("NEXO_ARBITER_API_KEY", ""))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("NEXO_DECISION_TIMEOUT", "10")))
@@ -44,7 +44,7 @@ async def run(options: argparse.Namespace | None = None) -> None:
         item = {"case_id": case["id"], "category": case["category"], "answers": {}, "model": None, "latency_ms": None, "error": None}
         try:
             if options.model:
-                result = await runtime.decide(shadow_request(case["state"], tools))
+                result = await runtime.decide(evaluation_request(case["state"], tools, options.wording))
                 decision = ShadowDecision("evaluation", result.model, {key: value.model_dump(exclude_none=True) for key, value in result.answers.items()}, result.metadata or {}, round((time.perf_counter() - started) * 1000, 2))
             elif service is not None:
                 decision = await service.shadow_decide(case["state"], tools)
@@ -54,7 +54,7 @@ async def run(options: argparse.Namespace | None = None) -> None:
         except Exception as exc:
             item.update({"latency_ms": round((time.perf_counter() - started) * 1000, 2), "error": str(exc) if str(exc) == "decision_runtime_unavailable" else type(exc).__name__})
         results.append(item)
-    report = {"model": next((item["model"] for item in results if item["model"]), None), "cases": len(cases), "results": results, "metrics": score_cases(cases, results), "latency_ms": latency_summary(results)}
+    report = {"model": next((item["model"] for item in results if item["model"]), None), "wording": options.wording, "cases": len(cases), "results": results, "metrics": score_cases(cases, results), "latency_ms": latency_summary(results)}
     output = Path(options.output) if options.output else Path(__file__).parent.parent / (f"artifacts/shadow-evaluation-{options.model}.json" if options.model else "artifacts/shadow-evaluation.json")
     output.parent.mkdir(exist_ok=True)
     output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")

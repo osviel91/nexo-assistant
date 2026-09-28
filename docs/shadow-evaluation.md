@@ -23,6 +23,16 @@ PYTHONPATH=. .venv/bin/python scripts/evaluate_shadow.py --model laya-multilingu
 
 Both runs reuse `shadow_request`, the current wording, the unchanged fixture, available-tool state, taxonomy, and scoring. The only changed request field is the Arbiter `model` field already supported by the `/v1/systemone` provider contract. The API key is read from `NEXO_ARBITER_API_KEY` and is never written to results.
 
+The evaluator also supports the controlled boolean wording experiment without changing production:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/evaluate_shadow.py --model laya-english --wording baseline
+PYTHONPATH=. .venv/bin/python scripts/evaluate_shadow.py --model laya-english --wording candidate-a
+PYTHONPATH=. .venv/bin/python scripts/evaluate_shadow.py --model laya-english --wording candidate-b
+```
+
+Each variant changes only `needs_web` and `needs_tools`; `task_type` remains the production question. `baseline` is the unchanged production wording.
+
 ## Results
 
 The local run in this checkout completed the fixture with `decision_runtime_unavailable` for every case because no Arbiter URL/module configuration was present in the local shell. Therefore no accuracy, calibration, or meaningful latency result is claimed here. Run the command in the configured production-like environment to populate the machine-readable result.
