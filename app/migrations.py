@@ -129,7 +129,41 @@ def _migration_5(connection: sqlite3.Connection) -> None:
     """)
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5))
+def _migration_6(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS canonical_documents (
+      id TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL UNIQUE REFERENCES notebook_sources(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      language TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS canonical_spans (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL REFERENCES canonical_documents(id) ON DELETE CASCADE,
+      start_offset INTEGER NOT NULL,
+      end_offset INTEGER NOT NULL,
+      source_type TEXT NOT NULL,
+      source_location TEXT NOT NULL DEFAULT '{}',
+      CHECK(start_offset >= 0 AND end_offset >= start_offset)
+    );
+    CREATE INDEX IF NOT EXISTS idx_canonical_documents_notebook ON canonical_documents(notebook_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_canonical_spans_document ON canonical_spans(document_id, start_offset);
+    """)
+    _add_column_if_missing(connection, "notebook_sources", "error_code", "TEXT")
+    _add_column_if_missing(connection, "notebook_sources", "error_message", "TEXT")
+    _add_column_if_missing(connection, "notebook_sources", "adapter", "TEXT")
+    _add_column_if_missing(connection, "notebook_sources", "extraction_duration_ms", "REAL")
+    _add_column_if_missing(connection, "notebook_sources", "canonical_character_count", "INTEGER")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Any
 
 
 SOURCE_TYPES = {"file", "web"}
@@ -90,6 +91,51 @@ class NotebookRepository:
                 raise NotebookSourceNotFoundError(source_id)
             connection.execute("DELETE FROM notebook_sources WHERE notebook_id=? AND id=?", (notebook_id, source_id))
             return row
+
+    def set_source_status(self, source_id: str, status: str, adapter: str | None = None,
+                          duration: float | None = None, character_count: int | None = None,
+                          error_code: str | None = None, error_message: str | None = None) -> None:
+        with self.connection_factory() as connection:
+            connection.execute("""UPDATE notebook_sources SET status=?, adapter=?, extraction_duration_ms=?,
+                canonical_character_count=?, error_code=?, error_message=?, updated_at=? WHERE id=?""",
+                (status, adapter, duration, character_count, error_code, error_message, self.now(), source_id))
+
+    def replace_canonical(self, source: sqlite3.Row, data: Any) -> dict[str, Any]:
+        document_id = str(uuid.uuid4())
+        timestamp = self.now()
+        with self.connection_factory() as connection:
+            existing = connection.execute("SELECT id,created_at FROM canonical_documents WHERE source_id=?", (source["id"],)).fetchone()
+            if existing:
+                document_id, created_at = existing["id"], existing["created_at"]
+                connection.execute("DELETE FROM canonical_documents WHERE id=?", (document_id,))
+            else:
+                created_at = timestamp
+            connection.execute("""INSERT INTO canonical_documents
+                (id,notebook_id,source_id,title,content,content_hash,content_type,language,metadata,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (document_id, source["notebook_id"], source["id"], data.title,
+                data.content, data.content_hash, data.content_type, data.language, json.dumps(data.metadata), created_at, timestamp))
+            connection.executemany("""INSERT INTO canonical_spans
+                (id,document_id,start_offset,end_offset,source_type,source_location) VALUES(?,?,?,?,?,?)""",
+                [(str(uuid.uuid4()), document_id, span.start_offset, span.end_offset, span.source_type, json.dumps(span.source_location)) for span in data.spans])
+            return self.canonical(source["notebook_id"], source["id"], connection=connection)
+
+    def canonical(self, notebook_id: str, source_id: str, connection: sqlite3.Connection | None = None):
+        owns_connection = connection is None
+        connection = connection or self.connection_factory()
+        try:
+            row = connection.execute("""SELECT * FROM canonical_documents
+                WHERE notebook_id=? AND source_id=?""", (notebook_id, source_id)).fetchone()
+            if row is None:
+                return None
+            spans = connection.execute("""SELECT id,start_offset,end_offset,source_type,source_location
+                FROM canonical_spans WHERE document_id=? ORDER BY start_offset,id""", (row["id"],)).fetchall()
+            result = dict(row)
+            result["metadata"] = json.loads(result["metadata"] or "{}")
+            result["spans"] = [{**dict(span), "source_location": json.loads(span["source_location"] or "{}")} for span in spans]
+            return result
+        finally:
+            if owns_connection:
+                connection.close()
 
 
 class NotebookService:
@@ -194,6 +240,10 @@ class NotebookService:
     def delete_source(self, notebook_id: str, source_id: str) -> None:
         row = self.repository.delete_source(notebook_id, source_id)
         self._remove_file(row["id"])
+
+    def canonical(self, notebook_id: str, source_id: str) -> dict | None:
+        self.source(notebook_id, source_id)
+        return self.repository.canonical(notebook_id, source_id)
 
     def _path(self, source_id: str) -> Path:
         return self.storage_root / source_id[:2] / source_id

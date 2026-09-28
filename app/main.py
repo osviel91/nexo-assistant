@@ -32,6 +32,7 @@ from app.tools import ExposurePolicy, ToolExecutor
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
 from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookRepository, NotebookService, NotebookSourceNotFoundError, NotebookValidationError
+from app.ingestion import NotebookIngestionService
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,6 +86,7 @@ def now() -> str:
 agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_registry.tool_catalog)
 agent_profile_resolver = AgentProfileResolver(agent_profiles.repository)
 notebooks = NotebookService(NotebookRepository(db, now), DATA_DIR / "notebook-sources")
+ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_root, now, MAX_UPLOAD)
 
 
 @app.on_event("startup")
@@ -284,6 +286,25 @@ def list_notebook_sources(notebook_id: str):
 def get_notebook_source(notebook_id: str, source_id: str):
     try:
         return notebooks.source(notebook_id, source_id)
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+
+
+@app.get("/api/notebooks/{notebook_id}/sources/{source_id}/document")
+def get_canonical_document(notebook_id: str, source_id: str):
+    try:
+        document = notebooks.canonical(notebook_id, source_id)
+        return document or {"status": "not_ready", "document": None}
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+
+
+@app.post("/api/notebooks/{notebook_id}/sources/{source_id}/ingest")
+def ingest_notebook_source(notebook_id: str, source_id: str):
+    try:
+        notebooks.source(notebook_id, source_id)
+        result = ingestion.ingest(notebook_id, source_id)
+        return {"source": notebooks.source(notebook_id, source_id), "document": result}
     except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
         raise notebook_error(error)
 
