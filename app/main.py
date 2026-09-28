@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits, EffectiveRunConfiguration
 from app.agent_model import OpenAICompatibleModelAdapter
-from app.capabilities import normalize_model_capabilities
+from app.capabilities import normalize_model_capabilities, preserve_model_capabilities
 from app.diagnostics import diagnostic, recent
 from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
@@ -752,8 +752,8 @@ async def refresh_models(pid: str):
         for model in models:
             capabilities = normalize_model_capabilities(model, _tool_calling_fallback())
             existing = c.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (pid, str(model["id"]))).fetchone()
-            if existing and "embedding" in json.loads(existing["capabilities"] or "[]"):
-                capabilities.add("embedding")
+            if existing:
+                capabilities = preserve_model_capabilities(capabilities, json.loads(existing["capabilities"] or "[]"))
             diagnostic(logger, "model_capabilities", **{
                 "model": str(model["id"]),
                 "raw_capabilities": model.get("capabilities"),

@@ -73,11 +73,24 @@ async function loadProviders() {
 async function loadKnowledge() {
   state.knowledge = await api('/settings/embeddings');
   const config = state.knowledge.configuration;
-  const providers = (state.knowledge.providers || state.providers).map((provider) => ({ ...provider, models: provider.models.filter((model) => (model.capabilities || []).includes('embedding')) })).filter((provider) => provider.models.length);
+  const providers = (state.knowledge.providers || state.providers).map((provider) => ({ ...provider, models: provider.models.filter((model) => (model.capabilities || []).includes('embedding')) }));
   $('#embedding-provider').innerHTML = providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
-  const renderModels = () => { const provider = providers.find((item) => item.id === $('#embedding-provider').value); $('#embedding-model').innerHTML = (provider?.models || []).map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join(''); };
+  const empty = $('#embedding-empty');
+  const renderModels = () => {
+    const provider = providers.find((item) => item.id === $('#embedding-provider').value);
+    const models = provider?.models || [];
+    $('#embedding-model').innerHTML = models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+    $('#embedding-model').disabled = !models.length;
+    empty.textContent = provider ? `No embedding-capable models configured for ${provider.name}` : 'No embedding-capable models configured. Configure one in Providers & Models.';
+    empty.hidden = Boolean(models.length);
+  };
   $('#embedding-provider').onchange = renderModels;
-  if (config) { $('#embedding-provider').value = config.provider_id; renderModels(); $('#embedding-model').value = config.model_id; const fields = { target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_top_k: 'embedding-top-k', retrieval_max_context_chars: 'embedding-context' }; Object.entries(fields).forEach(([key, id]) => { $(`#${id}`).value = config[key]; }); }
+  $('#embedding-provider').disabled = !providers.length;
+  if (config && providers.some((provider) => provider.id === config.provider_id)) $('#embedding-provider').value = config.provider_id;
+  renderModels();
+  if (config && [...$('#embedding-model').options].some((option) => option.value === config.model_id)) $('#embedding-model').value = config.model_id;
+  const fields = { target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_top_k: 'embedding-top-k', retrieval_max_context_chars: 'embedding-context' };
+  if (config) Object.entries(fields).forEach(([key, id]) => { $(`#${id}`).value = config[key]; });
   $('#knowledge-health').textContent = `${state.knowledge.health.ready} ready · ${state.knowledge.health.outdated} outdated · ${state.knowledge.health.failed} failed`;
 }
 
@@ -467,7 +480,7 @@ function resetForm() { $('#provider-id').value = ''; $('#provider-name').value =
 function renderProviderList() {
   const list = $('#provider-list');
   if (!state.providers.length) { list.innerHTML = '<div class="empty-providers">Todavía no hay proveedores. Añade oMLX, OpenAI, DeepSeek o cualquier API compatible.</div>'; return; }
-   list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-pills">${provider.models.map((model) => `<span class="model-pill"><span>${escapeHtml(model.id)}</span><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="embedding" ${(model.capabilities || []).includes('embedding') ? 'checked' : ''}> Embeddings</label><button data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" aria-label="Quitar ${escapeHtml(model.id)}">×</button></span>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
+   list.innerHTML = state.providers.map((provider) => `<article class="provider-card"><div class="provider-card-head"><span class="provider-bullet"></span><strong>${escapeHtml(provider.name)}</strong><span class="provider-url">${escapeHtml(provider.base_url)}</span><div class="card-actions"><button data-action="refresh" data-id="${provider.id}">↻ Detectar</button><button data-action="edit" data-id="${provider.id}">Editar</button><button data-action="delete" data-id="${provider.id}" aria-label="Eliminar ${escapeHtml(provider.name)}">×</button></div></div><div class="model-list settings-model-list">${provider.models.map((model) => `<details class="settings-model"><summary><strong>${escapeHtml(model.id)}</strong><span>${(model.capabilities || []).map((capability) => escapeHtml(capability)).join(', ') || 'Generation'}</span><button type="button" class="model-menu" aria-label="Editar capacidades de ${escapeHtml(model.id)}">⋮</button></summary><div class="model-capabilities"><span>Capabilities</span><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="embedding" ${(model.capabilities || []).includes('embedding') ? 'checked' : ''}> Embeddings</label><label><input type="checkbox" data-action="model-capability" data-id="${provider.id}" data-model="${escapeHtml(model.id)}" data-capability="tool-calling" ${(model.capabilities || []).includes('tool-calling') ? 'checked' : ''}> Tool calling</label><button type="button" class="text-button model-delete" data-action="model-delete" data-id="${provider.id}" data-model="${escapeHtml(model.id)}">Remove model</button></div></details>`).join('') || '<span class="optional">Sin modelos todavía</span>'}</div></article>`).join('');
   list.querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => providerAction(button); });
 }
 

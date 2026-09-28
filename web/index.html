@@ -115,7 +115,8 @@
          <div class="settings-section-heading"><div><span class="eyebrow">KNOWLEDGE</span><h3 id="knowledge-title">Embeddings &amp; retrieval</h3></div><span class="settings-hint" id="knowledge-health">Loading</span></div>
          <form id="embedding-form" class="provider-form">
            <label>Provider<select id="embedding-provider" required></select></label>
-           <label>Model<select id="embedding-model" required></select></label>
+            <label>Model<select id="embedding-model" required></select></label>
+            <p class="empty-providers" id="embedding-empty" hidden>No embedding-capable models configured for the selected provider. Configure one in Providers &amp; Models.</p>
            <p class="settings-hint">Chunk sizes use estimated whitespace tokens, not tokenizer-exact tokens.</p>
             <div class="settings-grid"><label>Target size<input id="embedding-target" type="number" min="1" max="10000" value="400" required></label><label>Maximum size<input id="embedding-max" type="number" min="1" max="20000" value="600" required></label><label>Overlap<input id="embedding-overlap" type="number" min="0" max="5000" value="40" required></label><label>Batch size<input id="embedding-batch" type="number" min="1" max="256" value="32" required></label><label>Top K<input id="embedding-top-k" type="number" min="1" max="50" value="5" required></label><label>Max context<input id="embedding-context" type="number" min="1000" max="1000000" value="12000" required></label></div>
            <div class="form-actions"><button type="button" class="text-button" id="test-embedding">Test embedding</button><button type="submit" class="primary-button">Save knowledge configuration</button></div>

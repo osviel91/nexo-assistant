@@ -17,3 +17,9 @@ def normalize_model_capabilities(model_payload: dict[str, Any], assume_tool_call
     if assume_tool_calling and "tool-calling" not in capabilities:
         capabilities.add("tool-calling")
     return capabilities
+
+
+def preserve_model_capabilities(discovered: set[str], persisted: Any) -> set[str]:
+    """Keep user-assigned capabilities when provider discovery runs again."""
+    explicit = persisted if isinstance(persisted, list) else []
+    return discovered | {str(item) for item in explicit if isinstance(item, str)}
