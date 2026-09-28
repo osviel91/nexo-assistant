@@ -103,7 +103,33 @@ def _migration_4(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_agent_profile ON conversations(agent_profile_id)")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4))
+def _migration_5(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS notebooks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS notebook_sources (
+      id TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+      type TEXT NOT NULL CHECK(type IN ('file', 'web')),
+      title TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('added', 'pending', 'extracting', 'ready', 'failed')),
+      metadata TEXT NOT NULL DEFAULT '{}',
+      content_hash TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notebooks_updated ON notebooks(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_notebook_sources_notebook ON notebook_sources(notebook_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_notebook_sources_hash ON notebook_sources(content_hash);
+    """)
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

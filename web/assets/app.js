@@ -1,7 +1,7 @@
 import { renderMarkdown } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], agents: [], conversations: [], modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false };
+const state = { providers: [], agents: [], conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -68,6 +68,36 @@ async function loadTools() {
 }
 
 async function loadAgents() { state.agents = await api('/agents'); renderAgentPicker(); renderAgentList(); }
+
+async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebooks(); }
+function renderNotebooks() {
+  $('#notebook-list').innerHTML = state.notebooks.map((notebook) => `<article class="notebook-card" data-notebook-id="${escapeHtml(notebook.id)}"><button class="notebook-card-main"><strong>${escapeHtml(notebook.name)}</strong><span>${notebook.source_count} source${notebook.source_count === 1 ? '' : 's'}</span><small>${escapeHtml(notebook.description || 'Persistent knowledge space')}</small></button><div class="card-actions"><button data-notebook-edit="${escapeHtml(notebook.id)}">Edit</button><button data-notebook-delete="${escapeHtml(notebook.id)}">Delete</button></div></article>`).join('') || '<div class="empty-providers">No hay notebooks todavía. Crea uno para guardar fuentes.</div>';
+  $('#notebook-list').querySelectorAll('.notebook-card-main').forEach((button) => { button.onclick = () => openNotebook(button.closest('[data-notebook-id]').dataset.notebookId); });
+  $('#notebook-list').querySelectorAll('[data-notebook-edit]').forEach((button) => { button.onclick = () => editNotebook(button.dataset.notebookEdit); });
+  $('#notebook-list').querySelectorAll('[data-notebook-delete]').forEach((button) => { button.onclick = () => deleteNotebook(button.dataset.notebookDelete); });
+}
+function editNotebook(id = '') {
+  const notebook = state.notebooks.find((item) => item.id === id);
+  $('#notebook-form').hidden = false; $('#new-notebook').hidden = true;
+  $('#notebook-id').value = notebook?.id || ''; $('#notebook-name').value = notebook?.name || ''; $('#notebook-description').value = notebook?.description || '';
+  $('#notebook-form-title').textContent = notebook ? 'Edit notebook' : 'New notebook'; $('#notebook-name').focus();
+}
+function resetNotebookForm() { $('#notebook-form').hidden = true; $('#new-notebook').hidden = false; }
+async function deleteNotebook(id) {
+  const notebook = state.notebooks.find((item) => item.id === id);
+  if (!notebook || !confirm(`Delete ${notebook.name} and its sources?`)) return;
+  try { await api(`/notebooks/${id}`, { method: 'DELETE' }); if (state.currentNotebookId === id) { state.currentNotebookId = null; $('#notebook-detail').hidden = true; } await loadNotebooks(); toast('Notebook deleted'); } catch (error) { toast(error.message); }
+}
+async function openNotebook(id) {
+  try { const [notebook, sources] = await Promise.all([api(`/notebooks/${id}`), api(`/notebooks/${id}/sources`)]); state.currentNotebookId = id; state.notebookSources = sources; $('#notebook-detail').hidden = false; renderNotebookDetail(notebook); } catch (error) { toast(error.message); }
+}
+function renderNotebookDetail(notebook) {
+  $('#notebook-detail').innerHTML = `<button class="text-button notebook-back" id="notebook-back">← Notebooks</button><div class="notebook-detail-head"><div><span class="eyebrow">NOTEBOOK</span><h3>${escapeHtml(notebook.name)}</h3><p>${escapeHtml(notebook.description || 'Sources are stored here for future knowledge processing.')}</p></div><span class="status status-disabled">PROCESSING NOT IMPLEMENTED</span></div><div class="notebook-sources-head"><h4>Sources</h4><span>${state.notebookSources.length}</span></div><div class="notebook-source-list">${state.notebookSources.map((source) => `<article class="notebook-source"><div><strong>${escapeHtml(source.title)}</strong><small>${escapeHtml(source.type)} · ${escapeHtml(source.status)}${source.metadata?.mime ? ` · ${escapeHtml(source.metadata.mime)}` : ''}</small></div><button data-source-delete="${escapeHtml(source.id)}" aria-label="Remove ${escapeHtml(source.title)}">×</button></article>`).join('') || '<div class="empty-providers">Añade una fuente para empezar. Nexo todavía no extrae ni indexa contenido.</div>'}</div><div class="source-add"><h4>Add source</h4><form id="notebook-file-form"><label>File<input id="notebook-file" type="file" required accept=".pdf,.md,.txt"></label><button class="primary-button" type="submit">Add file</button></form><form id="notebook-web-form"><label>Web URL<input id="notebook-url" type="url" required placeholder="https://example.com/section"></label><label>Title<input id="notebook-web-title" required placeholder="Source title"></label><button class="text-button" type="submit">Add web source</button></form></div>`;
+  $('#notebook-back').onclick = () => { $('#notebook-detail').hidden = true; state.currentNotebookId = null; };
+  $('#notebook-file-form').onsubmit = async (event) => { event.preventDefault(); const file = $('#notebook-file').files[0]; if (!file) return; const form = new FormData(); form.append('file', file); try { await api(`/notebooks/${state.currentNotebookId}/sources`, { method: 'POST', body: form }); await openNotebook(state.currentNotebookId); await loadNotebooks(); toast('File added'); } catch (error) { toast(error.message); } };
+  $('#notebook-web-form').onsubmit = async (event) => { event.preventDefault(); try { await api(`/notebooks/${state.currentNotebookId}/sources`, { method: 'POST', body: JSON.stringify({ type: 'web', title: $('#notebook-web-title').value, url: $('#notebook-url').value }) }); await openNotebook(state.currentNotebookId); await loadNotebooks(); toast('Web source added'); } catch (error) { toast(error.message); } };
+  $('#notebook-detail').querySelectorAll('[data-source-delete]').forEach((button) => { button.onclick = async () => { try { await api(`/notebooks/${state.currentNotebookId}/sources/${button.dataset.sourceDelete}`, { method: 'DELETE' }); await openNotebook(state.currentNotebookId); await loadNotebooks(); } catch (error) { toast(error.message); } }; });
+}
 
 function currentAgent() { return state.agents.find((agent) => agent.id === state.agentProfileId); }
 function renderAgentPicker() {
@@ -250,8 +280,10 @@ function openSurface(name) {
   $('#lab-surface').hidden = name !== 'lab';
   $('#settings-surface').hidden = name !== 'settings';
   $('#agents-surface').hidden = name !== 'agents';
+  $('#notebooks-surface').hidden = name !== 'notebooks';
   if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
   if (name === 'agents') { resetAgentForm(); renderAgentList(); }
+  if (name === 'notebooks') { resetNotebookForm(); renderNotebooks(); }
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -351,15 +383,24 @@ $('#agent-form').onsubmit = async (event) => {
   try { await api(`/agents${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); resetAgentForm(); await loadAgents(); toast(id ? 'Agent updated' : 'Agent created'); } catch (error) { toast(error.message); }
 };
 
+$('#notebook-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const id = $('#notebook-id').value;
+  try { await api(`/notebooks${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify({ name: $('#notebook-name').value, description: $('#notebook-description').value }) }); resetNotebookForm(); await loadNotebooks(); toast(id ? 'Notebook updated' : 'Notebook created'); } catch (error) { toast(error.message); }
+};
+
 $('#model-select').onchange = updateComposerModel;
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
 $('#agent-picker').onclick = () => { openSurface('agents'); $('#agent-picker').setAttribute('aria-expanded', 'true'); };
 $('#composer-agent').onclick = () => openSurface('agents');
 $('#open-lab').onclick = () => { closeSidebar(); openSurface('lab'); };
+$('#open-notebooks').onclick = () => { closeSidebar(); openSurface('notebooks'); };
 $('#new-chat').onclick = beginChat;
 $('#new-agent').onclick = () => editAgent();
 $('#cancel-agent-edit').onclick = resetAgentForm;
+$('#new-notebook').onclick = () => editNotebook();
+$('#cancel-notebook-edit').onclick = resetNotebookForm;
 $('#new-chat-top').onclick = beginChat;
 $('#send-button').onclick = send;
 $('#prompt').onkeydown = (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } };
@@ -379,4 +420,4 @@ document.querySelectorAll('input[name="color-scheme"]').forEach((input) => { inp
 document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); beginChat(); } if (event.key === 'Escape') { closeSurface(); closeSidebar(); } });
 
 applyPreferences();
-Promise.all([loadModules(), loadProviders(), loadTools(), loadAgents(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));
+Promise.all([loadModules(), loadProviders(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]).catch((error) => toast(error.message));

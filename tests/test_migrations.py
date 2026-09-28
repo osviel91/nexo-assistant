@@ -19,7 +19,7 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 4)
+            self.assertEqual(version_count, 5)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})

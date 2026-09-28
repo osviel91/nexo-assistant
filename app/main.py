@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -31,6 +31,7 @@ from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
+from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookRepository, NotebookService, NotebookSourceNotFoundError, NotebookValidationError
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,6 +84,7 @@ def now() -> str:
 
 agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_registry.tool_catalog)
 agent_profile_resolver = AgentProfileResolver(agent_profiles.repository)
+notebooks = NotebookService(NotebookRepository(db, now), DATA_DIR / "notebook-sources")
 
 
 @app.on_event("startup")
@@ -143,6 +145,16 @@ class AgentProfilePatch(BaseModel):
     model_parameters: dict[str, Any] | None = None
     enabled: bool | None = None
     tool_names: list[str] | None = None
+
+
+class NotebookIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+
+
+class NotebookPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 def profile_input(item: AgentProfileIn) -> AgentProfileInput:
@@ -213,6 +225,98 @@ def delete_agent(profile_id: str):
         agent_profiles.delete(profile_id)
     except ProfileNotFoundError as error:
         raise profile_error(error)
+    return {"ok": True}
+
+
+def notebook_error(error: Exception) -> HTTPException:
+    if isinstance(error, (NotebookNotFoundError, NotebookSourceNotFoundError)):
+        return HTTPException(404, str(error))
+    return HTTPException(400, str(error))
+
+
+@app.get("/api/notebooks")
+def list_notebooks():
+    return notebooks.list()
+
+
+@app.post("/api/notebooks")
+def create_notebook(item: NotebookIn):
+    try:
+        return notebooks.create(NotebookInput(item.name, item.description))
+    except NotebookValidationError as error:
+        raise notebook_error(error)
+
+
+@app.get("/api/notebooks/{notebook_id}")
+def get_notebook(notebook_id: str):
+    try:
+        return notebooks.get(notebook_id)
+    except NotebookNotFoundError as error:
+        raise notebook_error(error)
+
+
+@app.patch("/api/notebooks/{notebook_id}")
+def update_notebook(notebook_id: str, item: NotebookPatch):
+    try:
+        return notebooks.update(notebook_id, item.model_dump(exclude_unset=True))
+    except (NotebookNotFoundError, NotebookValidationError) as error:
+        raise notebook_error(error)
+
+
+@app.delete("/api/notebooks/{notebook_id}")
+def delete_notebook(notebook_id: str):
+    try:
+        notebooks.delete(notebook_id)
+    except NotebookNotFoundError as error:
+        raise notebook_error(error)
+    return {"ok": True}
+
+
+@app.get("/api/notebooks/{notebook_id}/sources")
+def list_notebook_sources(notebook_id: str):
+    try:
+        return notebooks.sources(notebook_id)
+    except NotebookNotFoundError as error:
+        raise notebook_error(error)
+
+
+@app.get("/api/notebooks/{notebook_id}/sources/{source_id}")
+def get_notebook_source(notebook_id: str, source_id: str):
+    try:
+        return notebooks.source(notebook_id, source_id)
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
+
+
+@app.post("/api/notebooks/{notebook_id}/sources")
+async def add_notebook_source(notebook_id: str, request: Request):
+    try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            form = await request.form()
+            file = form.get("file")
+            if file is None or not hasattr(file, "filename") or not hasattr(file, "read"):
+                raise NotebookValidationError("file is required")
+            data = await file.read(MAX_UPLOAD + 1)
+            if len(data) > MAX_UPLOAD:
+                raise HTTPException(413, "File exceeds upload limit")
+            return notebooks.add_file(notebook_id, str(form.get("title") or file.filename or ""), file.filename or "", file.content_type or "application/octet-stream", data)
+        payload = await request.json()
+        source_type = payload.get("type")
+        if source_type != "web":
+            raise NotebookValidationError("JSON sources must have type web")
+        return notebooks.add_web(notebook_id, payload.get("title", ""), payload.get("url", ""), payload.get("metadata"))
+    except HTTPException:
+        raise
+    except (NotebookNotFoundError, NotebookValidationError) as error:
+        raise notebook_error(error)
+
+
+@app.delete("/api/notebooks/{notebook_id}/sources/{source_id}")
+def delete_notebook_source(notebook_id: str, source_id: str):
+    try:
+        notebooks.delete_source(notebook_id, source_id)
+    except (NotebookNotFoundError, NotebookSourceNotFoundError) as error:
+        raise notebook_error(error)
     return {"ok": True}
 
 
