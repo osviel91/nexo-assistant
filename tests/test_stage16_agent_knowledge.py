@@ -108,6 +108,14 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 self.assertEqual(tiel_notebook["runtime"]["notebook_id"], notebook["id"])
                 self.assertEqual(tiel_notebook["runtime"]["knowledge_retrieval_applied"], True)
                 self.assertEqual(tiel_notebook["runtime"]["retrieval_count"], 1)
+                self.assertEqual(tiel_notebook["runtime"]["retrieval_status"], "completed")
+                self.assertEqual(tiel_notebook["runtime"]["retrieval_result_count"], 1)
+                self.assertTrue(tiel_notebook["runtime"]["grounding_applied"])
+                self.assertGreater(tiel_notebook["runtime"]["grounding_chunks"], 0)
+                self.assertGreater(tiel_notebook["runtime"]["grounding_context_chars"], 0)
+                self.assertEqual(tiel_notebook["runtime"]["generation_model"], "Cyber-Tiel")
+                self.assertTrue(tiel_notebook["runtime"]["soul_applied"])
+                self.assertEqual(tiel_notebook["runtime"]["physical_message_roles"], ["system", "system", "user"])
                 with main.db() as database:
                     chunk_id = database.execute("SELECT id FROM document_chunks LIMIT 1").fetchone()[0]
                 self.assertEqual(tiel_notebook["citations"][0]["source_id"], source["id"])
