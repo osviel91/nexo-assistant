@@ -544,7 +544,7 @@ def get_conversation(cid: str):
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if not conv: raise HTTPException(404, "Conversation not found")
         msgs = c.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)).fetchall()
-    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"])} for m in msgs]}
+    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": json.loads(m["runtime_metadata"] or "{}")} for m in msgs]}
 
 
 @app.delete("/api/conversations/{cid}")
@@ -610,7 +610,15 @@ async def chat(req: ChatIn):
         run_id = str(uuid.uuid4())
         c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,created_at) VALUES(?,?,?,?,?,?,?,?)", (message_id, cid, "user", req.content, selected_provider_id, selected_model_id, json.dumps(req.attachments), now()))
         c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
-        c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps({"provider": selected_provider_id, **({"agent_profile_id": profile_config.profile_id} if profile_config else {})})))
+        runtime_snapshot = {
+            "agent_profile_id": profile_config.profile_id if profile_config else None,
+            "agent_profile_name": profile_config.profile_name if profile_config else None,
+            "resolved_provider": selected_provider_id,
+            "resolved_model": selected_model_id,
+            "system_instructions_applied": bool(profile_config and profile_config.system_instructions),
+        }
+        runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
+        c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
         messages = [{"role": m["role"], "content": m["content"]} for m in history]
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
@@ -639,10 +647,19 @@ async def chat(req: ChatIn):
                 model_adapter = OpenAICompatibleModelAdapter(client, url, headers, selected_model_id)
                 catalog = module_registry.tool_catalog_view()
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None)
+                effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
+                runtime_snapshot["effective_tool_names"] = effective_tool_names
+                if profile_config and profile_config.temperature is not None:
+                    runtime_snapshot["temperature"] = profile_config.temperature
+                elif req.temperature is not None:
+                    runtime_snapshot["temperature"] = req.temperature
+                _update_runtime_metadata(run_id, runtime_snapshot)
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
-                                              profile_config.profile_id if profile_config else None)
+                                              profile_config.profile_id if profile_config else None,
+                                              profile_config.profile_name if profile_config else None,
+                                              runtime_snapshot)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
@@ -658,6 +675,9 @@ async def chat(req: ChatIn):
                         return
                     elif event.get("complete"):
                         answer, sources = event["answer"], event["sources"]
+                        telemetry = {key: value for key, value in event.get("telemetry", {}).items() if value is not None}
+                        runtime_metadata = {**runtime_snapshot, **telemetry}
+                        _update_runtime_metadata(run_id, runtime_metadata)
                         execution = {"tools_used": event.get("tools_used", []), "tool_rounds": event.get("tool_rounds", 0), "web_search_used": "web_search" in event.get("tools_used", [])}
                         if not execution_future.done():
                             execution_future.set_result(execution)
@@ -665,10 +685,10 @@ async def chat(req: ChatIn):
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             with db() as c:
-                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), now()))
+                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now()))
                 c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
             module_registry.run_hook("chat_after", {"conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id})
-            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources}) + "\n\n"
+            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "runtime": runtime_metadata}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
@@ -728,6 +748,17 @@ def _finish_runtime_run(run_id: str, status: str) -> None:
             c.execute("UPDATE runtime_runs SET completed_at=?,status=? WHERE id=? AND completed_at IS NULL", (now(), status, run_id))
     except sqlite3.Error:
         logger.exception("runtime run finalization failed", extra={"run_id": run_id})
+
+
+def _update_runtime_metadata(run_id: str, metadata: dict[str, Any]) -> None:
+    try:
+        with db() as c:
+            row = c.execute("SELECT metadata FROM runtime_runs WHERE id=?", (run_id,)).fetchone()
+            current = json.loads(row[0] or "{}") if row else {}
+            current.update(safe_metadata(metadata))
+            c.execute("UPDATE runtime_runs SET metadata=? WHERE id=?", (json.dumps(current), run_id))
+    except (sqlite3.Error, TypeError, ValueError):
+        logger.exception("runtime metadata update failed", extra={"run_id": run_id})
 
 
 def _insert_trace_event(conversation_id: str, message_id: str, event_type: str, status: str, metadata: dict[str, Any], duration_ms: float | None = None) -> str:

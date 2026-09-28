@@ -163,7 +163,11 @@ def _migration_6(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "notebook_sources", "canonical_character_count", "INTEGER")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6))
+def _migration_7(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "messages", "runtime_metadata", "TEXT NOT NULL DEFAULT '{}'")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

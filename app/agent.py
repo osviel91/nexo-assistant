@@ -32,6 +32,8 @@ class AgentRunRequest:
     event_sink: RuntimeEventSink = NullRuntimeEventSink()
     system_instructions: str = ""
     profile_id: str | None = None
+    profile_name: str | None = None
+    runtime_snapshot: dict[str, Any] | None = None
 
 
 class AgentRuntime:
@@ -49,9 +51,14 @@ class AgentRuntime:
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []
         tool_rounds = 0
+        request_started = time.perf_counter()
+        first_content_at: float | None = None
+        usage: dict[str, int] = {}
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
-            reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1, **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
+            reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
+                               **(request.runtime_snapshot or {}),
+                               **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
             reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
             definitions = request.effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
@@ -65,7 +72,12 @@ class AgentRuntime:
             try:
                 async for chunk in request.model.stream(messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], request.temperature):
                     finish_reason = chunk.finish_reason or finish_reason
+                    if chunk.usage:
+                        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                            if isinstance(chunk.usage.get(key), int):
+                                usage[key] = usage.get(key, 0) + chunk.usage[key]
                     if chunk.content:
+                        first_content_at = first_content_at or time.perf_counter()
                         round_content += chunk.content
                         answer += chunk.content
                         yield {"delta": chunk.content}
@@ -95,7 +107,16 @@ class AgentRuntime:
 
             if not tool_calls:
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
-                yield {"complete": True, "answer": answer, "sources": sources, "tools_used": tools_used, "tool_rounds": tool_rounds}
+                completed_at = time.perf_counter()
+                telemetry = {**usage, "ttft_ms": round((first_content_at - request_started) * 1000, 2) if first_content_at else None,
+                             "generation_duration_ms": round((completed_at - first_content_at) * 1000, 2) if first_content_at else None,
+                             "total_duration_ms": round((completed_at - request_started) * 1000, 2)}
+                if telemetry.get("completion_tokens") and telemetry.get("generation_duration_ms"):
+                    telemetry["tokens_per_second"] = round(telemetry["completion_tokens"] / (telemetry["generation_duration_ms"] / 1000), 2)
+                    telemetry["tokens_per_second_source"] = "calculated"
+                if usage:
+                    telemetry["usage_source"] = "provider"
+                yield {"complete": True, "answer": answer, "sources": sources, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry}
                 return
             if tool_rounds >= self.limits.max_tool_rounds:
                 yield {"error": "Se alcanzó el límite de rondas de herramientas."}

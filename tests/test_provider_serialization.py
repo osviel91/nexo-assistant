@@ -13,6 +13,7 @@ class Response:
 
     async def aiter_lines(self):
         yield 'data: ' + json.dumps({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+        yield 'data: ' + json.dumps({"choices": [{}], "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}})
         yield "data: [DONE]"
 
 
@@ -61,6 +62,18 @@ class ProviderSerializationTests(unittest.TestCase):
                 "parameters": {"type": "object", "required": ["query"]},
             },
         })
+
+    def test_adapter_preserves_physical_model_and_usage(self):
+        client = Client()
+
+        async def run():
+            adapter = OpenAICompatibleModelAdapter(client, "https://provider.example/v1/chat/completions", {}, "Gemma4-e2b")
+            return [event async for event in adapter.stream([{"role": "system", "content": "Be brief"}, {"role": "user", "content": "hi"}], [])]
+
+        events = asyncio.run(run())
+        self.assertEqual(client.calls[0][2]["model"], "Gemma4-e2b")
+        self.assertEqual(client.calls[0][2]["messages"][0]["role"], "system")
+        self.assertEqual(events[-1].usage["total_tokens"], 6)
 
 
 if __name__ == "__main__":

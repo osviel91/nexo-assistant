@@ -25,6 +25,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             migrate(db)
             db.execute("INSERT INTO providers VALUES ('p', 'Provider', 'http://provider', 'provider-secret', 'now')")
             db.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES ('m','p','Model','[\"tool-calling\"]')")
+            db.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES ('m2','p','Model 2','[]')")
         self.service = AgentProfileService(AgentProfileRepository(connection, lambda: "now"), lambda: [])
         self.resolver = AgentProfileResolver(self.service.repository)
 
@@ -55,6 +56,14 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
         with self.assertRaises(ProfileResolutionError) as error:
             self.resolver.resolve(profile["id"])
         self.assertEqual(str(error.exception), "agent_model_unavailable")
+
+    def test_switching_profiles_changes_resolved_physical_pair_and_clearing_uses_default(self):
+        agent_a = self.service.create(self.profile(name="A", model_id="m"))
+        agent_b = self.service.create(self.profile(name="B", model_id="m2"))
+        a = self.resolver.resolve(agent_a["id"])
+        b = self.resolver.resolve(agent_b["id"])
+        self.assertEqual((a.provider_id, a.model_id), ("p", "m"))
+        self.assertEqual((b.provider_id, b.model_id), ("p", "m2"))
 
     def test_profile_chat_selects_model_system_temperature_limited_tools_and_safe_trace(self):
         from app import main
@@ -101,6 +110,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
 
         class Client:
             payloads = []
+            calls = []
 
             def __init__(self, **kwargs):
                 pass
@@ -113,6 +123,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
 
             def stream(self, method, url, headers, json):
                 self.payloads.append(json)
+                self.calls.append((method, url, headers))
                 return Stream(json)
 
         old_client = main.httpx.AsyncClient
@@ -121,6 +132,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="wrong", content="run", temperature=0.1, agent_profile_id=profile["id"])))
             body = asyncio.run(self.collect(response.body_iterator))
             payload = Client.payloads[0]
+            self.assertEqual(Client.calls[0][1], "http://provider/chat/completions")
             self.assertEqual(payload["model"], "m")
             self.assertEqual(payload["temperature"], 0.7)
             self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})

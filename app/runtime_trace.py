@@ -8,6 +8,11 @@ from typing import Any, Protocol
 SAFE_METADATA_KEYS = {
     "model", "tool", "provider", "round", "status", "duration_ms",
     "error_code", "agent_profile_id", "capabilities", "answers", "confidence", "probabilities",
+    "agent_profile_name", "resolved_provider", "resolved_model", "system_instructions_applied",
+    "effective_tool_names", "temperature", "top_p", "top_k", "context_window", "context_used_tokens",
+    "context_utilization", "prompt_tokens", "completion_tokens", "total_tokens", "ttft_ms",
+    "generation_duration_ms", "total_duration_ms", "tokens_per_second", "usage_source",
+    "tokens_per_second_source",
 }
 
 
@@ -17,10 +22,14 @@ def safe_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     for key, value in (metadata or {}).items():
         if key not in SAFE_METADATA_KEYS:
             continue
-        if key in {"model", "tool", "provider", "status", "error_code", "agent_profile_id"} and isinstance(value, (str, int, float, bool)):
-            output[key] = str(value) if key != "round" else value
-        elif key in {"round", "duration_ms"} and isinstance(value, (int, float)):
+        if key in {"model", "tool", "provider", "status", "error_code", "agent_profile_id", "agent_profile_name", "resolved_provider", "resolved_model", "usage_source"} and isinstance(value, (str, int, float, bool)):
+            output[key] = str(value)
+        elif key == "system_instructions_applied" and isinstance(value, bool):
             output[key] = value
+        elif key in {"round", "duration_ms", "temperature", "top_p", "top_k", "context_window", "context_used_tokens", "context_utilization", "prompt_tokens", "completion_tokens", "total_tokens", "ttft_ms", "generation_duration_ms", "total_duration_ms", "tokens_per_second"} and isinstance(value, (int, float)):
+            output[key] = value
+        elif key == "effective_tool_names" and isinstance(value, (list, tuple)):
+            output[key] = [str(item) for item in value[:50] if isinstance(item, str)]
         elif key == "capabilities" and isinstance(value, (list, tuple)):
             output[key] = [str(item) for item in value[:20] if isinstance(item, (str, int, float))]
         elif key in {"confidence", "probabilities", "answers"} and isinstance(value, dict):

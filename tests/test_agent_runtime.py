@@ -21,7 +21,7 @@ class Adapter:
             payload["tools"] = tools
         self.payloads.append(payload)
         for chunk in next(self.responses):
-            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"))
+            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"), usage=chunk.get("usage"))
 
 
 def run(runtime, adapter, registry, capabilities={"tool-calling"}):
@@ -124,6 +124,24 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(adapter.payloads), 4)
         self.assertEqual(events[-1]["error"], "Se alcanzó el límite de rondas de herramientas.")
         self.assertLessEqual(len(adapter.payloads[1]["messages"][-1]["content"]), 100)
+
+    def test_system_instruction_is_an_independent_message_and_metrics_are_normalized(self):
+        adapter = Adapter([[{"content": "answer"}]])
+        adapter.responses = iter([[{"content": "answer", "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}]])
+        registry = self.registry(lambda _context, _arguments: {})
+
+        async def collect():
+            context = ToolExecutionContext("conversation", "provider", "Gemma4-e2b", 0)
+            tools = ExposurePolicy().resolve(registry.tool_catalog_view(), set())
+            request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], tools, ToolExecutor(), context,
+                                      system_instructions="Agent A instructions", profile_id="agent-a", profile_name="Agent A",
+                                      runtime_snapshot={"resolved_provider": "provider", "resolved_model": "Gemma4-e2b", "system_instructions_applied": True})
+            return [event async for event in AgentRuntime().stream(request)]
+
+        events = asyncio.run(collect())
+        self.assertEqual(adapter.payloads[0]["messages"][0], {"role": "system", "content": "Agent A instructions"})
+        self.assertEqual(events[-1]["telemetry"]["completion_tokens"], 2)
+        self.assertEqual(events[-1]["telemetry"]["usage_source"], "provider")
 
 
 if __name__ == "__main__":

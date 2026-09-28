@@ -19,6 +19,7 @@ class ModelStreamChunk:
     content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
 
 
 class ModelAdapterError(Exception):
@@ -63,13 +64,14 @@ class OpenAICompatibleModelAdapter:
                     if raw == "[DONE]":
                         break
                     try:
-                        choice = json.loads(raw).get("choices", [{}])[0]
+                        packet = json.loads(raw)
+                        choice = packet.get("choices", [{}])[0]
                         delta = choice.get("delta", {})
                         content = delta.get("content", "")
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                         tool_calls = delta.get("tool_calls", []) or []
-                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"))
+                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"), usage=packet.get("usage"))
                     except (ValueError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
                         continue
         except ModelAdapterError:

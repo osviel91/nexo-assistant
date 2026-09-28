@@ -53,6 +53,7 @@ class AgentProfileInput:
 @dataclass(frozen=True)
 class AgentRunConfiguration:
     profile_id: str
+    profile_name: str
     provider_id: str
     model_id: str
     system_instructions: str
@@ -238,4 +239,4 @@ class AgentProfileResolver:
                 raise ProfileResolutionError("agent_model_unavailable")
             if connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (provider_id, model_id)).fetchone() is None:
                 raise ProfileResolutionError("agent_model_unavailable")
-        return AgentRunConfiguration(profile_id, provider_id, model_id, row["system_instructions"], temperature, tool_names)
+        return AgentRunConfiguration(profile_id, row["name"], provider_id, model_id, row["system_instructions"], temperature, tool_names)
