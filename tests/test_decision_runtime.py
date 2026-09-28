@@ -203,6 +203,23 @@ class DecisionRuntimeTests(unittest.TestCase):
             asyncio.run(provider.decide(request({"id": "x", "type": "boolean", "statement": "x"})))
             self.assertEqual(calls[0][3]["model"], model)
 
+    def test_system_one_sends_shadow_questions_in_one_request(self):
+        calls = []
+        raw = {"answers": {
+            "needs_web": {"type": "noul", "noul": 0.9},
+            "needs_tools": {"type": "noul", "noul": 0.8},
+            "task_type": {"type": "choice", "choice": "research", "probabilities": {"research": 1}, "confidence": 1},
+        }}
+        provider = ArbiterDecisionProvider("http://arbiter:8000", "", 1, client_factory=lambda **_: FakeHttpClient(FakeResponse(raw), calls))
+        asyncio.run(provider.decide(DecisionRequest(state={"message": "latest news", "available_tools": ["web_search"]}, questions=[
+            {"id": "needs_web", "type": "boolean", "statement": "Needs web"},
+            {"id": "needs_tools", "type": "boolean", "statement": "Needs tools"},
+            {"id": "task_type", "type": "choice", "statement": "Task", "options": ["research", "coding"]},
+        ])))
+        payload = calls[0][3]
+        self.assertEqual(set(payload["questions"]), {"needs_web", "needs_tools", "task_type"})
+        self.assertEqual(payload["state"]["available_tools"], ["web_search"])
+
     def test_boolean_noul_normalizes_both_sides(self):
         req = request({"id": "true_case", "type": "boolean", "statement": "x"}, {"id": "false_case", "type": "boolean", "statement": "y"})
         parsed = ArbiterDecisionProvider._parse_response({"answers": {"true_case": {"type": "noul", "noul": 0.9}, "false_case": {"type": "noul", "noul": 0.2}}}, req)

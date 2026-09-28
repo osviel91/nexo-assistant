@@ -90,6 +90,6 @@ the integration is run.
 ## Remaining Risks
 
 - Shadow observations are local application data and have no retention policy yet.
-- Background persistence is best-effort if the process exits during a response.
+- Background persistence remains best-effort if the process exits during a response; normal stream completion and cancellation now release execution facts and persist the observation.
 - Three examples are not enough to establish decision quality; analysis belongs
   to a later stage.

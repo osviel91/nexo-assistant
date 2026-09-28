@@ -44,6 +44,11 @@ the selected model explicitly advertises `tool-calling` in its `/models`
 response (`capabilities`, `supports_tools`, or `tool_calling`). Unknown model
 capabilities do not enable the tool.
 
+If a provider's `/models` response omits capability metadata, set
+`NEXO_TOOL_CALLING_FALLBACK=true` only when that provider is known to accept
+OpenAI-compatible tool calls. This explicit operator override is disabled by
+default and does not match model names.
+
 Portainer environment example:
 
 ```text
@@ -53,6 +58,7 @@ NEXO_SEARXNG_LANGUAGE=all
 NEXO_SEARXNG_SAFESEARCH=1
 NEXO_SEARXNG_MAX_RESULTS=5
 NEXO_SEARXNG_TIMEOUT=10
+NEXO_TOOL_CALLING_FALLBACK=false
 ```
 
 Use the Docker-network hostname or address reachable by the Nexo container;

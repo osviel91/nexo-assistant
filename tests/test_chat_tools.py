@@ -76,6 +76,7 @@ class ChatToolTests(unittest.TestCase):
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="busca")))
                 body = asyncio.run(self.collect(response.body_iterator))
                 compatible_payload = FakeClient.payloads[0]
+                tool_result_payload = FakeClient.payloads[1]
                 with main.db() as connection:
                     connection.execute("UPDATE models SET capabilities='[]' WHERE provider_id='p' AND id='m'")
                 FakeClient.payloads = []
@@ -85,8 +86,12 @@ class ChatToolTests(unittest.TestCase):
                 main.httpx.AsyncClient = old_client
                 main.DB_PATH = old_db
             self.assertTrue("tools" in compatible_payload)
+            self.assertEqual(compatible_payload["tools"][0]["type"], "function")
+            self.assertEqual(compatible_payload["tools"][0]["function"]["name"], "web_search")
+            self.assertEqual(compatible_payload["tools"][0]["function"]["parameters"], {"type": "object"})
             self.assertIn('"sources": [{"title": "Nexo", "url": "https://nexo.test"}]', body)
             self.assertIn("Respuesta con fuente", body)
+            self.assertEqual(tool_result_payload["messages"][-1]["role"], "tool")
             self.assertNotIn("tools", FakeClient.payloads[0])
 
     async def collect(self, iterator):

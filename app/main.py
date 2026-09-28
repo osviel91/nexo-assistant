@@ -35,6 +35,7 @@ app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
 agent_runtime = AgentRuntime(module_registry, AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
+shadow_tasks: set[asyncio.Task[None]] = set()
 enabled_modules = enabled_module_ids()
 if "attachments" in enabled_modules:
     module_registry.register(AttachmentsModule())
@@ -229,7 +230,7 @@ async def refresh_models(pid: str):
     models = [m for m in data if isinstance(m, dict) and m.get("id")]
     with db() as c:
         for model in models:
-            capabilities = normalize_model_capabilities(model)
+            capabilities = normalize_model_capabilities(model, _tool_calling_fallback())
             c.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?) ON CONFLICT(provider_id,id) DO UPDATE SET capabilities=excluded.capabilities", (str(model["id"]), pid, str(model["id"]), json.dumps(sorted(capabilities))))
         row = c.execute("SELECT * FROM providers WHERE id=?", (pid,)).fetchone()
     return provider_dict(row)
@@ -299,7 +300,9 @@ async def chat(req: ChatIn):
     module_registry.run_hook("chat_before", {"conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id})
     execution_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     if _shadow_configured():
-        asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future))
+        task = asyncio.create_task(_run_shadow_observation(message_id, cid, req.content, module_registry.tool_catalog(), execution_future))
+        shadow_tasks.add(task)
+        task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
     async def events():
         headers = {"Authorization": f"Bearer {key}"} if key else {}
@@ -327,11 +330,27 @@ async def chat(req: ChatIn):
             yield "data: " + json.dumps({"done": True, "conversation_id": cid, "provider_id": req.provider_id, "model_id": req.model_id, "sources": sources}) + "\n\n"
         except httpx.RequestError as e:
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
+        finally:
+            if not execution_future.done():
+                execution_future.set_result({"tools_used": [], "tool_rounds": 0, "web_search_used": False})
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
 
 def _shadow_configured() -> bool:
-    return str(os.getenv("NEXO_DECISION_SHADOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    service = module_registry.service("decision-shadow")
+    return bool(getattr(service, "shadow_enabled", False)) or str(os.getenv("NEXO_DECISION_SHADOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tool_calling_fallback() -> bool:
+    return str(os.getenv("NEXO_TOOL_CALLING_FALLBACK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _finish_shadow_task(task: asyncio.Task[None], conversation_id: str, message_id: str) -> None:
+    shadow_tasks.discard(task)
+    if task.cancelled():
+        logger.error("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_cancelled"})
+    elif task.exception() is not None:
+        logger.error("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_task_failed"})
 
 
 async def _run_shadow_observation(message_id: str, conversation_id: str, message: str, tools: list[dict[str, Any]], execution_future: asyncio.Future[dict[str, Any]]) -> None:
@@ -342,19 +361,24 @@ async def _run_shadow_observation(message_id: str, conversation_id: str, message
     try:
         if service is None or not getattr(service, "shadow_enabled", False):
             raise RuntimeError("decision_runtime_unavailable")
-        logger.info("shadow decision started", extra={"conversation_id": conversation_id, "message_id": message_id})
+        logger.info("shadow_started", extra={"conversation_id": conversation_id, "message_id": message_id})
         result = await service.shadow_decide(message, sorted({str(tool.get("name")) for tool in tools if tool.get("name")}))
-        logger.info("shadow decision completed", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms})
+        logger.info("shadow_completed", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms, "error_code": None})
     except Exception as exc:
         error = getattr(exc, "code", None) or (str(exc) if str(exc) in {"decision_runtime_unavailable"} else "shadow_decision_failed")
         result = ShadowDecision("shadow", None, {}, {}, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2), error)
-        logger.warning("shadow decision failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error": error, "latency_ms": result.latency_ms})
+        logger.warning("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": error, "latency_ms": result.latency_ms})
     try:
-        execution = await asyncio.wait_for(asyncio.shield(execution_future), timeout=1)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+        execution = await asyncio.shield(execution_future)
+    except asyncio.CancelledError:
+        logger.warning("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "shadow_cancelled"})
+        raise
+    except Exception:
+        logger.exception("shadow_failed", extra={"conversation_id": conversation_id, "message_id": message_id, "error_code": "execution_observation_failed"})
         execution = {"tools_used": [], "tool_rounds": 0, "web_search_used": False}
     with db() as c:
         c.execute("INSERT INTO shadow_observations(id,conversation_id,message_id,mode,model,answers,execution,metadata,latency_ms,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, message_id, result.mode, result.model, json.dumps(result.answers), json.dumps(execution), json.dumps(result.metadata), result.latency_ms, error, now()))
+    logger.info("shadow_persisted", extra={"conversation_id": conversation_id, "message_id": message_id, "latency_ms": result.latency_ms, "error_code": error})
 
 
 app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")

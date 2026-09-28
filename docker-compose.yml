@@ -8,7 +8,8 @@ services:
     environment:
       NEXO_DATA_DIR: /data
       NEXO_MAX_UPLOAD_MB: "15"
-      # Enable in Portainer with: attachments,web-search-searxng
+      NEXO_MAX_TOOL_OUTPUT_CHARS: "12000"
+      # Enable optional modules with: attachments,web-search-searxng,decision-runtime
       NEXO_MODULES: "attachments"
       # Required only when web-search-searxng is enabled.
       # NEXO_SEARXNG_URL: "http://searxng:8080"
@@ -16,6 +17,13 @@ services:
       # NEXO_SEARXNG_SAFESEARCH: "1"
       # NEXO_SEARXNG_MAX_RESULTS: "5"
       # NEXO_SEARXNG_TIMEOUT: "10"
+      # NEXO_TOOL_CALLING_FALLBACK: "false"
+      # NEXO_DECISION_PROVIDER: "arbiter"
+      # NEXO_ARBITER_URL: "http://arbiter:8000"
+      # NEXO_ARBITER_API_KEY: ""
+      # NEXO_DECISION_MODEL: "jev-latest"
+      # NEXO_DECISION_TIMEOUT: "10"
+      # NEXO_DECISION_SHADOW: "false"
     volumes:
       - nexo-data:/data
     mem_limit: 768m
