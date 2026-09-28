@@ -111,6 +111,14 @@ class DecisionRuntimeTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_production_runtime_keeps_configured_model(self):
+        provider = FakeProvider(available=True)
+        seen = []
+        module = DecisionRuntimeModule(provider_factory=lambda *args: (seen.append(args), provider)[1])
+        context = ModuleRegistry(FastAPI(), {"decision_model": "jev-latest", "arbiter_url": "http://arbiter"}).context
+        module.register(context)
+        self.assertEqual(seen[0][3], "jev-latest")
+
     def test_runtime_preserves_typed_result(self):
         question = {"id": "needs_web", "type": "boolean", "statement": "Needs web"}
         result = {"answers": {"needs_web": {"type": "boolean", "value": True}}}

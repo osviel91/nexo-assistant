@@ -4,6 +4,14 @@ from collections import Counter, defaultdict
 from statistics import mean
 from typing import Any
 
+from app.decision.providers.arbiter import ArbiterDecisionProvider
+from app.decision.runtime import DecisionRuntime
+
+
+def evaluation_runtime(url: str, api_key: str, timeout: float, model: str) -> DecisionRuntime:
+    """Build an evaluator-only runtime; production never calls this factory."""
+    return DecisionRuntime(ArbiterDecisionProvider(url, api_key, timeout, model=model), timeout)
+
 
 def score_cases(cases: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:
     by_id = {result["case_id"]: result for result in results}
