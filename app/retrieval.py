@@ -37,7 +37,9 @@ class RetrievalService:
         current_identity = self._identity(document)
         reusable = bool(existing_hash and json.loads(existing_hash[0] or "{}").get("document_content_hash") == document["content_hash"])
         if self.embedding_config:
-            reusable = reusable and identity is not None and all(identity[key] == value for key, value in current_identity.items())
+            reusable = reusable and identity is not None and all(
+                identity[key] == value for key, value in current_identity.items() if key != "dimension"
+            )
         if reusable:
             self.repository.set_indexing_status(source_id, "ready", chunk_count=self._chunk_count(document["id"]))
             return self.status(source_id) | {"skipped": True}
@@ -83,6 +85,18 @@ class RetrievalService:
                   "document_content_hash": item.document_content_hash, "chunk_content_hash": item.chunk_content_hash,
                   "source_title": item.source_title}
                  for item in self.index.search(notebook_id, batch.vectors[0], limit, identity)]
+
+    async def inspect_search(self, notebook_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        if not query.strip():
+            raise RetrievalError("query must not be empty")
+        limit = min(max(limit, 1), 50)
+        batch = await self.provider.embed([query])
+        validate_batch(batch, 1)
+        identity = self._identity({"content_hash": ""}) if self.embedding_config else None
+        inspect = getattr(self.index, "inspect", None)
+        if inspect is None:
+            return []
+        return inspect(notebook_id, batch.vectors[0], limit, identity)
 
     def status(self, source_id: str) -> dict[str, Any]:
         with self.repository.connection_factory() as connection:

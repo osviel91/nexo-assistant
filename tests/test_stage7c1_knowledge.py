@@ -18,6 +18,15 @@ class Embeddings:
         return EmbeddingBatch([[float(len(text)), 1.0] for text in texts], "model-a")
 
 
+class CountingEmbeddings(Embeddings):
+    def __init__(self):
+        self.calls = []
+
+    async def embed(self, texts):
+        self.calls.append(texts)
+        return await super().embed(texts)
+
+
 class Stage7C1KnowledgeTests(unittest.TestCase):
     def test_configuration_is_bounded_and_chunking_semantics_are_explicit(self):
         with self.assertRaises(KnowledgeConfigurationError):
@@ -50,6 +59,66 @@ class Stage7C1KnowledgeTests(unittest.TestCase):
             rejected = RetrievalService(repository, SQLiteVectorIndex(connection, lambda: "now"), Embeddings(),
                                         embedding_config=incompatible, provider_id="provider-b", model_id="model-b")
             self.assertEqual(asyncio.run(rejected.search(notebook["id"], "one")), [])
+
+    def test_legacy_index_is_repaired_and_current_index_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "db.sqlite3"
+            def connection():
+                result = sqlite3.connect(path)
+                result.row_factory = sqlite3.Row
+                result.execute("PRAGMA foreign_keys=ON")
+                return result
+            with connection() as database:
+                migrate(database)
+            repository = NotebookRepository(connection, lambda: "now")
+            notebooks = NotebookService(repository, Path(directory) / "sources")
+            ingestion = NotebookIngestionService(repository, Path(directory) / "sources", lambda: "now")
+            provider = CountingEmbeddings()
+            notebook = notebooks.create(NotebookInput("Knowledge"))
+            source = notebooks.add_file(notebook["id"], "Notes", "notes.txt", "text/plain", b"Murphy problems happen at the worst moment")
+            ingestion.ingest(notebook["id"], source["id"])
+            index = SQLiteVectorIndex(connection, lambda: "now")
+            legacy = RetrievalService(repository, index, provider)
+            asyncio.run(legacy.index_source(notebook["id"], source["id"]))
+
+            config = EmbeddingConfiguration("c", "provider-a", "model-a", 20, 30, 0, 2, 5, 12000, 1, "now", "now")
+            current = RetrievalService(repository, index, provider, embedding_config=config,
+                                       provider_id="provider-a", model_id="model-a")
+            self.assertEqual(asyncio.run(current.search(notebook["id"], "worst moment")), [])
+            repaired = asyncio.run(current.index_source(notebook["id"], source["id"]))
+            self.assertFalse(repaired["skipped"])
+            self.assertTrue(asyncio.run(current.search(notebook["id"], "worst moment")))
+            calls = len(provider.calls)
+            reused = asyncio.run(current.index_source(notebook["id"], source["id"]))
+            self.assertTrue(reused["skipped"])
+            self.assertEqual(len(provider.calls), calls)
+
+    def test_candidate_inspection_explains_identity_rejection_without_vectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "db.sqlite3"
+            def connection():
+                result = sqlite3.connect(path)
+                result.row_factory = sqlite3.Row
+                result.execute("PRAGMA foreign_keys=ON")
+                return result
+            with connection() as database:
+                migrate(database)
+            repository = NotebookRepository(connection, lambda: "now")
+            notebooks = NotebookService(repository, Path(directory) / "sources")
+            ingestion = NotebookIngestionService(repository, Path(directory) / "sources", lambda: "now")
+            notebook = notebooks.create(NotebookInput("Knowledge"))
+            source = notebooks.add_file(notebook["id"], "Notes", "notes.txt", "text/plain", b"Murphy tostada mantequilla")
+            ingestion.ingest(notebook["id"], source["id"])
+            index = SQLiteVectorIndex(connection, lambda: "now")
+            legacy = RetrievalService(repository, index, Embeddings())
+            asyncio.run(legacy.index_source(notebook["id"], source["id"]))
+            config = EmbeddingConfiguration("c", "provider-a", "model-a", 20, 30, 0, 2, 5, 12000, 1, "now", "now")
+            current = RetrievalService(repository, index, Embeddings(), embedding_config=config,
+                                       provider_id="provider-a", model_id="model-a")
+            candidates = asyncio.run(current.inspect_search(notebook["id"], "tostada", 10))
+            self.assertEqual(len(candidates), 1)
+            self.assertIn("missing_index_identity", candidates[0]["rejection_reasons"])
+            self.assertNotIn("embedding", candidates[0])
 
 
 if __name__ == "__main__":

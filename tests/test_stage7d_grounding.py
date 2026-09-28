@@ -27,6 +27,11 @@ class Stage7DGroundingTests(unittest.TestCase):
         self.assertEqual(citations[0][0], "S1")
         self.assertEqual(citations[0][1]["chunk_id"], "c1")
 
+    def test_zero_retrieval_has_no_citation_source(self):
+        context = GroundedContext.build("n", "q", [], 100)
+        self.assertEqual(cited_results("answer [S1]", context), [])
+        self.assertNotIn("[S1]", context.serialize())
+
     def test_notebook_delete_clears_binding_without_deleting_conversation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nexo.sqlite3"

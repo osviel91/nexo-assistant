@@ -528,6 +528,21 @@ async def retrieve_notebook(notebook_id: str, item: RetrievalIn):
         raise HTTPException(400, str(error))
 
 
+@app.post("/api/notebooks/{notebook_id}/retrieve/diagnostics")
+async def inspect_notebook_retrieval(notebook_id: str, item: RetrievalIn):
+    """Return ranked candidate metadata without document text or vector values."""
+    try:
+        notebooks.get(notebook_id)
+        async with httpx.AsyncClient(timeout=float(os.getenv("NEXO_EMBEDDING_TIMEOUT", "30"))) as client:
+            candidates = await retrieval_service(client).inspect_search(notebook_id, item.query, item.limit)
+        return {"candidate_count": len(candidates), "accepted_count": sum(item["accepted"] for item in candidates),
+                "rejected_count": sum(not item["accepted"] for item in candidates), "candidates": candidates}
+    except NotebookNotFoundError as error:
+        raise notebook_error(error)
+    except (RetrievalError, EmbeddingError) as error:
+        raise HTTPException(400, str(error))
+
+
 @app.post("/api/notebooks/{notebook_id}/sources")
 async def add_notebook_source(notebook_id: str, request: Request):
     try:

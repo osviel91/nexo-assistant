@@ -31,6 +31,8 @@ class VectorIndex(Protocol):
     def delete_document(self, document_id: str) -> None: ...
     def search(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[VectorSearchResult]: ...
 
+    def inspect(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[dict]: ...
+
 
 def _cosine(left: list[float], right: list[float]) -> float:
     denominator = math.sqrt(sum(value * value for value in left)) * math.sqrt(sum(value * value for value in right))
@@ -102,3 +104,44 @@ class SQLiteVectorIndex:
                                               row["canonical_end"], metadata.get("provenance", []),
                                               row["document_content_hash"], row["content_hash"], row["source_title"]))
         return sorted(results, key=lambda item: (-item.score, item.chunk_id))[:limit]
+
+    def inspect(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[dict]:
+        if not vector or limit <= 0:
+            return []
+        with self.connection_factory() as connection:
+            rows = connection.execute("""SELECT document_chunks.id, document_chunks.source_id,
+                    document_chunks.embedding, document_chunks.embedding_dimension,
+                    notebook_sources.indexing_status, canonical_documents.content_hash,
+                    vii.provider_id, vii.model_id, vii.embedding_config_version,
+                    vii.chunking_config_hash, vii.document_hash
+                    FROM document_chunks
+                    JOIN notebook_sources ON notebook_sources.id=document_chunks.source_id
+                    JOIN canonical_documents ON canonical_documents.id=document_chunks.document_id
+                    LEFT JOIN vector_index_identities vii ON vii.document_id=document_chunks.document_id
+                    WHERE document_chunks.notebook_id=?""", (notebook_id,)).fetchall()
+        candidates = []
+        for row in rows:
+            reasons = []
+            score = None
+            if row["embedding"] is None:
+                reasons.append("missing_embedding")
+            else:
+                candidate = json.loads(row["embedding"])
+                if len(candidate) != len(vector):
+                    reasons.append("dimension_mismatch")
+                else:
+                    score = round(_cosine(vector, candidate), 6)
+            if row["indexing_status"] != "ready":
+                reasons.append(f"index_{row['indexing_status']}")
+            if identity and not row["provider_id"]:
+                reasons.append("missing_index_identity")
+            elif identity and any(row[key] != identity[key] for key in ("provider_id", "model_id", "embedding_config_version", "chunking_config_hash")):
+                reasons.append("embedding_identity_mismatch")
+            elif identity and row["document_hash"] != row["content_hash"]:
+                reasons.append("document_hash_mismatch")
+            candidates.append({"chunk_id": row["id"], "source_id": row["source_id"], "score": score,
+                               "accepted": not reasons, "rejection_reasons": reasons})
+        candidates.sort(key=lambda item: (item["score"] is None, -(item["score"] or 0), item["chunk_id"]))
+        for rank, candidate in enumerate(candidates[:limit], 1):
+            candidate["rank"] = rank
+        return candidates[:limit]
