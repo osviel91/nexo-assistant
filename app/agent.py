@@ -12,7 +12,7 @@ from app.diagnostics import diagnostic
 from app.kernel import ToolExecutionContext
 from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
-from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext
+from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext, KnowledgeOutcome, knowledge_outcome_instruction
 
 logger = logging.getLogger("nexo.agent")
 
@@ -38,6 +38,7 @@ class AgentRunRequest:
     runtime_snapshot: dict[str, Any] | None = None
     grounded_context: GroundedContext | None = None
     effective_configuration: "EffectiveRunConfiguration | None" = None
+    knowledge_outcome: KnowledgeOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class EffectiveRunConfiguration:
     tools: EffectiveToolSet
     grounded_context: GroundedContext | None
     temperature: float | None
+    knowledge_outcome: KnowledgeOutcome | None = None
 
 
 class AgentRuntime:
@@ -62,6 +64,7 @@ class AgentRuntime:
         configuration = request.effective_configuration
         system_instructions = configuration.agent.system_instructions if configuration and configuration.agent else request.system_instructions
         grounded_context = configuration.grounded_context if configuration else request.grounded_context
+        knowledge_outcome = configuration.knowledge_outcome if configuration else request.knowledge_outcome
         effective_tools = configuration.tools if configuration else request.effective_tools
         temperature = configuration.temperature if configuration else request.temperature
         messages = list(request.messages)
@@ -70,6 +73,8 @@ class AgentRuntime:
         if grounded_context is not None:
             grounding = f"{GROUNDING_INSTRUCTIONS}\n\n{grounded_context.serialize()}"
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": grounding})
+        if knowledge_outcome is not None and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED:
+            messages.insert(1 if system_instructions else 0, {"role": "system", "content": knowledge_outcome_instruction(knowledge_outcome)})
         answer = ""
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []

@@ -112,6 +112,16 @@ class Stage9BRerankingTests(unittest.TestCase):
         follow_up_context = GroundedContext.build("n", "follow-up", [item for item in follow_up if item["relevant"]], 1000)
         self.assertTrue(any("tostada" in item["content"] for item in follow_up_context.retrieval_results))
 
+        ood = asyncio.run(service.search(
+            "n", "¿Qué dice el documento sobre Kubernetes?", 2,
+            [{"role": "user", "content": "¿Cuál es la ley de perversidad de la naturaleza?"},
+             {"role": "assistant", "content": "La tostada cae [S1]."}],
+        ))
+        self.assertGreater(len(ood), 0)
+        self.assertEqual(service.last_diagnostics["relevant_candidate_count"], 0)
+        self.assertEqual(service.last_diagnostics["relevance_gate_status"], "rejected")
+        self.assertEqual(cited_results("No hay evidencia [S1]", GroundedContext.build("n", "ood", [], 1000)), [])
+
     def test_metrics_and_citation_mapping_are_structural(self):
         results = [{"chunk_id": "page-38", "source_id": "murphy", "page_number": 38}, {"chunk_id": "page-6", "source_id": "murphy", "page_number": 6}]
         relevant = {"chunk_ids": ["page-38"], "source_ids": [], "page_numbers": [38]}

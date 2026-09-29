@@ -40,7 +40,7 @@ from app.retrieval import IndexingInProgressError, RetrievalError, RetrievalServ
 from app.reranking import OpenAICompatibleReranker
 from app.vector_index import SQLiteVectorIndex
 from app.vector_store import LocalVectorStore, QdrantVectorStore, VectorStoreHealth
-from app.grounding import GroundedContext, cited_results
+from app.grounding import GroundedContext, KnowledgeOutcome, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
 from app.chunking import ChunkingConfig
 
@@ -1031,6 +1031,7 @@ async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
     profile_config = None
     grounded_context: GroundedContext | None = None
+    knowledge_outcome: KnowledgeOutcome | None = None
     with db() as c:
         cid = req.conversation_id or str(uuid.uuid4())
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
@@ -1060,6 +1061,9 @@ async def chat(req: ChatIn):
                 (notebook_id, knowledge_config.provider_id, knowledge_config.model_id, knowledge_config.config_version, knowledge_config.chunking_hash())).fetchone()[0]
         else:
             indexed_sources = c.execute("SELECT COUNT(*) FROM notebook_sources WHERE notebook_id=? AND indexing_status='ready'", (notebook_id,)).fetchone()[0] if notebook_id else 0
+        knowledge_available = bool(notebook_id and (knowledge_config or indexed_sources))
+        knowledge_outcome = (KnowledgeOutcome.NO_NOTEBOOK_BOUND if not notebook_id else
+                             KnowledgeOutcome.KNOWLEDGE_UNAVAILABLE if not knowledge_available else None)
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
             c.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id) VALUES(?,?,?,?,?,?,?)", (cid, title, now(), now(), mode, profile_id, notebook_id))
@@ -1114,9 +1118,10 @@ async def chat(req: ChatIn):
             "effective_notebook_bound": bool(notebook_id),
             "notebook_resolution_source": resolution_source,
             "notebook_resolution_status": "resolved" if notebook_id else "not_bound",
-            "knowledge_available": bool(notebook_id and knowledge_config),
-            "knowledge_status": "available" if notebook_id and knowledge_config else "not_available",
-            "knowledge_unavailable_reason": None if notebook_id and knowledge_config else ("notebook_not_bound" if not notebook_id else "knowledge_not_configured"),
+            "knowledge_available": knowledge_available,
+            "knowledge_status": "available" if knowledge_available else "not_available",
+            "knowledge_unavailable_reason": None if knowledge_available else ("notebook_not_bound" if not notebook_id else "knowledge_not_configured"),
+            "knowledge_outcome": knowledge_outcome.value if knowledge_outcome else None,
             "knowledge_retrieval_enabled": bool(notebook_id),
             "knowledge_indexed_sources": indexed_sources,
             "knowledge_embedding_model": knowledge_config.model_id if notebook_id and knowledge_config else None,
@@ -1127,6 +1132,7 @@ async def chat(req: ChatIn):
             "retrieval_status": "not_applied",
             "retrieval_reason": None if notebook_id else "notebook_not_bound",
             "grounding_status": "not_applied",
+            "grounding_reason": knowledge_outcome.value if knowledge_outcome else None,
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
@@ -1157,7 +1163,7 @@ async def chat(req: ChatIn):
         task.add_done_callback(lambda finished: _finish_shadow_task(finished, cid, message_id))
 
     async def events():
-        nonlocal grounded_context
+        nonlocal grounded_context, knowledge_outcome
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
@@ -1165,7 +1171,7 @@ async def chat(req: ChatIn):
                     "supported": thinking_flags["thinking"], "budget_supported": thinking_flags["thinking-budget"],
                     "reasoning_content": thinking_flags["reasoning-content"],
                     "enabled": thinking.get("enabled"), "budget": thinking.get("budget")})
-                if notebook_id:
+                if notebook_id and knowledge_available:
                     yield "data: " + json.dumps({"activity": {"type": "RETRIEVE", "status": "running"}}) + "\n\n"
                     retrieve_started = asyncio.get_running_loop().time()
                     retrieve_event = event_sink.start_event("RETRIEVE", "notebook retrieval", {"notebook_id": notebook_id, "retrieval_count": 0})
@@ -1178,15 +1184,20 @@ async def chat(req: ChatIn):
                             notebook_id, req.content, top_k,
                             [{"role": message["role"], "content": message["content"]} for message in history],
                         )
+                        knowledge_outcome = (KnowledgeOutcome.NO_CANDIDATES if not retrieval else KnowledgeOutcome.NO_RELEVANT_EVIDENCE
+                                             if not any(item.get("relevant", True) for item in retrieval) else KnowledgeOutcome.GROUNDING_APPLIED)
                         relevant = [item for item in retrieval if item.get("relevant", True)]
                         grounded_context = GroundedContext.build(notebook_id, req.content, relevant, max_chars) if relevant else None
+                        if not grounded_context or not grounded_context.retrieval_results:
+                            knowledge_outcome = KnowledgeOutcome.NO_RELEVANT_EVIDENCE
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied",
                                                 "retrieval_reason": None,
                                                 "retrieval_count": len(retrieval),
                                                 "retrieval_result_count": len(retrieval),
                                                 "retrieved_candidate_count": len(retrieval),
                                                 "relevant_candidate_count": len(relevant),
-                                                "relevance_gate_status": service.last_diagnostics.get("relevance_gate_status", "not_applied"),
+                                                 "relevance_gate_status": service.last_diagnostics.get("relevance_gate_status", "not_applied"),
+                                                 "knowledge_outcome": knowledge_outcome.value,
                                                 "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
                                                 "retrieval_query_length": len(req.content),
                                                 "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results] if grounded_context else [],
@@ -1200,11 +1211,12 @@ async def chat(req: ChatIn):
                                                 "grounding_applied": bool(grounded_context and grounded_context.retrieval_results),
                                                 "context_truncated": grounded_context.truncated if grounded_context else False,
                                                 "knowledge_retrieval_applied": bool(retrieval),
-                                                "grounding_status": "applied" if grounded_context else "not_applied"}
-                        retrieval_metadata["grounding_reason"] = None if grounded_context else ("insufficient_evidence" if retrieval else "no_results")
+                                                 "grounding_status": "applied" if grounded_context else "not_applied"}
+                        retrieval_metadata["grounding_reason"] = None if grounded_context else knowledge_outcome.value
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
                     except (RetrievalError, ValueError, EmbeddingError) as error:
                         grounded_context = None
+                        knowledge_outcome = KnowledgeOutcome.RETRIEVAL_FAILED
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "failed", "retrieval_reason": "embedding_unavailable" if isinstance(error, EmbeddingError) else "retrieval_failed", "retrieval_count": 0,
                                                "retrieval_result_count": 0,
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
@@ -1214,11 +1226,26 @@ async def chat(req: ChatIn):
                                                 "relevance_gate_applied": bool(getattr(embedding_configuration(), "relevance_gate_enabled", True)),
                                                  "relevance_gate_status": "not_applied",
                                                  "relevance_gate_reason": "retrieval_failed",
+                                                 "knowledge_outcome": knowledge_outcome.value,
                                                 "grounded_context_created": False,
                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                                "context_chars": 0, "grounding_context_chars": 0, "grounding_chunks": 0, "grounding_applied": False, "context_truncated": False,
-                                                "knowledge_retrieval_applied": False, "grounding_status": "not_applied"}
+                                                "knowledge_retrieval_applied": False, "grounding_status": "not_applied", "grounding_reason": knowledge_outcome.value}
                         event_sink.finish_event(retrieve_event, "failed", {**retrieval_metadata, "error_code": "retrieval_unavailable"}, retrieval_metadata["retrieval_duration_ms"])
+                    runtime_snapshot.update(retrieval_metadata)
+                    _update_runtime_metadata(run_id, runtime_snapshot)
+                elif notebook_id:
+                    retrieval_metadata = {
+                        "notebook_id": notebook_id, "retrieval_status": "not_applied",
+                        "retrieval_reason": KnowledgeOutcome.KNOWLEDGE_UNAVAILABLE.value,
+                        "retrieval_count": 0, "retrieval_result_count": 0,
+                        "retrieved_candidate_count": 0, "relevant_candidate_count": 0,
+                        "knowledge_outcome": knowledge_outcome.value,
+                        "grounded_context_created": False, "grounding_status": "not_applied",
+                        "grounding_reason": knowledge_outcome.value, "grounding_applied": False,
+                        "grounding_chunks": 0, "context_chars": 0,
+                        "knowledge_retrieval_applied": False,
+                    }
                     runtime_snapshot.update(retrieval_metadata)
                     _update_runtime_metadata(run_id, runtime_snapshot)
                 catalog = module_registry.tool_catalog_view()
@@ -1242,15 +1269,17 @@ async def chat(req: ChatIn):
                     effective_tools,
                     grounded_context,
                     profile_config.temperature if profile_config else req.temperature,
+                    knowledge_outcome,
                 )
-                runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + [message["role"] for message in messages]
+                runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + (["system"] if knowledge_outcome and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED else []) + [message["role"] for message in messages]
                 _update_runtime_metadata(run_id, runtime_snapshot)
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
                                               profile_config.profile_id if profile_config else None,
-                                               profile_config.profile_name if profile_config else None,
-                                               runtime_snapshot, grounded_context, effective_configuration)
+                                                profile_config.profile_name if profile_config else None,
+                                                runtime_snapshot, grounded_context, effective_configuration,
+                                                knowledge_outcome=knowledge_outcome)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
