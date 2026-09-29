@@ -303,7 +303,24 @@ def _migration_14(connection: sqlite3.Connection) -> None:
         END""")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14))
+def _migration_15(connection: sqlite3.Connection) -> None:
+    connection.execute("""INSERT INTO document_chunks_fts(chunk_id,notebook_id,source_id,content)
+        SELECT dc.id,dc.notebook_id,dc.source_id,dc.content FROM document_chunks dc
+        WHERE NOT EXISTS (SELECT 1 FROM document_chunks_fts fts WHERE fts.chunk_id=dc.id)""")
+    connection.execute("DELETE FROM document_chunks_fts WHERE chunk_id NOT IN (SELECT id FROM document_chunks)")
+    connection.execute("""DELETE FROM vector_index_identities
+        WHERE document_id NOT IN (SELECT document_id FROM document_chunks)""")
+    connection.execute("""UPDATE notebook_sources SET indexing_status='not_indexed', indexing_error=NULL,
+        chunk_count=NULL, embedding_count=NULL, vector_count=NULL, embedding_dimension=NULL,
+        embedding_config_version=NULL, indexing_identity=NULL, indexed_at=NULL
+        WHERE indexing_status='ready' AND (NOT EXISTS (
+            SELECT 1 FROM canonical_documents cd WHERE cd.source_id=notebook_sources.id
+        ) OR NOT EXISTS (
+            SELECT 1 FROM document_chunks dc WHERE dc.source_id=notebook_sources.id
+        ))""")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14), (15, _migration_15))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -19,7 +19,7 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 14)
+            self.assertEqual(version_count, 15)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
@@ -66,7 +66,7 @@ class MigrationTests(unittest.TestCase):
                 INSERT INTO conversations VALUES ('chat', 'Raw chat', 'created', 'updated');
                 """)
                 connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-                for version, migration in MIGRATIONS[:-2]:
+                for version, migration in MIGRATIONS[:12]:
                     migration(connection)
                     connection.execute("INSERT INTO schema_migrations VALUES (?, 'now')", (version,))
                 connection.execute("UPDATE conversations SET agent_profile_id='profile' WHERE id='agent'")
@@ -77,7 +77,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(rows["agent"][1], "agent")
             self.assertEqual(rows["chat"][1], "chat")
             self.assertEqual(rows["agent"][2], "Agent chat")
-            self.assertEqual(version_count, 14)
+            self.assertEqual(version_count, 15)
 
     def test_stage9a_migration_backfills_existing_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,3 +112,25 @@ class MigrationTests(unittest.TestCase):
                 connection.execute("DELETE FROM document_chunks_fts WHERE chunk_id='orphan'")
                 connection.execute("DELETE FROM document_chunks WHERE id='c'")
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM document_chunks_fts WHERE chunk_id='c'").fetchone()[0], 0)
+
+    def test_index_metadata_is_not_available_without_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stale-index.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+                for version, migration in MIGRATIONS[:14]:
+                    migration(connection)
+                    connection.execute("INSERT INTO schema_migrations VALUES (?, 'now')", (version,))
+                connection.executescript("""
+                    INSERT INTO notebooks VALUES ('n','N','','now','now');
+                    INSERT INTO notebook_sources(id,notebook_id,type,title,status,metadata,content_hash,created_at,updated_at,indexing_status,chunk_count,vector_count) VALUES ('s','n','file','S','ready','{}','hash','now','now','ready',94,94);
+                    INSERT INTO canonical_documents VALUES ('d','n','s','S','text','hash','text',NULL,'{}','now','now');
+                    INSERT INTO vector_index_identities VALUES ('d','provider','model',2,1,'chunking','hash','now','now');
+                """)
+                migrate(connection)
+                version = connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]
+                source = connection.execute("SELECT indexing_status,chunk_count,vector_count FROM notebook_sources WHERE id='s'").fetchone()
+                identity = connection.execute("SELECT COUNT(*) FROM vector_index_identities WHERE document_id='d'").fetchone()[0]
+            self.assertEqual(version, 15)
+            self.assertEqual(tuple(source), ("not_indexed", None, None))
+            self.assertEqual(identity, 0)
