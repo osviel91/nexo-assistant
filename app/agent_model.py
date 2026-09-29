@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -26,6 +28,63 @@ class ModelStreamChunk:
 
 class ModelAdapterError(Exception):
     pass
+
+
+class _TextToolCallParser:
+    OPEN = "<tool_call>"
+    CLOSE = "</tool_call>"
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.ready = ""
+        self.in_call = False
+        self.index = 0
+
+    def feed(self, text: str, final: bool = False) -> tuple[str, list[dict[str, Any]]]:
+        self.buffer += text
+        visible, calls = [], []
+        while True:
+            if not self.in_call:
+                start = self.buffer.find(self.OPEN)
+                if start < 0:
+                    if final:
+                        visible.append(self.ready + self.buffer)
+                        self.ready = ""
+                        self.buffer = ""
+                    else:
+                        keep = len(self.OPEN) - 1
+                        if len(self.buffer) > keep:
+                            self.ready += self.buffer[:-keep]
+                            self.buffer = self.buffer[-keep:]
+                            if len(self.ready) >= 32:
+                                visible.append(self.ready)
+                                self.ready = ""
+                    break
+                visible.append(self.ready + self.buffer[:start])
+                self.ready = ""
+                self.buffer = self.buffer[start + len(self.OPEN):]
+                self.in_call = True
+            end = self.buffer.find(self.CLOSE)
+            if end < 0:
+                if final:
+                    self.buffer = ""
+                    self.in_call = False
+                break
+            block, self.buffer = self.buffer[:end], self.buffer[end + len(self.CLOSE):]
+            self.in_call = False
+            match = re.search(r"<function=([^>\s]+)>(.*?)</function>", block, re.DOTALL)
+            if not match:
+                continue
+            arguments = {}
+            for parameter in re.finditer(r"<parameter=([^>\s]+)>(.*?)</parameter>", match.group(2), re.DOTALL):
+                raw = html.unescape(parameter.group(2).strip())
+                try:
+                    arguments[parameter.group(1)] = json.loads(raw)
+                except json.JSONDecodeError:
+                    arguments[parameter.group(1)] = raw
+            calls.append({"index": self.index, "id": f"text-tool-{self.index}", "type": "function", "function": {"name": match.group(1), "arguments": json.dumps(arguments, ensure_ascii=False)}})
+            self.index += 1
+        return "".join(visible), calls
 
 
 class ModelAdapter(Protocol):
@@ -67,6 +126,8 @@ class OpenAICompatibleModelAdapter:
         })
         request_started = time.perf_counter()
         first_content = True
+        text_tool_parser = _TextToolCallParser() if tools else None
+        next_tool_index = 0
         try:
             async with self.client.stream("POST", self.url, headers=self.headers, json=payload) as response:
                 if response.status_code >= 400:
@@ -89,12 +150,30 @@ class OpenAICompatibleModelAdapter:
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                         tool_calls = delta.get("tool_calls", []) or []
+                        for call in tool_calls:
+                            try:
+                                next_tool_index = max(next_tool_index, int(call.get("index", 0)) + 1)
+                            except (AttributeError, TypeError, ValueError):
+                                continue
+                        if text_tool_parser is not None and isinstance(content, str):
+                            content, fallback_calls = text_tool_parser.feed(content)
+                            for call in fallback_calls:
+                                call["index"] = next_tool_index
+                                next_tool_index += 1
+                            tool_calls = [*tool_calls, *fallback_calls]
                         ttft = round((time.perf_counter() - request_started) * 1000, 2) if content and first_content else None
                         if ttft is not None:
                             first_content = False
                         yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"), usage=packet.get("usage"), provider_ttft_ms=ttft)
                     except (ValueError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
                         continue
+                if text_tool_parser is not None:
+                    content, fallback_calls = text_tool_parser.feed("", final=True)
+                    for call in fallback_calls:
+                        call["index"] = next_tool_index
+                        next_tool_index += 1
+                    if content or fallback_calls:
+                        yield ModelStreamChunk(content=content, tool_calls=fallback_calls)
         except ModelAdapterError:
             raise
         except httpx.RequestError as exc:
