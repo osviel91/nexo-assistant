@@ -142,7 +142,7 @@ class AgentProfileService:
         if "temperature" in parameters and (isinstance(parameters["temperature"], bool) or not isinstance(parameters["temperature"], (int, float)) or not 0 <= parameters["temperature"] <= 2):
             raise ProfileValidationError("temperature must be a number between 0 and 2")
         tools = tuple(sorted(set(item.tool_names)))
-        if any(not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)*", tool) or len(tool) > 200 for tool in tools):
+        if any(not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*(?:__[A-Za-z0-9_-]+)*", tool) or len(tool) > 200 for tool in tools):
             raise ProfileValidationError("tool names are invalid")
         return AgentProfileInput(name, item.description, item.provider_id.strip(), item.model_id.strip(),
                                  item.system_instructions, parameters, item.enabled, tools)
@@ -232,7 +232,7 @@ class AgentProfileResolver:
         temperature = parameters.get("temperature", runtime_temperature)
         if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2):
             raise ProfileResolutionError("agent_profile_invalid")
-        if any(not isinstance(tool, str) or len(tool) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)*", tool) for tool in tool_names):
+        if any(not isinstance(tool, str) or len(tool) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*(?:__[A-Za-z0-9_-]+)*", tool) for tool in tool_names):
             raise ProfileResolutionError("agent_profile_invalid")
         with self.repository.connection_factory() as connection:
             if connection.execute("SELECT 1 FROM providers WHERE id=?", (provider_id,)).fetchone() is None:

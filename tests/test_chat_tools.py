@@ -80,12 +80,17 @@ class ChatToolTests(unittest.TestCase):
                 with main.db() as connection:
                     run = connection.execute("SELECT * FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()
                     runtime_events = connection.execute("SELECT kind FROM runtime_events WHERE run_id=? ORDER BY sequence", (run["id"],)).fetchall()
+                    saved_runtime = json.loads(connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
                 self.assertEqual(run["status"], "completed")
                 self.assertEqual([event["kind"] for event in runtime_events], ["REASON", "ACT", "REASON"])
+                self.assertEqual(saved_runtime["tools_used"], ["web_search"])
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="sin web", web_enabled=False, tools_enabled=False)))
                 asyncio.run(self.collect(response.body_iterator))
                 self.assertNotIn("tools", FakeClient.payloads[0])
+                with main.db() as connection:
+                    no_tools_runtime = json.loads(connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+                self.assertEqual(no_tools_runtime["tools_used"], [])
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="solo web", web_enabled=True, tools_enabled=False)))
                 asyncio.run(self.collect(response.body_iterator))

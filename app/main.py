@@ -1478,8 +1478,8 @@ async def chat(req: ChatIn):
                         artifacts = event.get("artifacts", artifacts)
                         telemetry = {key: value for key, value in event.get("telemetry", {}).items() if value is not None}
                         runtime_metadata = {**runtime_snapshot, **telemetry}
-                        runtime_metadata.update({"tool_calls": len(event.get("tools_used", [])), "native_tool_calls": event.get("native_tool_calls", 0),
-                                                 "artifact_count": len(artifacts), "artifact_types": [item.get("type") for item in artifacts]})
+                        runtime_metadata.update({"tool_calls": len(event.get("tools_used", [])), "tools_used": event.get("tools_used", []), "native_tool_calls": event.get("native_tool_calls", 0),
+                                                  "artifact_count": len(artifacts), "artifact_types": [item.get("type") for item in artifacts]})
                         runtime_metadata["input_tokens"] = runtime_metadata.get("prompt_tokens")
                         runtime_metadata["output_tokens"] = runtime_metadata.get("completion_tokens")
                         runtime_metadata["metrics"] = normalized_metrics(runtime_metadata)

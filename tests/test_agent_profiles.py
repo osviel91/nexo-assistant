@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileService, ProfileValidationError
+from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileValidationError
 from app.migrations import migrate
 
 
@@ -73,6 +73,11 @@ class AgentProfileTests(unittest.TestCase):
         result = self.service.get(created["id"])
         self.assertEqual(result["tool_names"], ["mcp__missing__tool", "web_search"])
         self.assertEqual(result["unavailable_tools"], ["mcp__missing__tool"])
+
+    def test_dotted_registry_tool_names_save_and_resolve(self):
+        created = self.service.create(self.profile(tool_names=("native.get_current_datetime", "mcp.demo.query")))
+        resolved = AgentProfileResolver(self.service.repository).resolve(created["id"])
+        self.assertEqual(set(resolved.requested_tool_names), {"native.get_current_datetime", "mcp.demo.query"})
 
     def test_api_contract_does_not_expose_provider_secret_or_tool_schema(self):
         import app.main as main
