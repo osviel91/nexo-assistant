@@ -45,6 +45,7 @@ class EffectiveRunConfiguration:
     """Immutable Agent + Knowledge snapshot for one execution."""
 
     agent: AgentRunConfiguration | None
+    notebook_id: str | None
     tools: EffectiveToolSet
     grounded_context: GroundedContext | None
     temperature: float | None

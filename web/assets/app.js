@@ -317,6 +317,7 @@ function beginChat() {
   state.webEnabled = false;
   state.toolsEnabled = false;
   state.currentNotebookId = null;
+  renderNotebookPicker();
   state.lastRuntime = null;
   $('#messages').innerHTML = '';
   $('#welcome').hidden = false;
@@ -407,6 +408,12 @@ async function send() {
   if (state.busy) return;
   const text = $('#prompt').value.trim();
   const choice = selected();
+  const visibleNotebookId = $('#notebook-picker')?.value || null;
+  if (visibleNotebookId !== state.currentNotebookId) {
+    toast('El Notebook seleccionado no está sincronizado.');
+    renderNotebookPicker();
+    return;
+  }
   const agent = currentAgent();
    const effectiveChoice = state.executionMode === 'agent' && agent ? { provider: state.providers.find((provider) => provider.id === agent.provider_id), model: agent.model_id } : choice;
   if (!text && !state.attachments.length) return;

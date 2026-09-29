@@ -173,6 +173,12 @@ def resolve_notebook_id(request: ChatIn, conversation: sqlite3.Row | None) -> st
     return conversation["notebook_id"] if conversation else None
 
 
+def notebook_request_state(request: ChatIn) -> str:
+    if "notebook_id" not in request.model_fields_set:
+        return "omitted"
+    return "value" if request.notebook_id is not None else "null"
+
+
 class PreferencesPatch(BaseModel):
     last_chat_model: str | None = None
     last_agent_profile: str | None = None
@@ -1013,6 +1019,9 @@ async def chat(req: ChatIn):
         if mode == "chat":
             profile_id = None
         notebook_id = resolve_notebook_id(req, conv)
+        request_state = notebook_request_state(req)
+        resolution_source = "request" if request_state == "value" else "cleared" if request_state == "null" else "conversation"
+        conversation_notebook_bound = bool(conv and conv["notebook_id"])
         if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
         if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
@@ -1074,6 +1083,12 @@ async def chat(req: ChatIn):
             "system_instructions_applied": bool(profile_config and profile_config.system_instructions),
             "notebook_id": notebook_id,
             "notebook_name": notebook["name"] if notebook else None,
+            "notebook_request_state": request_state,
+            "requested_notebook_id_present": "notebook_id" in req.model_fields_set,
+            "conversation_notebook_bound": conversation_notebook_bound,
+            "effective_notebook_bound": bool(notebook_id),
+            "notebook_resolution_source": resolution_source,
+            "notebook_resolution_status": "resolved" if notebook_id else "not_bound",
             "knowledge_available": bool(notebook_id and knowledge_config),
             "knowledge_status": "available" if notebook_id and knowledge_config else "not_available",
             "knowledge_unavailable_reason": None if notebook_id and knowledge_config else ("notebook_not_bound" if not notebook_id else "knowledge_not_configured"),
@@ -1186,6 +1201,7 @@ async def chat(req: ChatIn):
                 _update_runtime_metadata(run_id, runtime_snapshot)
                 effective_configuration = EffectiveRunConfiguration(
                     profile_config,
+                    notebook_id,
                     effective_tools,
                     grounded_context,
                     profile_config.temperature if profile_config else req.temperature,
