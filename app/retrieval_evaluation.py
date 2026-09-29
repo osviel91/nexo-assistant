@@ -18,7 +18,7 @@ class EvaluationCase:
 def _relevant(item: Any, truth: dict[str, list[Any]]) -> bool:
     candidate = item if isinstance(item, dict) else vars(item)
     return any(value is not None and value in truth.get(key, []) for key, value in (
-        ("chunk_id", candidate.get("chunk_id")), ("source_id", candidate.get("source_id")),
+        ("chunk_ids", candidate.get("chunk_id")), ("source_ids", candidate.get("source_id")),
         ("page_numbers", candidate.get("page_number", candidate.get("page"))),
     ))
 

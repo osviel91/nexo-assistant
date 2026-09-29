@@ -52,8 +52,25 @@ case "${1:-}" in
     [ "$ready" -eq 1 ] || { cat /tmp/nexo-smoke.log >&2; exit 1; }
     printf '%s\n' 'smoke: GET /api/health passed'
     ;;
+  benchmark)
+    require_venv
+    shift
+    if [ "${1:-}" = "compare" ]; then
+      shift
+      "$PYTHON" -m app.benchmark compare "$@"
+      exit 0
+    fi
+    [ "${1:-}" = "retrieval" ] || { printf '%s\n' 'Usage: ./scripts/nexo benchmark retrieval [--mode deterministic|live]' >&2; exit 2; }
+    shift
+    "$PYTHON" -m app.benchmark run "$@"
+    ;;
+  benchmark-compare)
+    require_venv
+    shift
+    "$PYTHON" -m app.benchmark compare "$@"
+    ;;
   *)
-    printf '%s\n' 'Usage: ./scripts/nexo {bootstrap|dev|test|test-backend|test-frontend|check|smoke}' >&2
+    printf '%s\n' 'Usage: ./scripts/nexo {bootstrap|dev|test|test-backend|test-frontend|check|smoke|benchmark retrieval|benchmark-compare}' >&2
     exit 2
     ;;
 esac

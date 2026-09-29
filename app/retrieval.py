@@ -16,6 +16,7 @@ from app.vector_store import VectorSearchFilters, VectorStore
 from app.knowledge import EmbeddingConfiguration
 from app.reranking import Reranker, RerankerError, with_timeout
 from app.query_intelligence import QueryAnalyzer
+from app.performance import RetrievalTelemetry
 
 
 class RetrievalError(ValueError):
@@ -111,15 +112,23 @@ class DenseRetriever:
                  vector_store: VectorStore | None = None) -> None:
         self.provider, self.index, self.identity, self.vector_store = provider, index, identity, vector_store
 
-    async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]:
+    async def retrieve(self, query: RetrievalQuery, telemetry: RetrievalTelemetry | None = None) -> list[RetrievalCandidate]:
+        started = time.perf_counter()
         batch = await self.provider.embed([query.text])
         validate_batch(batch, 1)
+        if telemetry is not None:
+            telemetry.embedding_ms = round((time.perf_counter() - started) * 1000, 2) if telemetry.embedding_ms is None else round(telemetry.embedding_ms + (time.perf_counter() - started) * 1000, 2)
+        started = time.perf_counter()
         if self.vector_store is not None:
             results = self.vector_store.search(batch.vectors[0], VectorSearchFilters(notebook_id=query.notebook_id, identity=self.identity), query.dense_limit)
         elif hasattr(self.index, "search_candidates"):
             results = self.index.search_candidates(query.notebook_id, batch.vectors[0], self.identity)
         else:
             results = self.index.search(query.notebook_id, batch.vectors[0], query.dense_limit, self.identity)
+        if telemetry is not None:
+            duration = RetrievalTelemetry.elapsed(started)
+            telemetry.dense_search_ms = round((telemetry.dense_search_ms or 0) + duration, 2)
+            telemetry.add_search("dense", duration)
         candidates = []
         for rank, result in enumerate(results[:query.dense_limit], 1):
             candidate = RetrievalCandidate.from_result(result)
@@ -132,11 +141,16 @@ class LexicalRetriever:
     def __init__(self, index: VectorIndex, identity: dict | None = None) -> None:
         self.index, self.identity = index, identity
 
-    async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]:
+    async def retrieve(self, query: RetrievalQuery, telemetry: RetrievalTelemetry | None = None) -> list[RetrievalCandidate]:
         search = getattr(self.index, "lexical_search", None)
         if search is None:
             raise RetrievalError("lexical retrieval is unavailable")
+        started = time.perf_counter()
         results = search(query.notebook_id, query.text, query.lexical_limit, self.identity) if self.identity is not None else search(query.notebook_id, query.text, query.lexical_limit)
+        if telemetry is not None:
+            duration = RetrievalTelemetry.elapsed(started)
+            telemetry.lexical_search_ms = round((telemetry.lexical_search_ms or 0) + duration, 2)
+            telemetry.add_search("lexical", duration)
         candidates = []
         for rank, result in enumerate(results, 1):
             candidate = RetrievalCandidate.from_result(result)
@@ -205,6 +219,9 @@ class RetrievalService:
         self.vector_store = vector_store
         self.query_analyzer = query_analyzer or QueryAnalyzer()
         self.last_diagnostics: dict[str, Any] = {}
+        self.last_telemetry = RetrievalTelemetry(
+            vector_store="qdrant" if vector_store and vector_store.__class__.__name__ == "QdrantVectorStore" else "local"
+        )
 
     async def index_source(self, notebook_id: str, source_id: str) -> dict[str, Any]:
         source = self.repository.source(notebook_id, source_id)
@@ -273,7 +290,18 @@ class RetrievalService:
                                      getattr(config, "dense_candidate_limit", max(limit * 4, 20)),
                                      getattr(config, "lexical_candidate_limit", max(limit * 4, 20)),
                                      getattr(config, "rrf_k", 60))
+        telemetry = RetrievalTelemetry(
+            vector_store=self.last_telemetry.vector_store,
+            retrieval_mode=mode,
+            reranker_enabled=bool(getattr(config, "reranking_enabled", False)),
+            reranker_provider=getattr(self.reranker, "provider_id", None),
+            reranker_model=getattr(self.reranker, "model_id", None),
+        )
+        started = time.perf_counter()
+        analysis_started = time.perf_counter()
         plan = self.query_analyzer.analyze(query, conversation)
+        telemetry.query_analysis_ms = RetrievalTelemetry.elapsed(analysis_started)
+        telemetry.query_variant_count = telemetry.query_variants = len(plan.variants)
         identity = self._identity({"content_hash": ""}) if config else None
         dense, lexical = [], []
         dense_rankings: list[list[RetrievalCandidate]] = []
@@ -281,42 +309,41 @@ class RetrievalService:
         failures: list[str] = []
         failure_reasons: dict[str, str] = {}
         dense_duration = lexical_duration = 0.0
-        started = time.monotonic()
         if mode in {"dense", "hybrid"}:
-            phase_started = time.monotonic()
+            phase_started = time.perf_counter()
             for variant in plan.variants:
                 try:
                     ranking = await DenseRetriever(self.provider, self.index, identity, self.vector_store).retrieve(
                         RetrievalQuery(query_model.notebook_id, variant, query_model.limit, query_model.mode,
-                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k))
+                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k), telemetry)
                     dense_rankings.append(ranking)
                 except Exception as error:
                     if "dense" not in failures:
                         failures.append("dense")
                         failure_reasons["dense"] = "embedding_error" if isinstance(error, EmbeddingError) else "provider_error"
-            dense_duration = round((time.monotonic() - phase_started) * 1000, 2)
+            dense_duration = RetrievalTelemetry.elapsed(phase_started)
             dense = [candidate for ranking in dense_rankings for candidate in ranking]
         if mode in {"lexical", "hybrid"}:
-            phase_started = time.monotonic()
+            phase_started = time.perf_counter()
             for variant in plan.variants:
                 try:
                     ranking = await LexicalRetriever(self.index, identity).retrieve(
                         RetrievalQuery(query_model.notebook_id, variant, query_model.limit, query_model.mode,
-                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k))
+                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k), telemetry)
                     lexical_rankings.append(ranking)
                 except Exception as error:
                     if "lexical" not in failures:
                         failures.append("lexical")
                         failure_reasons["lexical"] = "unavailable" if isinstance(error, RetrievalError) else "index_error"
-            lexical_duration = round((time.monotonic() - phase_started) * 1000, 2)
+            lexical_duration = RetrievalTelemetry.elapsed(phase_started)
             lexical = [candidate for ranking in lexical_rankings for candidate in ranking]
         if not dense and not lexical and failures and len(failures) == (2 if mode == "hybrid" else 1):
             self.last_diagnostics = self._diagnostics(mode, "none", dense, lexical, failures, failure_reasons)
             if mode == "dense":
                 raise RetrievalError("dense retrieval is unavailable")
-        fusion_started = time.monotonic()
+        fusion_started = time.perf_counter()
         fused = MultiQueryFusion().fuse(dense_rankings + lexical_rankings, query_model.rrf_k)
-        fusion_duration = round((time.monotonic() - fusion_started) * 1000, 2)
+        fusion_duration = RetrievalTelemetry.elapsed(fusion_started)
         for rank, candidate in enumerate(fused, 1):
             candidate.rrf_rank = rank
         results = _deduplicate(fused)
@@ -327,7 +354,7 @@ class RetrievalService:
         rerank_duration = 0.0
         if reranking_enabled:
             rerank_count = min(getattr(config, "reranker_candidate_limit", 20), len(results))
-            rerank_started = time.monotonic()
+            rerank_started = time.perf_counter()
             if self.reranker is None:
                 rerank_status, rerank_reason = "fallback", "unavailable"
             else:
@@ -347,7 +374,7 @@ class RetrievalService:
                 except Exception as error:
                     reason = str(error) if isinstance(error, RerankerError) else "provider_error"
                     rerank_status, rerank_reason = "fallback", reason if reason in {"empty_result", "malformed_response", "partial_result"} else "provider_error"
-            rerank_duration = round((time.monotonic() - rerank_started) * 1000, 2)
+            rerank_duration = RetrievalTelemetry.elapsed(rerank_started)
         for rank, candidate in enumerate(results[:limit], 1):
             candidate.final_rank = rank
         gate_enabled = bool(getattr(config, "relevance_gate_enabled", True))
@@ -355,7 +382,9 @@ class RetrievalService:
         final_results = results[:limit]
         # Retrieval may use expanded conversation variants, but relevance must
         # be proven against the current user query, not inherited history.
+        gate_started = time.perf_counter()
         relevant_count = apply_relevance_gate(final_results, (plan.original_query,), gate_min_overlap) if gate_enabled else len(final_results)
+        relevance_gate_duration = RetrievalTelemetry.elapsed(gate_started)
         if not gate_enabled:
             for candidate in final_results:
                 candidate.relevant, candidate.relevance_reason = True, "disabled"
@@ -366,15 +395,26 @@ class RetrievalService:
                              "rerank_score": candidate.rerank_score, "final_rank": candidate.final_rank,
                              "relevant": candidate.relevant, "relevance_reason": candidate.relevance_reason}
                             for candidate in final_results]
-        self.last_diagnostics = self._diagnostics(mode, effective_mode, dense, lexical, failures, failure_reasons) | {
+        telemetry.fusion_ms, telemetry.reranking_ms = fusion_duration, rerank_duration if reranking_enabled else None
+        telemetry.relevance_gate_ms = relevance_gate_duration
+        telemetry.retrieval_total_ms = RetrievalTelemetry.elapsed(started)
+        telemetry.dense_candidates = len(dense)
+        telemetry.lexical_candidates = len(lexical)
+        telemetry.fused_candidates = len(fused)
+        telemetry.reranker_input_candidates = rerank_count
+        telemetry.reranked_candidates = reranked_count
+        telemetry.retrieved_candidates = len(final_results)
+        telemetry.relevant_candidates = relevant_count
+        self.last_telemetry = telemetry
+        self.last_diagnostics = self._diagnostics(mode, effective_mode, dense, lexical, failures, failure_reasons) | telemetry.as_dict() | {
                                    "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
                                    "query_variant_count": len(plan.variants), "query_expanded": plan.expanded,
                                    "query_variants": list(plan.variants),
-                                  "dense_duration_ms": dense_duration, "lexical_duration_ms": lexical_duration,
-                                  "fusion_duration_ms": fusion_duration,
+                                   "dense_duration_ms": telemetry.dense_search_ms, "lexical_duration_ms": telemetry.lexical_search_ms,
+                                   "fusion_duration_ms": fusion_duration,
                                   "reranking_enabled": reranking_enabled, "reranker_status": rerank_status,
                                   "reranker_reason": rerank_reason, "reranker_candidate_count": rerank_count,
-                                  "reranked_candidate_count": reranked_count, "rerank_duration_ms": rerank_duration,
+                                   "reranked_candidate_count": reranked_count, "rerank_duration_ms": telemetry.reranking_ms,
                                    "reranker_provider_id": getattr(self.reranker, "provider_id", None) if reranking_enabled else None,
                                    "reranker_model": getattr(self.reranker, "model_id", None) if reranking_enabled else None,
                                    "retrieved_candidate_count": len(final_results),
@@ -384,7 +424,7 @@ class RetrievalService:
                                     "relevance_gate_reason": "disabled" if not gate_enabled else None if relevant_count else "insufficient_evidence",
                                    "relevance_gate_min_term_overlap": gate_min_overlap,
                                    "candidate_scores": candidate_scores,
-                                   "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2)}
+                                   "retrieval_duration_ms": telemetry.retrieval_total_ms}
         return [candidate.as_dict() for candidate in final_results]
 
     def _diagnostics(self, configured_mode: str, effective_mode: str,

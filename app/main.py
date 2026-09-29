@@ -1187,7 +1187,9 @@ async def chat(req: ChatIn):
                         knowledge_outcome = (KnowledgeOutcome.NO_CANDIDATES if not retrieval else KnowledgeOutcome.NO_RELEVANT_EVIDENCE
                                              if not any(item.get("relevant", True) for item in retrieval) else KnowledgeOutcome.GROUNDING_APPLIED)
                         relevant = [item for item in retrieval if item.get("relevant", True)]
+                        context_started = asyncio.get_running_loop().time()
                         grounded_context = GroundedContext.build(notebook_id, req.content, relevant, max_chars) if relevant else None
+                        service.last_telemetry.grounded_context_ms = round((asyncio.get_running_loop().time() - context_started) * 1000, 2)
                         if not grounded_context or not grounded_context.retrieval_results:
                             knowledge_outcome = KnowledgeOutcome.NO_RELEVANT_EVIDENCE
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied",
@@ -1203,7 +1205,9 @@ async def chat(req: ChatIn):
                                                 "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results] if grounded_context else [],
                                                 "top_scores": [item.get("score") for item in grounded_context.retrieval_results] if grounded_context else [],
                                                 "grounded_context_created": grounded_context is not None,
-                                                **service.last_diagnostics,
+                                                 **service.last_diagnostics,
+                                                  "grounded_context_ms": service.last_telemetry.grounded_context_ms,
+                                                  "grounding_candidates": len(relevant),
                                                  "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                                "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context else None,
                                                 "context_chars": grounded_context.context_chars if grounded_context else 0, "grounding_context_chars": grounded_context.context_chars if grounded_context else 0,
@@ -1313,6 +1317,7 @@ async def chat(req: ChatIn):
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
             runtime_metadata["citation_count"] = len(notebook_citations)
+            runtime_metadata["cited_sources"] = len(notebook_citations)
             assistant_id = str(uuid.uuid4())
             with db() as c:
                 c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (assistant_id, cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now()))

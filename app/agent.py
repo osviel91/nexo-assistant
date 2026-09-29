@@ -147,6 +147,8 @@ class AgentRuntime:
                 telemetry = {**usage, "ttft_ms": round((first_content_at - request_started) * 1000, 2) if first_content_at else None,
                              "generation_duration_ms": round((completed_at - first_content_at) * 1000, 2) if first_content_at else None,
                              "total_duration_ms": round((completed_at - request_started) * 1000, 2)}
+                telemetry.update({"provider_ttft_ms": telemetry["ttft_ms"], "generation_ms": telemetry["generation_duration_ms"],
+                                  "total_request_ms": telemetry["total_duration_ms"]})
                 if telemetry.get("completion_tokens") and telemetry.get("generation_duration_ms"):
                     telemetry["tokens_per_second"] = round(telemetry["completion_tokens"] / (telemetry["generation_duration_ms"] / 1000), 2)
                     telemetry["tokens_per_second_source"] = "calculated"
