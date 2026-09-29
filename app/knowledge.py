@@ -51,6 +51,12 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         "final_top_k": (1, 50),
     }
     result = dict(values)
+    result.setdefault("retrieval_top_k", 5)
+    result.setdefault("retrieval_mode", "hybrid")
+    result.setdefault("dense_candidate_limit", 20)
+    result.setdefault("lexical_candidate_limit", 20)
+    result.setdefault("rrf_k", 60)
+    result.setdefault("final_top_k", result["retrieval_top_k"])
     for key, (low, high) in limits.items():
         try:
             value = int(result[key])
@@ -63,11 +69,9 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         raise KnowledgeConfigurationError("target_chunk_size must not exceed max_chunk_size")
     if result["overlap"] >= result["max_chunk_size"]:
         raise KnowledgeConfigurationError("overlap must be smaller than max_chunk_size")
-    result["retrieval_mode"] = str(result.get("retrieval_mode", "hybrid")).lower()
+    result["retrieval_mode"] = str(result["retrieval_mode"]).lower()
     if result["retrieval_mode"] not in {"dense", "lexical", "hybrid"}:
         raise KnowledgeConfigurationError("retrieval_mode must be dense, lexical, or hybrid")
-    if "final_top_k" not in values:
-        result["final_top_k"] = result["retrieval_top_k"]
     if not str(result.get("provider_id", "")).strip() or not str(result.get("model_id", "")).strip():
         raise KnowledgeConfigurationError("provider_id and model_id are required")
     return result

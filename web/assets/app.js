@@ -99,9 +99,18 @@ async function loadKnowledge() {
   if (config && providers.some((provider) => provider.id === config.provider_id)) $('#embedding-provider').value = config.provider_id;
   renderModels();
   if (config && [...$('#embedding-model').options].some((option) => option.value === config.model_id)) $('#embedding-model').value = config.model_id;
-  const fields = { target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_top_k: 'embedding-top-k', retrieval_max_context_chars: 'embedding-context' };
+  const fields = { retrieval_mode: 'embedding-mode', dense_candidate_limit: 'embedding-dense-candidates', lexical_candidate_limit: 'embedding-lexical-candidates', rrf_k: 'embedding-rrf-k', final_top_k: 'embedding-final-top-k', target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_max_context_chars: 'embedding-context' };
   if (config) Object.entries(fields).forEach(([key, id]) => { $(`#${id}`).value = config[key]; });
+  updateRetrievalControls();
   $('#knowledge-health').textContent = `${state.knowledge.health.ready} ready · ${state.knowledge.health.outdated} outdated · ${state.knowledge.health.failed} failed`;
+}
+
+function updateRetrievalControls() {
+  const mode = $('#embedding-mode').value;
+  $('#embedding-dense-candidates').disabled = mode === 'lexical';
+  $('#embedding-lexical-candidates').disabled = mode === 'dense';
+  $('#embedding-rrf-k').disabled = mode !== 'hybrid';
+  $('#embedding-mode').closest('form').classList.toggle('retrieval-hybrid', mode === 'hybrid');
 }
 
 async function loadTools() {
@@ -396,7 +405,7 @@ async function send() {
        chatPayload.tools_enabled = state.toolsEnabled;
        if (state.executionMode === 'chat') chatPayload.thinking = state.chatThinking;
       if (state.executionMode === 'agent') chatPayload.agent_profile_id = state.agentProfileId;
-     if (state.currentNotebookId) chatPayload.notebook_id = state.currentNotebookId;
+      if (state.currentNotebookId !== null) chatPayload.notebook_id = state.currentNotebookId;
      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chatPayload) });
     if (!response.ok) throw Error((await response.text()).slice(0, 300));
     const reader = response.body.getReader();
@@ -450,7 +459,7 @@ function renderConfig() {
   const runtime = state.lastRuntime || {};
   const row = (label, value) => value == null || value === '' ? '' : `<div class="config-value"><span>${label}</span> ${escapeHtml(value)}</div>`;
    const metrics = runtime.metrics || runtime;
-   const knowledge = runtime.knowledge_available ? `${row('Notebook', runtime.notebook_name)}${row('Status', runtime.knowledge_retrieval_applied ? 'Ready' : 'Unavailable')}${row('Retrieved chunks', runtime.retrieval_count)}${row('Cited sources', runtime.citation_count)}${row('Context size', runtime.context_chars)}` : row('Knowledge', 'Not available');
+   const knowledge = `${row('Notebook', runtime.notebook_name || 'Not bound')}${row('Knowledge', runtime.knowledge_status === 'available' || runtime.knowledge_available ? 'Available' : `Not available${runtime.knowledge_unavailable_reason ? ` (${runtime.knowledge_unavailable_reason})` : ''}`)}${row('Retrieval', runtime.retrieval_status || (runtime.knowledge_retrieval_applied ? 'applied' : 'not applied'))}${row('Retrieval reason', runtime.retrieval_reason)}${row('Grounding', runtime.grounding_status || (runtime.grounding_applied ? 'applied' : 'not applied'))}${row('Retrieval mode', runtime.retrieval_mode)}${row('Dense candidates', runtime.dense_candidate_count)}${row('Lexical candidates', runtime.lexical_candidate_count)}${row('Fused candidates', runtime.fused_candidate_count)}${row('Retrieved', runtime.retrieval_count)}${row('Grounding chunks', runtime.grounding_chunks)}${row('Context chars', runtime.context_chars)}${row('Retrieval duration', runtime.retrieval_duration_ms != null ? `${runtime.retrieval_duration_ms} ms` : null)}${row('Cited sources', runtime.citation_count)}`;
     const selectedModel = selected().model;
     const capabilities = selected().provider?.models.find((model) => model.id === selectedModel)?.capabilities || [];
     const thinkingEditor = !runtime.agent_profile_id && capabilities.includes('thinking') ? `<div class="config-block"><h3>THINKING</h3><label class="config-toggle"><input id="thinking-enabled" type="checkbox" ${state.chatThinking.enabled ? 'checked' : ''}> Enable supported thinking</label>${capabilities.includes('thinking-budget') ? `<label class="config-value">Budget <input id="thinking-budget" type="number" min="1" step="1" value="${escapeHtml(state.chatThinking.budget ?? '')}"></label>` : ''}<small class="config-note">Only adapter-declared capabilities are shown.</small></div>` : '';
@@ -552,9 +561,11 @@ $('#provider-form').onsubmit = async (event) => {
 
 $('#embedding-form').onsubmit = async (event) => {
   event.preventDefault();
-  const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_top_k: Number($('#embedding-top-k').value), retrieval_max_context_chars: Number($('#embedding-context').value) };
+  const finalTopK = Number($('#embedding-final-top-k').value);
+  const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_mode: $('#embedding-mode').value, dense_candidate_limit: Number($('#embedding-dense-candidates').value), lexical_candidate_limit: Number($('#embedding-lexical-candidates').value), rrf_k: Number($('#embedding-rrf-k').value), final_top_k: finalTopK, retrieval_top_k: finalTopK, retrieval_max_context_chars: Number($('#embedding-context').value) };
   try { const result = await api('/settings/embeddings', { method: 'PUT', body: JSON.stringify(body) }); await loadKnowledge(); toast(result.invalidated ? 'Saved; indexes are outdated' : 'Knowledge configuration saved'); } catch (error) { toast(error.message); }
 };
+$('#embedding-mode').onchange = updateRetrievalControls;
 $('#test-embedding').onclick = async () => { try { const result = await api('/settings/embeddings/test', { method: 'POST' }); toast(`${result.provider} / ${result.model} · ${result.status} · ${result.dimension}d · ${result.latency_ms}ms`); } catch (error) { toast(error.message); } };
 
 $('#agent-form').onsubmit = async (event) => {

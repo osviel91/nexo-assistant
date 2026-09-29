@@ -116,7 +116,7 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 self.assertEqual(tiel_notebook["runtime"]["notebook_id"], notebook["id"])
                 self.assertEqual(tiel_notebook["runtime"]["knowledge_retrieval_applied"], True)
                 self.assertEqual(tiel_notebook["runtime"]["retrieval_count"], 1)
-                self.assertEqual(tiel_notebook["runtime"]["retrieval_status"], "completed")
+                self.assertEqual(tiel_notebook["runtime"]["retrieval_status"], "applied")
                 self.assertEqual(tiel_notebook["runtime"]["retrieval_result_count"], 1)
                 self.assertTrue(tiel_notebook["runtime"]["grounding_applied"])
                 self.assertGreater(tiel_notebook["runtime"]["grounding_chunks"], 0)
@@ -134,20 +134,47 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 self.assertEqual(payload["messages"][1]["role"], "system")
                 self.assertIn("amethyst", payload["messages"][1]["content"])
                 self.assertNotIn("amethyst", tiel_no_notebook["payload"]["messages"][0]["content"])
+
+                bound_chat = self.run_chat(main, "five", "chat", None, notebook["id"])
+                inherited_chat = self.run_chat(main, "six", "chat", None, self.UNSET, bound_chat["conversation_id"])
+                self.assertEqual(inherited_chat["runtime"]["notebook_id"], notebook["id"])
+                self.assertTrue(inherited_chat["runtime"]["grounding_applied"])
+                self.assertTrue(any("amethyst" in str(message["content"]) for message in inherited_chat["payload"]["messages"]))
+                changed_model = self.run_chat(main, "model switch", "chat", None, self.UNSET, bound_chat["conversation_id"], model_id="Cyber-Tiel")
+                self.assertEqual(changed_model["runtime"]["notebook_id"], notebook["id"])
+
+                main.update_conversation(bound_chat["conversation_id"], main.ConversationPatch(execution_mode="agent", agent_profile_id=profile["id"]))
+                switched_agent = self.run_chat(main, "seven", "agent", profile["id"], self.UNSET, bound_chat["conversation_id"])
+                self.assertEqual(switched_agent["runtime"]["notebook_id"], notebook["id"])
+                main.update_conversation(bound_chat["conversation_id"], main.ConversationPatch(execution_mode="chat", agent_profile_id=None))
+                switched_chat = self.run_chat(main, "eight", "chat", None, self.UNSET, bound_chat["conversation_id"])
+                self.assertEqual(switched_chat["runtime"]["notebook_id"], notebook["id"])
+
+                cleared = self.run_chat(main, "nine", "chat", None, None, bound_chat["conversation_id"])
+                self.assertEqual(cleared["runtime"].get("retrieval_reason"), "notebook_not_bound")
+                self.assertFalse(cleared["runtime"].get("grounding_applied", False))
+                self.assertIsNone(main.get_conversation(bound_chat["conversation_id"])["conversation"]["notebook_id"])
             finally:
                 main.httpx.AsyncClient = old_client
                 main.DB_PATH = old_db
                 main.notebooks, main.ingestion, main.retrieval_service = old_notebooks, old_ingestion, old_retrieval
 
-    def run_chat(self, main, content, execution_mode, profile_id, notebook_id):
+    UNSET = object()
+
+    def run_chat(self, main, content, execution_mode, profile_id, notebook_id=UNSET, conversation_id=None, model_id="Raw"):
         Client.payloads = []
-        response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="Raw", content=content,
-                                                      execution_mode=execution_mode, agent_profile_id=profile_id, notebook_id=notebook_id)))
+        values = {"provider_id": "p", "model_id": model_id, "content": content,
+                  "execution_mode": execution_mode, "agent_profile_id": profile_id}
+        if conversation_id is not None:
+            values["conversation_id"] = conversation_id
+        if notebook_id is not self.UNSET:
+            values["notebook_id"] = notebook_id
+        response = asyncio.run(main.chat(main.ChatIn(**values)))
         body = asyncio.run(self.collect(response.body_iterator))
         packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
         done = next(packet for packet in packets if packet.get("done"))
         answer = "".join(packet.get("delta", "") for packet in packets)
-        return {"answer": answer, "runtime": done["runtime"], "citations": done["citations"], "payload": Client.payloads[0]}
+        return {"answer": answer, "runtime": done["runtime"], "citations": done["citations"], "payload": Client.payloads[0], "conversation_id": done["conversation_id"]}
 
     async def collect(self, iterator):
         chunks = []

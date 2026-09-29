@@ -159,6 +159,13 @@ class ChatIn(BaseModel):
     thinking: dict[str, Any] | None = None
 
 
+def resolve_notebook_id(request: ChatIn, conversation: sqlite3.Row | None) -> str | None:
+    """Resolve the conversation binding without conflating omitted and null."""
+    if "notebook_id" in request.model_fields_set:
+        return request.notebook_id
+    return conversation["notebook_id"] if conversation else None
+
+
 class PreferencesPatch(BaseModel):
     last_chat_model: str | None = None
     last_agent_profile: str | None = None
@@ -953,7 +960,7 @@ async def chat(req: ChatIn):
             raise HTTPException(400, "agent_profile_required")
         if mode == "chat":
             profile_id = None
-        notebook_id = req.notebook_id if "notebook_id" in req.model_fields_set else (conv["notebook_id"] if conv else None)
+        notebook_id = resolve_notebook_id(req, conv)
         if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
         if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
@@ -1015,7 +1022,9 @@ async def chat(req: ChatIn):
             "system_instructions_applied": bool(profile_config and profile_config.system_instructions),
             "notebook_id": notebook_id,
             "notebook_name": notebook["name"] if notebook else None,
-            "knowledge_available": bool(notebook_id),
+            "knowledge_available": bool(notebook_id and knowledge_config),
+            "knowledge_status": "available" if notebook_id and knowledge_config else "not_available",
+            "knowledge_unavailable_reason": None if notebook_id and knowledge_config else ("notebook_not_bound" if not notebook_id else "knowledge_not_configured"),
             "knowledge_retrieval_enabled": bool(notebook_id),
             "knowledge_indexed_sources": indexed_sources,
             "knowledge_embedding_model": knowledge_config.model_id if notebook_id and knowledge_config else None,
@@ -1023,6 +1032,9 @@ async def chat(req: ChatIn):
             "generation_model": selected_model_id,
             "soul_applied": bool(profile_config),
             "index_status": ("current" if indexed_sources else "not_indexed") if notebook_id else "not_requested",
+            "retrieval_status": "not_applied",
+            "retrieval_reason": None if notebook_id else "notebook_not_bound",
+            "grounding_status": "not_applied",
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
@@ -1072,7 +1084,8 @@ async def chat(req: ChatIn):
                         service = retrieval_service(client)
                         retrieval = await service.search(notebook_id, req.content, top_k)
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
-                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "completed",
+                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied" if grounded_context.retrieval_results else "not_applied",
+                                               "retrieval_reason": None if grounded_context.retrieval_results else "no_results",
                                                "retrieval_count": len(grounded_context.retrieval_results),
                                                "retrieval_result_count": len(grounded_context.retrieval_results),
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
@@ -1087,11 +1100,12 @@ async def chat(req: ChatIn):
                                                "grounding_chunks": len(grounded_context.retrieval_results),
                                                "grounding_applied": bool(grounded_context.retrieval_results),
                                                "context_truncated": grounded_context.truncated,
-                                               "knowledge_retrieval_applied": True}
+                                                "knowledge_retrieval_applied": bool(grounded_context.retrieval_results),
+                                                "grounding_status": "applied" if grounded_context.retrieval_results else "not_applied"}
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
-                    except (RetrievalError, ValueError, EmbeddingError):
+                    except (RetrievalError, ValueError, EmbeddingError) as error:
                         grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
-                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "failed", "retrieval_count": 0,
+                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "failed", "retrieval_reason": "embedding_unavailable" if isinstance(error, EmbeddingError) else "retrieval_failed", "retrieval_count": 0,
                                                "retrieval_result_count": 0,
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
                                                "retrieval_query_length": len(req.content),
@@ -1099,7 +1113,7 @@ async def chat(req: ChatIn):
                                                "grounded_context_created": True,
                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                                "context_chars": 0, "grounding_context_chars": 0, "grounding_chunks": 0, "grounding_applied": False, "context_truncated": False,
-                                               "knowledge_retrieval_applied": False}
+                                                "knowledge_retrieval_applied": False, "grounding_status": "not_applied"}
                         event_sink.finish_event(retrieve_event, "failed", {**retrieval_metadata, "error_code": "retrieval_unavailable"}, retrieval_metadata["retrieval_duration_ms"])
                     runtime_snapshot.update(retrieval_metadata)
                     _update_runtime_metadata(run_id, runtime_snapshot)

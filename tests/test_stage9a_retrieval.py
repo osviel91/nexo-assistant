@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from app.knowledge import KnowledgeConfigurationError, validate_configuration
+from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, validate_configuration
 from app.retrieval import RetrievalCandidate, RetrievalService, ReciprocalRankFusion, _deduplicate
 from app.vector_index import VectorSearchResult
 
@@ -21,6 +21,24 @@ class LexicalIndex:
 
 
 class Stage9ARetrievalTests(unittest.TestCase):
+    def test_configuration_serializes_stage9a_defaults(self):
+        values = {"provider_id": "p", "model_id": "m", "target_chunk_size": 10,
+                  "max_chunk_size": 20, "overlap": 1, "batch_size": 1,
+                  "retrieval_top_k": 5, "retrieval_max_context_chars": 1000}
+        configuration = validate_configuration(values)
+        self.assertEqual({key: configuration[key] for key in ("retrieval_mode", "dense_candidate_limit", "lexical_candidate_limit", "rrf_k", "final_top_k")},
+                         {"retrieval_mode": "hybrid", "dense_candidate_limit": 20, "lexical_candidate_limit": 20, "rrf_k": 60, "final_top_k": 5})
+
+    def test_configuration_round_trips_stage9a_values(self):
+        values = {"provider_id": "p", "model_id": "m", "target_chunk_size": 10,
+                  "max_chunk_size": 20, "overlap": 1, "batch_size": 1,
+                  "retrieval_top_k": 9, "retrieval_max_context_chars": 1000,
+                  "retrieval_mode": "lexical", "dense_candidate_limit": 31,
+                  "lexical_candidate_limit": 17, "rrf_k": 77, "final_top_k": 6}
+        configuration = EmbeddingConfiguration(id="c", config_version=1, created_at="now", updated_at="now", **values)
+        serialized = configuration.public()
+        self.assertEqual({key: validate_configuration({key: serialized[key] for key in values})[key] for key in values}, values)
+
     def test_rrf_is_deterministic_and_rewards_overlap(self):
         both = candidate("both")
         lexical = candidate("lexical")
