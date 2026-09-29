@@ -49,6 +49,7 @@ class ToolDefinition:
     handler: ToolHandler
     source: str = "native"
     module_id: str = ""
+    capabilities: tuple[str, ...] = ("tool-calling",)
 
 
 class ToolRegistry:
@@ -56,6 +57,8 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
 
     def register(self, tool: ToolDefinition) -> None:
+        if not tool.name or not isinstance(tool.parameters, dict) or tool.parameters.get("type") != "object":
+            raise ValueError("tool requires a stable name and object input schema")
         if tool.name in self._tools:
             raise ValueError(f"duplicate tool: {tool.name}")
         self._tools[tool.name] = tool

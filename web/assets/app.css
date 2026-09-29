@@ -142,6 +142,21 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 .message-body { white-space: normal; }
 .message-content > :first-child { margin-top: 0; }
 .message-content > :last-child { margin-bottom: 0; }
+.artifact { max-width: 100%; margin: 18px 0; padding: 16px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); }
+.artifact h3 { margin: 0; font-size: 15px; }
+.artifact > p { color: var(--color-text-muted); font-size: 12px; }
+.artifact-chart { max-width: 100%; overflow-x: auto; }
+.artifact-chart svg { display: block; width: 100%; min-width: 360px; height: auto; }
+.artifact-chart text { font: 11px var(--font-ui); }
+.artifact table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.artifact-table-wrap { max-width: 100%; overflow-x: auto; }
+.artifact th, .artifact td { padding: 8px 10px; border-bottom: 1px solid var(--color-border); text-align: left; white-space: nowrap; }
+.artifact th { color: var(--color-text-muted); }
+.artifact-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: var(--space-2); margin-top: 12px; }
+.artifact-metrics > div { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-elevated); }
+.artifact-metrics span, .artifact-metrics small { color: var(--color-text-muted); font-size: 11px; }
+.artifact-metrics strong { font-size: 18px; }
+.artifact iframe { display: block; width: 100%; min-height: 240px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: white; }
 .message-content p { margin: 0 0 14px; }
 .message-content h1, .message-content h2, .message-content h3, .message-content h4 { margin: 20px 0 8px; color: var(--text); line-height: 1.25; letter-spacing: -.025em; }
 .message-content h1 { font-size: 1.45em; }.message-content h2 { font-size: 1.28em; }.message-content h3 { font-size: 1.12em; }.message-content h4 { font-size: 1em; }

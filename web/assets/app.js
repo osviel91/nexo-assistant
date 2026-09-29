@@ -428,7 +428,8 @@ function renderMessages() {
       ? `<img class="attachment-preview" src="${escapeHtml(attachment.data_url)}" alt="${escapeHtml(attachment.name)}">`
       : `<span class="message-model">Adjunto: ${escapeHtml(attachment.name)}</span>`).join('');
     const sourceList = sources.length ? `<details class="message-sources"><summary>Sources · ${sources.length}</summary>${sources.map((source) => `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}<span>${escapeHtml(source.url)}</span></a>`).join('')}</details>` : '';
-    const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => { const location = citation.provenance?.map((item) => item.source_location || {}).find((item) => item.page != null || item.heading); const suffix = location?.page != null ? ` · page ${location.page}` : location?.heading ? ` · ${location.heading}` : ''; const excerpt = citation.excerpt ? `<details class="citation-excerpt"><summary>Retrieved excerpt</summary><p>${escapeHtml(citation.excerpt)}</p></details>` : ''; return `<div class="notebook-citation"><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}${escapeHtml(suffix)}<span>${escapeHtml(citation.status || 'Retrieved excerpt')}</span>${excerpt}</div>`; }).join('')}</details>` : '';
+     const notebookList = citations.length ? `<details class="message-sources notebook-sources"><summary>Notebook sources · ${citations.length}</summary>${citations.map((citation) => { const location = citation.provenance?.map((item) => item.source_location || {}).find((item) => item.page != null || item.heading); const suffix = location?.page != null ? ` · page ${location.page}` : location?.heading ? ` · ${location.heading}` : ''; const excerpt = citation.excerpt ? `<details class="citation-excerpt"><summary>Retrieved excerpt</summary><p>${escapeHtml(citation.excerpt)}</p></details>` : ''; return `<div class="notebook-citation"><strong>[${escapeHtml(citation.citation_key)}]</strong> ${escapeHtml(citation.source_title || 'Notebook source')}${escapeHtml(suffix)}<span>${escapeHtml(citation.status || 'Retrieved excerpt')}</span>${excerpt}</div>`; }).join('')}</details>` : '';
+    const artifacts = message.role === 'assistant' ? (message.artifacts || []).map(renderArtifact).join('') : '';
     const content = message.role === 'assistant' ? renderMarkdown(message.content) : escapeHtml(message.content).replace(/\n/g, '<br>');
     const runtime = message.runtime || {};
      const metrics = runtime.metrics || runtime;
@@ -437,13 +438,47 @@ function renderMessages() {
      const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
       const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button class="icon-button" data-copy-message="${escapeHtml(message.id)}" type="button" aria-label="Copy answer" title="Copy answer"><span aria-hidden="true">⧉</span></button><button class="icon-button" data-branch-message="${escapeHtml(message.id)}" type="button" aria-label="Branch from message" title="Branch from message"><span aria-hidden="true">⑂</span></button><button class="icon-button" data-details-message="${escapeHtml(message.id)}" type="button" aria-label="Show run details" title="Show run details"><span aria-hidden="true">ⓘ</span></button></div>` : '';
      const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
-      return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}<div class="message-content">${content}</div>${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
+       return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}<div class="message-content">${content}</div>${artifacts}${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
    }).join('');
     box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (!message) return; const copied = await copyText(message.content || ''); if (copied) { button.querySelector('span').textContent = '✓'; toast('Copied'); setTimeout(() => { if (button.isConnected) button.querySelector('span').textContent = '⧉'; }, 1200); } else toast('Copy failed'); }; });
     box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
     box.querySelectorAll('[data-details-message]').forEach((button) => { button.onclick = () => { state.lastRuntime = state.messages.find((item) => item.id === button.dataset.detailsMessage)?.runtime || null; $('#config-content').innerHTML = renderConfig(); openSurface('config'); bindConfig(); }; });
+    box.querySelectorAll('[data-copy-artifact]').forEach((button) => { button.onclick = async () => { const a = state.messages.flatMap((m) => m.artifacts || []).find((item) => item.id === button.dataset.copyArtifact); if (a && await copyText(JSON.stringify(a.data, null, 2))) toast('Data copied'); }; });
    if (state.followingBottom) $('#chat-view').scrollTop = $('#chat-view').scrollHeight;
    updateScrollButton();
+}
+
+function renderArtifact(a) {
+  const title = escapeHtml(a.title || 'Artifact');
+  const description = a.description ? `<p>${escapeHtml(a.description)}</p>` : '';
+  if (a.type === 'html') {
+    const fragment = String(a.data?.html || '').replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+    const srcdoc = `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"><meta name="viewport" content="width=device-width,initial-scale=1">${fragment}`;
+    return `<section class="artifact"><h3>${title}</h3>${description}<iframe title="${title}" sandbox="" referrerpolicy="no-referrer" srcdoc="${escapeHtml(srcdoc)}"></iframe></section>`;
+  }
+  if (a.type === 'table') {
+    const { columns = [], rows = [] } = a.data || {};
+    const names = columns.map((c) => typeof c === 'string' ? c : c.label || c.name);
+    return `<section class="artifact"><h3>${title}</h3>${description}<div class="artifact-table-wrap"><table><thead><tr>${names.map((n) => `<th>${escapeHtml(n)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${columns.map((c, i) => `<td>${escapeHtml(Array.isArray(r) ? r[i] : r[typeof c === 'string' ? c : c.key])}</td>`).join('')}</tr>`).join('')}</tbody></table></div><button class="text-button" data-copy-artifact="${escapeHtml(a.id)}">Copy data</button></section>`;
+  }
+  if (a.type === 'metrics') return `<section class="artifact"><h3>${title}</h3>${description}<div class="artifact-metrics">${(a.data || []).map((m) => `<div><span>${escapeHtml(m.label)}</span><strong>${escapeHtml(m.value)}${m.unit ? ` ${escapeHtml(m.unit)}` : ''}</strong>${m.delta != null ? `<small>${escapeHtml(m.delta)}${m.trend ? ` · ${escapeHtml(m.trend)}` : ''}</small>` : ''}</div>`).join('')}</div></section>`;
+  const data = a.data || {}, labels = data.labels || [], series = data.series || [];
+  let svg = '';
+  if (a.type === 'pie') {
+    const vals = series[0]?.values || [], total = vals.reduce((x, y) => x + y, 0) || 1;
+    let start = 0;
+    const colors = ['var(--color-accent)', 'var(--color-warning)', 'var(--color-success)', '#9b8ad1', '#da8b75'];
+    svg = `<svg viewBox="0 0 240 180" role="img" aria-label="${title}">${vals.map((v, i) => { const part = v / total, dash = part * 314, offset = -start * 314; start += part; return `<circle cx="90" cy="90" r="50" fill="none" stroke="${colors[i % colors.length]}" stroke-width="26" stroke-dasharray="${dash} ${314 - dash}" stroke-dashoffset="${offset}" transform="rotate(-90 90 90)"/>`; }).join('')}<text x="160" y="35" fill="var(--color-text-primary)">${labels.map((l, i) => `<tspan x="160" dy="${i ? 22 : 0}">${escapeHtml(l)}: ${escapeHtml(vals[i])}</tspan>`).join('')}</text></svg>`;
+  } else {
+    const vals = a.type === 'scatter' ? (data.points || []).map((p) => p.y) : series.flatMap((s) => s.values || []);
+    const max = Math.max(...vals, 1), n = a.type === 'scatter' ? (data.points || []).length : labels.length, step = 700 / Math.max(n, 1);
+    const paths = a.type === 'scatter' ? `<g fill="var(--color-accent)">${data.points.map((p) => `<circle cx="${40 + (p.x / Math.max(...data.points.map((q) => q.x), 1)) * 680}" cy="${160 - p.y / max * 130}" r="4"/>`).join('')}</g>` : series.map((s, si) => {
+      const pts = s.values.map((v, i) => [40 + i * step + step / 2, 160 - v / max * 130]);
+      return a.type === 'line' ? `<polyline fill="none" stroke="${si ? 'var(--color-warning)' : 'var(--color-accent)'}" stroke-width="3" points="${pts.map((p) => p.join(',')).join(' ')}"/>` : pts.map(([x, y], i) => `<rect x="${x - step * .3 + si * step * .3}" y="${y}" width="${step * .28}" height="${160 - y}" fill="${si ? 'var(--color-warning)' : 'var(--color-accent)'}"/>`).join('');
+    }).join('');
+    svg = `<svg viewBox="0 0 760 210" role="img" aria-label="${title}"><path d="M40 20V160H750" fill="none" stroke="var(--color-border)"/>${paths}${labels.map((l, i) => `<text x="${40 + i * step + step / 2}" y="184" text-anchor="middle" fill="var(--color-text-muted)">${escapeHtml(l)}</text>`).join('')}</svg>`;
+  }
+  return `<section class="artifact"><h3>${title}</h3>${description}<div class="artifact-chart">${svg}</div><button class="text-button" data-copy-artifact="${escapeHtml(a.id)}">Copy data</button></section>`;
 }
 
 function activityLabel(activity) {
@@ -557,7 +592,8 @@ async function send() {
          if (data.status) toast(data.message);
          if (data.activity) { if (data.activity.type === 'REASON') state.streamTimestamps.reasoning_started ||= performance.now(); updateStreamingActivity(data.activity); }
          if (data.delta) { state.streamTimestamps.first_answer_delta ||= performance.now(); state.activity = { type: 'RESPOND', status: 'running' }; answer += data.delta; state.messages.at(-1).content = answer; updateStreamingActivity(state.activity); updateStreamingAnswer(answer); }
-       if (data.done) { state.streamTimestamps.completed = performance.now(); state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
+        if (data.artifact) { state.messages.at(-1).artifacts ||= []; state.messages.at(-1).artifacts.push(data.artifact); renderMessages(); }
+        if (data.done) { state.streamTimestamps.completed = performance.now(); state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], artifacts: data.artifacts || state.messages.at(-1).artifacts || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
       }
       if (done) break;
     }

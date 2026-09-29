@@ -14,6 +14,7 @@ class ToolCatalogEntry:
     parameters: dict[str, Any]
     source: str
     module_id: str | None
+    capabilities: tuple[str, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return copy.deepcopy({
@@ -22,6 +23,7 @@ class ToolCatalogEntry:
             "parameters": self.parameters,
             "source": self.source,
             "module_id": self.module_id,
+            "capabilities": list(self.capabilities),
         })
 
 
@@ -43,6 +45,7 @@ class EffectiveToolSet:
                     tool.handler,
                     tool.source,
                     tool.module_id,
+                    tool.capabilities,
                 )
                 for tool in self._tools
             ),
@@ -80,7 +83,7 @@ class ToolCatalog:
 
     def entries(self) -> tuple[ToolCatalogEntry, ...]:
         return tuple(
-            ToolCatalogEntry(tool.name, tool.description, tool.parameters, tool.source, tool.module_id or None)
+            ToolCatalogEntry(tool.name, tool.description, tool.parameters, tool.source, tool.module_id or None, tool.capabilities)
             for tool in self._tools
         )
 

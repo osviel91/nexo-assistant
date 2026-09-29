@@ -328,6 +328,13 @@ def _migration_16(connection: sqlite3.Connection) -> None:
 MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14), (15, _migration_15), (16, _migration_16))
 
 
+def _migration_17(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "messages", "artifacts", "TEXT NOT NULL DEFAULT '[]'")
+
+
+MIGRATIONS = MIGRATIONS + ((17, _migration_17),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

@@ -79,6 +79,7 @@ class AgentRuntime:
         answer = ""
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []
+        artifacts: list[dict[str, Any]] = []
         tool_rounds = 0
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
@@ -158,7 +159,8 @@ class AgentRuntime:
                     telemetry["tokens_per_second_source"] = "calculated"
                 if usage:
                     telemetry["usage_source"] = "provider"
-                yield {"complete": True, "answer": answer, "sources": sources, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry}
+                yield {"complete": True, "answer": answer, "sources": sources, "artifacts": artifacts, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry,
+                       "native_tool_calls": sum(name.startswith("native.") for name in tools_used)}
                 return
             if tool_rounds >= self.limits.max_tool_rounds:
                 yield {"error": "Se alcanzó el límite de rondas de herramientas."}
@@ -211,6 +213,13 @@ class AgentRuntime:
                         sources.append({"title": item.get("title", "Fuente"), "url": item.get("url", "")})
                         numbered.append(item)
                     result["results"] = numbered
+                if isinstance(result.get("artifacts"), list):
+                    for artifact in result["artifacts"]:
+                        if len(artifacts) >= 5:
+                            break
+                        artifacts.append(artifact)
+                        yield {"artifact": artifact}
+                    result = {key: value for key, value in result.items() if key != "artifacts"}
                 result_text = self._serialize_tool_result(result)
                 if result.get("error"):
                     yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}

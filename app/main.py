@@ -32,6 +32,7 @@ from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor
+from app.native_tools import register_native_tools
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
 from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookRepository, NotebookService, NotebookSourceNotFoundError, NotebookValidationError
@@ -54,6 +55,7 @@ MAX_UPLOAD = int(os.getenv("NEXO_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
+register_native_tools(module_registry.context)
 agent_runtime = AgentRuntime(AgentRuntimeLimits(max_tool_rounds=3, max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
 exposure_policy = ExposurePolicy()
 shadow_tasks: set[asyncio.Task[None]] = set()
@@ -998,7 +1000,7 @@ def get_conversation(cid: str):
         else:
             item["status"] = "valid"
         citation_map.setdefault(citation["message_id"], []).append(item)
-    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "runtime": public_runtime(json.loads(m["runtime_metadata"] or "{}")), "citations": citation_map.get(m["id"], [])} for m in msgs]}
+    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "artifacts": json.loads(m["artifacts"] or "[]"), "runtime": public_runtime(json.loads(m["runtime_metadata"] or "{}")), "citations": citation_map.get(m["id"], [])} for m in msgs]}
 
 
 @app.delete("/api/conversations/{cid}")
@@ -1048,8 +1050,8 @@ def branch_conversation(cid: str, message_id: str):
         messages = connection.execute("SELECT * FROM messages WHERE conversation_id=? AND created_at<=? ORDER BY created_at, id", (cid, selected["created_at"])).fetchall()
         for message in messages:
             new_id = str(uuid.uuid4())
-            connection.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                               (new_id, branch_id, message["role"], message["content"], message["provider_id"], message["model_id"], message["attachments"], message["sources"], message["runtime_metadata"], message["created_at"]))
+            connection.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at,artifacts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                               (new_id, branch_id, message["role"], message["content"], message["provider_id"], message["model_id"], message["attachments"], message["sources"], message["runtime_metadata"], message["created_at"], message["artifacts"]))
             citations = connection.execute("SELECT * FROM message_citations WHERE message_id=?", (message["id"],)).fetchall()
             for citation in citations:
                 fields = [citation[key] for key in ("citation_key", "notebook_id", "source_id", "document_id", "chunk_id", "canonical_start", "canonical_end", "provenance", "document_content_hash", "chunk_content_hash")]
@@ -1196,6 +1198,7 @@ async def chat(req: ChatIn):
 
     async def events():
         nonlocal grounded_context, knowledge_outcome
+        artifacts: list[dict[str, Any]] = []
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
@@ -1326,6 +1329,10 @@ async def chat(req: ChatIn):
                     if "activity" in event:
                         yield "data: " + json.dumps({"activity": event["activity"]}) + "\n\n"
                         continue
+                    if "artifact" in event:
+                        artifacts.append(event["artifact"])
+                        yield "data: " + json.dumps({"artifact": event["artifact"]}) + "\n\n"
+                        continue
                     if "delta" in event:
                         yield "data: " + json.dumps({"delta": event["delta"]}) + "\n\n"
                     elif "status" in event:
@@ -1336,8 +1343,11 @@ async def chat(req: ChatIn):
                         return
                     elif event.get("complete"):
                         answer, sources = event["answer"], event["sources"]
+                        artifacts = event.get("artifacts", artifacts)
                         telemetry = {key: value for key, value in event.get("telemetry", {}).items() if value is not None}
                         runtime_metadata = {**runtime_snapshot, **telemetry}
+                        runtime_metadata.update({"tool_calls": len(event.get("tools_used", [])), "native_tool_calls": event.get("native_tool_calls", 0),
+                                                 "artifact_count": len(artifacts), "artifact_types": [item.get("type") for item in artifacts]})
                         runtime_metadata["input_tokens"] = runtime_metadata.get("prompt_tokens")
                         runtime_metadata["output_tokens"] = runtime_metadata.get("completion_tokens")
                         runtime_metadata["metrics"] = normalized_metrics(runtime_metadata)
@@ -1353,7 +1363,7 @@ async def chat(req: ChatIn):
             runtime_metadata["cited_sources"] = len(notebook_citations)
             assistant_id = str(uuid.uuid4())
             with db() as c:
-                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (assistant_id, cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now()))
+                c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at,artifacts) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (assistant_id, cid, "assistant", answer, selected_provider_id, selected_model_id, "[]", json.dumps(sources), json.dumps(runtime_metadata), now(), json.dumps(artifacts)))
                 for citation_key, result in notebook_citations:
                     c.execute("""INSERT INTO message_citations
                         (id,message_id,citation_key,notebook_id,source_id,document_id,chunk_id,canonical_start,canonical_end,provenance,document_content_hash,chunk_content_hash)
@@ -1365,7 +1375,7 @@ async def chat(req: ChatIn):
             live_runtime = public_runtime(runtime_metadata)
             if thinking_flags["reasoning-content"] and model_adapter.reasoning_content:
                 live_runtime["thinking"]["content"] = model_adapter.reasoning_content
-            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "message_id": assistant_id, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "citations": citation_payload, "runtime": live_runtime}) + "\n\n"
+            yield "data: " + json.dumps({"done": True, "conversation_id": cid, "message_id": assistant_id, "provider_id": selected_provider_id, "model_id": selected_model_id, "sources": sources, "artifacts": artifacts, "citations": citation_payload, "runtime": live_runtime}) + "\n\n"
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
