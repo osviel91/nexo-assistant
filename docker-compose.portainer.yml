@@ -1,4 +1,10 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+
   nexo-chat:
     build: .
     restart: unless-stopped
@@ -13,6 +19,10 @@ services:
       NEXO_EMBEDDING_MODEL: "${NEXO_EMBEDDING_MODEL:-embedding-model}"
       NEXO_EMBEDDING_TIMEOUT: "${NEXO_EMBEDDING_TIMEOUT:-30}"
       NEXO_EMBEDDING_BATCH_SIZE: "${NEXO_EMBEDDING_BATCH_SIZE:-32}"
+      NEXO_VECTOR_STORE: "${NEXO_VECTOR_STORE:-qdrant}"
+      NEXO_QDRANT_URL: "${NEXO_QDRANT_URL:-http://qdrant:6333}"
+      NEXO_QDRANT_API_KEY: "${NEXO_QDRANT_API_KEY:-}"
+      NEXO_QDRANT_COLLECTION: "${NEXO_QDRANT_COLLECTION:-nexo_chunks}"
       NEXO_MODULES: "${NEXO_MODULES:-attachments}"
       NEXO_SEARXNG_URL: "${NEXO_SEARXNG_URL:-}"
       NEXO_SEARXNG_LANGUAGE: "${NEXO_SEARXNG_LANGUAGE:-all}"
@@ -29,8 +39,11 @@ services:
       NEXO_DECISION_SHADOW: "${NEXO_DECISION_SHADOW:-false}"
     volumes:
       - nexo-data:/data
+    depends_on:
+      - qdrant
     mem_limit: ${NEXO_MEMORY_LIMIT:-768m}
     cpus: ${NEXO_CPU_LIMIT:-1.0}
 
 volumes:
   nexo-data:
+  qdrant-data:

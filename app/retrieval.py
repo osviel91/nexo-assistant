@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from app.chunking import ChunkingConfig, chunk_document
 from app.embeddings import EmbeddingError, EmbeddingProvider, validate_batch
 from app.vector_index import SQLiteVectorIndex, VectorIndex
+from app.vector_store import VectorSearchFilters, VectorStore
 from app.knowledge import EmbeddingConfiguration
 from app.reranking import Reranker, RerankerError, with_timeout
 
@@ -81,13 +82,16 @@ class Retriever(Protocol):
 
 
 class DenseRetriever:
-    def __init__(self, provider: EmbeddingProvider, index: VectorIndex, identity: dict | None = None) -> None:
-        self.provider, self.index, self.identity = provider, index, identity
+    def __init__(self, provider: EmbeddingProvider, index: VectorIndex, identity: dict | None = None,
+                 vector_store: VectorStore | None = None) -> None:
+        self.provider, self.index, self.identity, self.vector_store = provider, index, identity, vector_store
 
     async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]:
         batch = await self.provider.embed([query.text])
         validate_batch(batch, 1)
-        if hasattr(self.index, "search_candidates"):
+        if self.vector_store is not None:
+            results = self.vector_store.search(batch.vectors[0], VectorSearchFilters(notebook_id=query.notebook_id, identity=self.identity), query.dense_limit)
+        elif hasattr(self.index, "search_candidates"):
             results = self.index.search_candidates(query.notebook_id, batch.vectors[0], self.identity)
         else:
             results = self.index.search(query.notebook_id, batch.vectors[0], query.dense_limit, self.identity)
@@ -157,11 +161,12 @@ class RetrievalService:
                  config: ChunkingConfig | None = None, batch_size: int = 32,
                  embedding_config: EmbeddingConfiguration | None = None,
                  provider_id: str | None = None, model_id: str | None = None,
-                 reranker: Reranker | None = None) -> None:
+                 reranker: Reranker | None = None, vector_store: VectorStore | None = None) -> None:
         self.repository, self.index, self.provider = repository, index, provider
         self.config, self.batch_size = config or ChunkingConfig(), max(1, batch_size)
         self.embedding_config, self.provider_id, self.model_id = embedding_config, provider_id, model_id
         self.reranker = reranker
+        self.vector_store = vector_store
         self.last_diagnostics: dict[str, Any] = {}
 
     async def index_source(self, notebook_id: str, source_id: str) -> dict[str, Any]:
@@ -183,6 +188,9 @@ class RetrievalService:
                 identity[key] == value for key, value in current_identity.items() if key != "dimension"
             )
         if reusable:
+            if self.vector_store is not None:
+                if self.vector_store.count(VectorSearchFilters(document_id=document["id"])) != self._chunk_count(document["id"]):
+                    self.vector_store.upsert(self.index.records(document["id"]))
             self.repository.set_indexing_status(source_id, "ready", chunk_count=self._chunk_count(document["id"]))
             return self.status(source_id) | {"skipped": True}
         started = time.monotonic()
@@ -200,6 +208,10 @@ class RetrievalService:
             if self.embedding_config and vectors:
                 current_identity["dimension"] = len(vectors[0])
             indexed = self.index.upsert(chunks, vectors, current_identity if self.embedding_config else None)
+            if self.vector_store is not None:
+                self.vector_store.upsert([
+                    record for record in self.index.records(document["id"])
+                ])
             indexing_duration = round((time.monotonic() - started) * 1000, 2)
             self.repository.set_indexing_status(source_id, "ready", chunk_count=indexed, embedding_batches=batches,
                                                 embedding_duration_ms=embedding_duration, indexing_duration_ms=indexing_duration,
@@ -232,7 +244,7 @@ class RetrievalService:
         if mode in {"dense", "hybrid"}:
             phase_started = time.monotonic()
             try:
-                dense = await DenseRetriever(self.provider, self.index, identity).retrieve(query_model)
+                dense = await DenseRetriever(self.provider, self.index, identity, self.vector_store).retrieve(query_model)
             except Exception as error:
                 failures.append("dense")
                 failure_reasons["dense"] = "embedding_error" if isinstance(error, EmbeddingError) else "provider_error"

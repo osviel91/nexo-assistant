@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from app.chunking import DocumentChunk
 from app.embeddings import EmbeddingBatch, validate_batch
+from app.vector_store import VectorRecord
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,24 @@ class SQLiteVectorIndex:
             connection.execute("DELETE FROM document_chunks_fts WHERE chunk_id IN (SELECT id FROM document_chunks WHERE document_id=?)", (document_id,))
             connection.execute("DELETE FROM document_chunks WHERE document_id=?", (document_id,))
             connection.execute("DELETE FROM vector_index_identities WHERE document_id=?", (document_id,))
+
+    def records(self, document_id: str) -> list[VectorRecord]:
+        with self.connection_factory() as connection:
+            rows = connection.execute("SELECT id,notebook_id,source_id,document_id,embedding FROM document_chunks WHERE document_id=? AND embedding IS NOT NULL", (document_id,)).fetchall()
+            identity = connection.execute("SELECT * FROM vector_index_identities WHERE document_id=?", (document_id,)).fetchone()
+        return [VectorRecord(row["id"], json.loads(row["embedding"]), row["notebook_id"], row["source_id"], row["document_id"], dict(identity) if identity else None) for row in rows]
+
+    def hydrate(self, matches: list[tuple[str, float]], filters=None) -> list[VectorSearchResult]:
+        if not matches:
+            return []
+        placeholders = ",".join("?" for _ in matches)
+        with self.connection_factory() as connection:
+            rows = connection.execute(f"""SELECT dc.*, ns.title AS source_title, cd.content_hash AS document_content_hash
+                FROM document_chunks dc JOIN notebook_sources ns ON ns.id=dc.source_id
+                JOIN canonical_documents cd ON cd.id=dc.document_id
+                WHERE dc.id IN ({placeholders}) AND ns.indexing_status='ready'""", [item[0] for item in matches]).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        return [VectorSearchResult(match[0], match[1], by_id[match[0]]["notebook_id"], by_id[match[0]]["source_id"], by_id[match[0]]["document_id"], by_id[match[0]]["content"], by_id[match[0]]["canonical_start"], by_id[match[0]]["canonical_end"], json.loads(by_id[match[0]]["metadata"] or "{}").get("provenance", []), by_id[match[0]]["document_content_hash"], by_id[match[0]]["content_hash"], by_id[match[0]]["source_title"], by_id[match[0]]["ordinal"], json.loads(by_id[match[0]]["metadata"] or "{}")) for match in matches if match[0] in by_id]
 
     def fts_available(self) -> bool:
         with self.connection_factory() as connection:

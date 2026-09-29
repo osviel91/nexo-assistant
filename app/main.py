@@ -39,6 +39,7 @@ from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
 from app.retrieval import IndexingInProgressError, RetrievalError, RetrievalService
 from app.reranking import OpenAICompatibleReranker
 from app.vector_index import SQLiteVectorIndex
+from app.vector_store import LocalVectorStore, QdrantVectorStore, VectorStoreHealth
 from app.grounding import GroundedContext, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
 from app.chunking import ChunkingConfig
@@ -99,6 +100,8 @@ ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_roo
 
 
 def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
+    local_index = SQLiteVectorIndex(db, now)
+    external = configured_vector_store(local_index)
     configuration = embedding_configuration()
     if configuration:
         with db() as connection:
@@ -113,9 +116,9 @@ def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
         reranker = OpenAICompatibleReranker(client, reranker_row["base_url"], reranker_headers,
                                             configuration.reranker_provider_id, configuration.reranker_model) \
             if configuration.reranking_enabled and reranker_row and configuration.reranker_model else None
-        return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider,
+        return RetrievalService(notebooks.repository, local_index, provider,
                                 ChunkingConfig(configuration.target_chunk_size, configuration.max_chunk_size, configuration.overlap),
-                                configuration.batch_size, configuration, configuration.provider_id, configuration.model_id, reranker)
+                                configuration.batch_size, configuration, configuration.provider_id, configuration.model_id, reranker, external)
     base_url = os.getenv("NEXO_EMBEDDING_BASE_URL", "").strip()
     if not base_url:
         raise RetrievalError("embedding provider is not configured")
@@ -124,7 +127,19 @@ def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
         headers["Authorization"] = f"Bearer {os.getenv('NEXO_EMBEDDING_API_KEY')}"
     model_id = os.getenv("NEXO_EMBEDDING_MODEL", "embedding-model")
     provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, model_id)
-    return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider, batch_size=int(os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32")))
+    return RetrievalService(notebooks.repository, local_index, provider, batch_size=int(os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32")), vector_store=external)
+
+
+def configured_vector_store(local_index: SQLiteVectorIndex):
+    if os.getenv("NEXO_VECTOR_STORE", "local").strip().lower() != "qdrant":
+        return LocalVectorStore(local_index)
+    url = os.getenv("NEXO_QDRANT_URL", "").strip()
+    if not url:
+        raise RetrievalError("NEXO_QDRANT_URL is required when NEXO_VECTOR_STORE=qdrant")
+    try:
+        return QdrantVectorStore(url, os.getenv("NEXO_QDRANT_COLLECTION", "nexo_chunks"), local_index.hydrate, os.getenv("NEXO_QDRANT_API_KEY", ""))
+    except RuntimeError as error:
+        raise RetrievalError(str(error)) from error
 
 
 @app.on_event("startup")
@@ -359,7 +374,15 @@ def update_preferences(item: PreferencesPatch):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": app.version}
+    result = {"status": "ok", "version": app.version}
+    if os.getenv("NEXO_VECTOR_STORE", "local").strip().lower() == "qdrant":
+        try:
+            result["vector_store"] = configured_vector_store(SQLiteVectorIndex(db, now)).health().__dict__
+        except Exception as error:
+            result["vector_store"] = VectorStoreHealth("unavailable", "qdrant", str(error)[:240]).__dict__
+    else:
+        result["vector_store"] = VectorStoreHealth("ok", "local").__dict__
+    return result
 
 
 @app.get("/api/settings/embeddings")

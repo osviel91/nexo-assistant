@@ -1,4 +1,11 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: nexo-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+
   nexo-chat:
     build: .
     container_name: nexo-chat
@@ -14,6 +21,10 @@ services:
       NEXO_EMBEDDING_MODEL: "${NEXO_EMBEDDING_MODEL:-embedding-model}"
       NEXO_EMBEDDING_TIMEOUT: "${NEXO_EMBEDDING_TIMEOUT:-30}"
       NEXO_EMBEDDING_BATCH_SIZE: "${NEXO_EMBEDDING_BATCH_SIZE:-32}"
+      NEXO_VECTOR_STORE: "${NEXO_VECTOR_STORE:-qdrant}"
+      NEXO_QDRANT_URL: "${NEXO_QDRANT_URL:-http://qdrant:6333}"
+      NEXO_QDRANT_API_KEY: "${NEXO_QDRANT_API_KEY:-}"
+      NEXO_QDRANT_COLLECTION: "${NEXO_QDRANT_COLLECTION:-nexo_chunks}"
       # Enable optional modules with: attachments,web-search-searxng,decision-runtime
       NEXO_MODULES: "attachments"
       # Required only when web-search-searxng is enabled.
@@ -31,8 +42,11 @@ services:
       # NEXO_DECISION_SHADOW: "false"
     volumes:
       - nexo-data:/data
+    depends_on:
+      - qdrant
     mem_limit: 768m
     cpus: 1.0
 
 volumes:
   nexo-data:
+  qdrant-data:
