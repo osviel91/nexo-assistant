@@ -1172,7 +1172,10 @@ async def chat(req: ChatIn):
                         top_k = config.final_top_k if config else min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
                         max_chars = config.retrieval_max_context_chars if config else min(max(int(os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000")), 1000), 100000)
                         service = retrieval_service(client)
-                        retrieval = await service.search(notebook_id, req.content, top_k)
+                        retrieval = await service.search(
+                            notebook_id, req.content, top_k,
+                            [{"role": message["role"], "content": message["content"]} for message in history],
+                        )
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied" if grounded_context.retrieval_results else "not_applied",
                                                "retrieval_reason": None if grounded_context.retrieval_results else "no_results",

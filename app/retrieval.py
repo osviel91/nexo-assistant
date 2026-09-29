@@ -13,6 +13,7 @@ from app.vector_index import SQLiteVectorIndex, VectorIndex
 from app.vector_store import VectorSearchFilters, VectorStore
 from app.knowledge import EmbeddingConfiguration
 from app.reranking import Reranker, RerankerError, with_timeout
+from app.query_intelligence import QueryAnalyzer
 
 
 class RetrievalError(ValueError):
@@ -138,6 +139,16 @@ class ReciprocalRankFusion:
         return sorted(merged.values(), key=lambda item: (-item.fused_score, item.chunk_id))
 
 
+class MultiQueryFusion:
+    """Fuse variant rankings without changing candidate identity or provenance."""
+
+    def __init__(self, rrf: ReciprocalRankFusion | None = None) -> None:
+        self.rrf = rrf or ReciprocalRankFusion()
+
+    def fuse(self, rankings: list[list[RetrievalCandidate]], k: int = 60) -> list[RetrievalCandidate]:
+        return self.rrf.fuse([ranking for ranking in rankings if ranking], k)
+
+
 def _deduplicate(candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
     accepted: list[RetrievalCandidate] = []
     seen: set[str] = set()
@@ -161,12 +172,14 @@ class RetrievalService:
                  config: ChunkingConfig | None = None, batch_size: int = 32,
                  embedding_config: EmbeddingConfiguration | None = None,
                  provider_id: str | None = None, model_id: str | None = None,
-                 reranker: Reranker | None = None, vector_store: VectorStore | None = None) -> None:
+                 reranker: Reranker | None = None, vector_store: VectorStore | None = None,
+                 query_analyzer: QueryAnalyzer | None = None) -> None:
         self.repository, self.index, self.provider = repository, index, provider
         self.config, self.batch_size = config or ChunkingConfig(), max(1, batch_size)
         self.embedding_config, self.provider_id, self.model_id = embedding_config, provider_id, model_id
         self.reranker = reranker
         self.vector_store = vector_store
+        self.query_analyzer = query_analyzer or QueryAnalyzer()
         self.last_diagnostics: dict[str, Any] = {}
 
     async def index_source(self, notebook_id: str, source_id: str) -> dict[str, Any]:
@@ -225,7 +238,8 @@ class RetrievalService:
                                                 embedding_duration_ms=round((time.monotonic() - embedding_started) * 1000, 2))
             raise EmbeddingError("indexing failed") from error
 
-    async def search(self, notebook_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    async def search(self, notebook_id: str, query: str, limit: int = 5,
+                     conversation: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if not query.strip():
             raise RetrievalError("query must not be empty")
         limit = min(max(limit, 1), 50)
@@ -235,34 +249,49 @@ class RetrievalService:
                                      getattr(config, "dense_candidate_limit", max(limit * 4, 20)),
                                      getattr(config, "lexical_candidate_limit", max(limit * 4, 20)),
                                      getattr(config, "rrf_k", 60))
+        plan = self.query_analyzer.analyze(query, conversation)
         identity = self._identity({"content_hash": ""}) if config else None
         dense, lexical = [], []
+        dense_rankings: list[list[RetrievalCandidate]] = []
+        lexical_rankings: list[list[RetrievalCandidate]] = []
         failures: list[str] = []
         failure_reasons: dict[str, str] = {}
         dense_duration = lexical_duration = 0.0
         started = time.monotonic()
         if mode in {"dense", "hybrid"}:
             phase_started = time.monotonic()
-            try:
-                dense = await DenseRetriever(self.provider, self.index, identity, self.vector_store).retrieve(query_model)
-            except Exception as error:
-                failures.append("dense")
-                failure_reasons["dense"] = "embedding_error" if isinstance(error, EmbeddingError) else "provider_error"
+            for variant in plan.variants:
+                try:
+                    ranking = await DenseRetriever(self.provider, self.index, identity, self.vector_store).retrieve(
+                        RetrievalQuery(query_model.notebook_id, variant, query_model.limit, query_model.mode,
+                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k))
+                    dense_rankings.append(ranking)
+                except Exception as error:
+                    if "dense" not in failures:
+                        failures.append("dense")
+                        failure_reasons["dense"] = "embedding_error" if isinstance(error, EmbeddingError) else "provider_error"
             dense_duration = round((time.monotonic() - phase_started) * 1000, 2)
+            dense = [candidate for ranking in dense_rankings for candidate in ranking]
         if mode in {"lexical", "hybrid"}:
             phase_started = time.monotonic()
-            try:
-                lexical = await LexicalRetriever(self.index, identity).retrieve(query_model)
-            except Exception as error:
-                failures.append("lexical")
-                failure_reasons["lexical"] = "unavailable" if isinstance(error, RetrievalError) else "index_error"
+            for variant in plan.variants:
+                try:
+                    ranking = await LexicalRetriever(self.index, identity).retrieve(
+                        RetrievalQuery(query_model.notebook_id, variant, query_model.limit, query_model.mode,
+                                       query_model.dense_limit, query_model.lexical_limit, query_model.rrf_k))
+                    lexical_rankings.append(ranking)
+                except Exception as error:
+                    if "lexical" not in failures:
+                        failures.append("lexical")
+                        failure_reasons["lexical"] = "unavailable" if isinstance(error, RetrievalError) else "index_error"
             lexical_duration = round((time.monotonic() - phase_started) * 1000, 2)
+            lexical = [candidate for ranking in lexical_rankings for candidate in ranking]
         if not dense and not lexical and failures and len(failures) == (2 if mode == "hybrid" else 1):
             self.last_diagnostics = self._diagnostics(mode, "none", dense, lexical, failures, failure_reasons)
             if mode == "dense":
                 raise RetrievalError("dense retrieval is unavailable")
         fusion_started = time.monotonic()
-        fused = ReciprocalRankFusion().fuse([ranking for ranking in (dense, lexical) if ranking], query_model.rrf_k)
+        fused = MultiQueryFusion().fuse(dense_rankings + lexical_rankings, query_model.rrf_k)
         fusion_duration = round((time.monotonic() - fusion_started) * 1000, 2)
         for rank, candidate in enumerate(fused, 1):
             candidate.rrf_rank = rank
@@ -298,7 +327,9 @@ class RetrievalService:
         for rank, candidate in enumerate(results[:limit], 1):
             candidate.final_rank = rank
         self.last_diagnostics = self._diagnostics(mode, effective_mode, dense, lexical, failures, failure_reasons) | {
-                                  "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
+                                   "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
+                                   "query_variant_count": len(plan.variants), "query_expanded": plan.expanded,
+                                   "query_variants": list(plan.variants),
                                   "dense_duration_ms": dense_duration, "lexical_duration_ms": lexical_duration,
                                   "fusion_duration_ms": fusion_duration,
                                   "reranking_enabled": reranking_enabled, "reranker_status": rerank_status,
