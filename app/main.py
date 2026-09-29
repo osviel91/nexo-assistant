@@ -1179,31 +1179,32 @@ async def chat(req: ChatIn):
                             [{"role": message["role"], "content": message["content"]} for message in history],
                         )
                         relevant = [item for item in retrieval if item.get("relevant", True)]
-                        grounded_context = GroundedContext.build(notebook_id, req.content, relevant, max_chars)
-                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied" if grounded_context.retrieval_results else "not_applied",
-                                                "retrieval_reason": None if grounded_context.retrieval_results else ("insufficient_evidence" if retrieval else "no_results"),
-                                                "retrieval_count": len(grounded_context.retrieval_results),
-                                                "retrieval_result_count": len(grounded_context.retrieval_results),
+                        grounded_context = GroundedContext.build(notebook_id, req.content, relevant, max_chars) if relevant else None
+                        retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied",
+                                                "retrieval_reason": None,
+                                                "retrieval_count": len(retrieval),
+                                                "retrieval_result_count": len(retrieval),
                                                 "retrieved_candidate_count": len(retrieval),
                                                 "relevant_candidate_count": len(relevant),
-                                               "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
-                                               "retrieval_query_length": len(req.content),
-                                               "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results],
-                                               "top_scores": [item.get("score") for item in grounded_context.retrieval_results],
-                                               "grounded_context_created": True,
+                                                "relevance_gate_status": service.last_diagnostics.get("relevance_gate_status", "not_applied"),
+                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
+                                                "retrieval_query_length": len(req.content),
+                                                "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results] if grounded_context else [],
+                                                "top_scores": [item.get("score") for item in grounded_context.retrieval_results] if grounded_context else [],
+                                                "grounded_context_created": grounded_context is not None,
                                                 **service.last_diagnostics,
-                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
-                                              "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
-                                               "context_chars": grounded_context.context_chars, "grounding_context_chars": grounded_context.context_chars,
-                                               "grounding_chunks": len(grounded_context.retrieval_results),
-                                               "grounding_applied": bool(grounded_context.retrieval_results),
-                                               "context_truncated": grounded_context.truncated,
-                                                "knowledge_retrieval_applied": bool(grounded_context.retrieval_results),
-                                                "grounding_status": "applied" if grounded_context.retrieval_results else "not_applied"}
-                        retrieval_metadata["grounding_reason"] = None if grounded_context.retrieval_results else ("insufficient_evidence" if retrieval else "no_results")
+                                                 "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                               "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context else None,
+                                                "context_chars": grounded_context.context_chars if grounded_context else 0, "grounding_context_chars": grounded_context.context_chars if grounded_context else 0,
+                                                "grounding_chunks": len(grounded_context.retrieval_results) if grounded_context else 0,
+                                                "grounding_applied": bool(grounded_context and grounded_context.retrieval_results),
+                                                "context_truncated": grounded_context.truncated if grounded_context else False,
+                                                "knowledge_retrieval_applied": bool(retrieval),
+                                                "grounding_status": "applied" if grounded_context else "not_applied"}
+                        retrieval_metadata["grounding_reason"] = None if grounded_context else ("insufficient_evidence" if retrieval else "no_results")
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
                     except (RetrievalError, ValueError, EmbeddingError) as error:
-                        grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
+                        grounded_context = None
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "failed", "retrieval_reason": "embedding_unavailable" if isinstance(error, EmbeddingError) else "retrieval_failed", "retrieval_count": 0,
                                                "retrieval_result_count": 0,
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
@@ -1211,8 +1212,9 @@ async def chat(req: ChatIn):
                                                 "selected_chunk_ids": [], "top_scores": [],
                                                 "retrieved_candidate_count": 0, "relevant_candidate_count": 0,
                                                 "relevance_gate_applied": bool(getattr(embedding_configuration(), "relevance_gate_enabled", True)),
-                                                "relevance_gate_reason": "retrieval_failed",
-                                               "grounded_context_created": True,
+                                                 "relevance_gate_status": "not_applied",
+                                                 "relevance_gate_reason": "retrieval_failed",
+                                                "grounded_context_created": False,
                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                                "context_chars": 0, "grounding_context_chars": 0, "grounding_chunks": 0, "grounding_applied": False, "context_truncated": False,
                                                 "knowledge_retrieval_applied": False, "grounding_status": "not_applied"}

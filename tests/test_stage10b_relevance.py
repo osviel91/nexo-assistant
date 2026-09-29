@@ -34,6 +34,11 @@ class Stage10BRelevanceTests(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(item.relevance_reason == "insufficient_evidence" for item in results))
 
+    def test_gate_does_not_use_previous_turn_terms(self):
+        results = [candidate("old-context", "La tostada cae con mantequilla.")]
+        self.assertEqual(apply_relevance_gate(results, ("¿Qué dice el documento sobre Kubernetes?",), 1), 0)
+        self.assertFalse(results[0].relevant)
+
 
 if __name__ == "__main__":
     unittest.main()

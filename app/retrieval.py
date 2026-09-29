@@ -353,7 +353,9 @@ class RetrievalService:
         gate_enabled = bool(getattr(config, "relevance_gate_enabled", True))
         gate_min_overlap = int(getattr(config, "relevance_gate_min_term_overlap", 1))
         final_results = results[:limit]
-        relevant_count = apply_relevance_gate(final_results, plan.variants, gate_min_overlap) if gate_enabled else len(final_results)
+        # Retrieval may use expanded conversation variants, but relevance must
+        # be proven against the current user query, not inherited history.
+        relevant_count = apply_relevance_gate(final_results, (plan.original_query,), gate_min_overlap) if gate_enabled else len(final_results)
         if not gate_enabled:
             for candidate in final_results:
                 candidate.relevant, candidate.relevance_reason = True, "disabled"
@@ -378,7 +380,8 @@ class RetrievalService:
                                    "retrieved_candidate_count": len(final_results),
                                    "relevance_gate_applied": gate_enabled,
                                    "relevant_candidate_count": relevant_count,
-                                   "relevance_gate_reason": None if relevant_count else "insufficient_evidence",
+                                    "relevance_gate_status": "not_applied" if not gate_enabled else "accepted" if relevant_count else "rejected",
+                                    "relevance_gate_reason": "disabled" if not gate_enabled else None if relevant_count else "insufficient_evidence",
                                    "relevance_gate_min_term_overlap": gate_min_overlap,
                                    "candidate_scores": candidate_scores,
                                    "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2)}

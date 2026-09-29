@@ -70,6 +70,48 @@ class Stage9BRerankingTests(unittest.TestCase):
         self.assertEqual(service.last_diagnostics["reranker_reason"], "provider_error")
         self.assertNotIn("secret", str(service.last_diagnostics))
 
+    def test_ood_gate_rejects_candidates_regardless_of_reranker(self):
+        conversation = [{"role": "user", "content": "¿Cuál es la ley de perversidad de la naturaleza?"},
+                        {"role": "assistant", "content": "La tostada."}]
+        configurations = (
+            (configuration(), None, "disabled"),
+            (configuration(reranking_enabled=True, reranker_provider_id="rerank", reranker_model="murphy-reranker"), Reranker(), "applied"),
+            (configuration(reranking_enabled=True, reranker_provider_id="rerank", reranker_model="murphy-reranker"), FailingReranker(), "fallback"),
+        )
+        for config, reranker, rerank_status in configurations:
+            with self.subTest(rerank_status=rerank_status):
+                config = configuration(relevance_gate_enabled=True, **{key: value for key, value in {
+                    "reranking_enabled": config.reranking_enabled,
+                    "reranker_provider_id": config.reranker_provider_id,
+                    "reranker_model": config.reranker_model,
+                }.items() if value or key == "reranking_enabled"})
+                service = self.service(config, reranker)
+                results = asyncio.run(service.search("n", "¿Qué dice el documento sobre Kubernetes?", 2, conversation))
+                self.assertGreater(len(results), 0)
+                self.assertEqual(service.last_diagnostics["relevant_candidate_count"], 0)
+                self.assertEqual(service.last_diagnostics["relevance_gate_status"], "rejected")
+                self.assertEqual(service.last_diagnostics["relevance_gate_reason"], "insufficient_evidence")
+                self.assertTrue(all(not item["relevant"] for item in results))
+
+    def test_direct_and_conversational_queries_keep_murphy_evidence(self):
+        service = self.service(configuration(final_top_k=2))
+        direct = asyncio.run(service.search("n", "¿Cuál es la ley de perversidad de la naturaleza?", 2))
+        self.assertGreater(len(direct), 0)
+        self.assertGreater(service.last_diagnostics["relevant_candidate_count"], 0)
+        self.assertEqual(service.last_diagnostics["relevance_gate_status"], "accepted")
+        direct_context = GroundedContext.build("n", "direct", [item for item in direct if item["relevant"]], 1000)
+        self.assertIn("PERVERSIDAD", direct_context.retrieval_results[0]["content"])
+
+        follow_up = asyncio.run(service.search(
+            "n", "¿Y cuál es su corolario sobre la tostada?", 2,
+            [{"role": "user", "content": "¿Cuál es la ley de perversidad de la naturaleza?"}],
+        ))
+        self.assertGreater(len(follow_up), 0)
+        self.assertGreater(service.last_diagnostics["relevant_candidate_count"], 0)
+        self.assertEqual(service.last_diagnostics["relevance_gate_status"], "accepted")
+        follow_up_context = GroundedContext.build("n", "follow-up", [item for item in follow_up if item["relevant"]], 1000)
+        self.assertTrue(any("tostada" in item["content"] for item in follow_up_context.retrieval_results))
+
     def test_metrics_and_citation_mapping_are_structural(self):
         results = [{"chunk_id": "page-38", "source_id": "murphy", "page_number": 38}, {"chunk_id": "page-6", "source_id": "murphy", "page_number": 6}]
         relevant = {"chunk_ids": ["page-38"], "source_ids": [], "page_numbers": [38]}
