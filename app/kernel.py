@@ -86,6 +86,9 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
     def catalog_view(self):
         from app.tools import ToolCatalog
 

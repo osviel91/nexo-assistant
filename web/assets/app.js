@@ -219,6 +219,24 @@ async function loadTools() {
   renderLab();
 }
 
+async function loadMCP() {
+  const servers = await api('/mcp/servers');
+  $('#mcp-list').innerHTML = servers.map((server) => `<article class="provider-card"><div class="provider-card-head"><strong>${escapeHtml(server.name)}</strong><span class="settings-hint">${server.status === 'connected' ? '● Connected' : server.status === 'authentication_failed' ? '× Authentication failed' : server.status === 'unreachable' ? '× Unreachable' : server.enabled ? '○ Degraded' : '○ Disabled'}</span></div><p class="settings-hint">${escapeHtml(server.endpoint)} · ${server.tools.length} discovered</p><label class="boolean-setting"><span>Enable server</span><input type="checkbox" data-mcp-enabled="${escapeHtml(server.id)}" ${server.enabled ? 'checked' : ''}></label><div class="card-actions"><button data-mcp-connect="${escapeHtml(server.id)}">Connect / refresh</button><button data-mcp-edit="${escapeHtml(server.id)}">Edit</button><button data-mcp-delete="${escapeHtml(server.id)}">Remove</button></div>${server.tools.map((tool) => `<label class="boolean-setting"><span>${escapeHtml(tool.remote_name)} <small>${server.status === 'connected' ? 'available' : 'stale / unavailable'}</small></span><input type="checkbox" data-mcp-tool="${escapeHtml(server.id)}" data-tool-id="${escapeHtml(tool.id)}" ${tool.enabled ? 'checked' : ''} ${server.status !== 'connected' || !server.enabled ? 'disabled' : ''}></label>`).join('')}</article>`).join('') || '<p class="empty-providers">No MCP servers configured.</p>';
+  $('#mcp-list').querySelectorAll('[data-mcp-connect]').forEach((button) => { button.onclick = async () => { button.disabled = true; try { await api(`/mcp/servers/${button.dataset.mcpConnect}/connect`, { method: 'POST' }); await loadMCP(); await loadTools(); } catch (error) { toast(error.message); } }; });
+  $('#mcp-list').querySelectorAll('[data-mcp-tool]').forEach((input) => { input.onchange = async () => { await api(`/mcp/servers/${input.dataset.mcpTool}/tools/${encodeURIComponent(input.dataset.toolId)}`, { method: 'PATCH', body: JSON.stringify({ enabled: input.checked }) }); await loadTools(); }; });
+  $('#mcp-list').querySelectorAll('[data-mcp-enabled]').forEach((input) => { input.onchange = async () => { await api(`/mcp/servers/${input.dataset.mcpEnabled}`, { method: 'PATCH', body: JSON.stringify({ enabled: input.checked }) }); await loadMCP(); await loadTools(); }; });
+  $('#mcp-list').querySelectorAll('[data-mcp-edit]').forEach((button) => { button.onclick = () => { const server = servers.find((item) => item.id === button.dataset.mcpEdit); $('#mcp-id').value = server.id; $('#mcp-name').value = server.name; $('#mcp-slug').value = server.slug; $('#mcp-endpoint').value = server.endpoint; $('#mcp-timeout').value = server.timeout; $('#mcp-cancel').hidden = false; $('#mcp-form-title').textContent = 'Edit MCP server'; }; });
+  $('#mcp-list').querySelectorAll('[data-mcp-delete]').forEach((button) => { button.onclick = async () => { await api(`/mcp/servers/${button.dataset.mcpDelete}`, { method: 'DELETE' }); await loadMCP(); await loadTools(); }; });
+}
+
+$('#mcp-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const id = $('#mcp-id').value;
+  const body = { name: $('#mcp-name').value, slug: $('#mcp-slug').value, endpoint: $('#mcp-endpoint').value, timeout: Number($('#mcp-timeout').value), transport: 'streamable-http', enabled: true };
+  try { await api(`/mcp/servers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); event.target.reset(); $('#mcp-id').value = ''; $('#mcp-cancel').hidden = true; await loadMCP(); toast('MCP server saved'); } catch (error) { toast(error.message); }
+};
+$('#mcp-cancel').onclick = () => { $('#mcp-form').reset(); $('#mcp-id').value = ''; $('#mcp-cancel').hidden = true; };
+
 async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
 async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) { benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); benchmarkNotebook.value = state.currentNotebookId || state.notebooks[0]?.id || ''; } }
@@ -858,7 +876,7 @@ document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ct
 applyPreferences();
 (async () => {
   await loadPreferences();
-  const results = await Promise.allSettled([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]);
+  const results = await Promise.allSettled([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadMCP(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]);
   const failure = results.find((result) => result.status === 'rejected');
   if (failure) toast(failure.reason?.message || 'No se pudieron cargar todos los datos.');
 })();

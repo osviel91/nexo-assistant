@@ -2,247 +2,194 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
-from app.kernel import InterfaceExtension, ModuleContext, ModuleManifest, ToolDefinition, ToolExecutionContext
+from app.kernel import ModuleContext, ModuleManifest, ToolDefinition, ToolExecutionContext
 
-logger = logging.getLogger("nexo.mcp")
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+MAX_RESULT_CHARS = 12000
 
 
 class MCPProtocolError(Exception):
     pass
 
 
-class MCPModule:
-    manifest = ModuleManifest(
-        id="mcp",
-        name="Model Context Protocol tools",
-        version="1.0.0",
-        api_version=1,
-        capabilities=("mcp", "tools"),
-    )
+def validate_server(name: str, slug: str, transport: str, endpoint: str, timeout: float) -> None:
+    parsed = urlparse(endpoint)
+    if not name.strip() or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?", slug):
+        raise ValueError("Invalid server name or slug")
+    if transport != "streamable-http" or parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Use an unauthenticated http(s) Streamable HTTP endpoint")
+    if not 0.1 <= timeout <= 120:
+        raise ValueError("Timeout must be between 0.1 and 120 seconds")
+
+
+def normalized_schema(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise MCPProtocolError("Invalid input schema")
+    try:
+        safe = json.loads(json.dumps(schema))
+    except (TypeError, ValueError):
+        raise MCPProtocolError("Invalid input schema") from None
+    if len(json.dumps(safe)) > 16000:
+        raise MCPProtocolError("Input schema too large")
+    return safe
+
+
+class MCPManager:
+    """MCP transport and discovery boundary; persisted metadata is supplied by callbacks."""
+
+    manifest = ModuleManifest("mcp", "Model Context Protocol", "2.0.0", 1, ("mcp", "tools"))
     interface_extensions = ()
 
-    def __init__(self, client_factory: Callable[[str], Any] | None = None) -> None:
+    def __init__(self, repository: Any, client_factory: Callable[[str], Any] | None = None) -> None:
+        self.repository = repository
         self.client_factory = client_factory or self._sdk_client
-        self.servers: list[dict[str, Any]] = []
-        self.clients: dict[str, Any] = {}
-        self._contexts: dict[str, Any] = {}
+        self.context: ModuleContext | None = None
 
     def register(self, context: ModuleContext) -> None:
-        self.servers = parse_server_config(context.settings.get("mcp_servers", "[]"))
+        self.context = context
+        context.services["mcp"] = self
 
     def startup(self, context: ModuleContext) -> None:
-        try:
-            asyncio.run(self.startup_async(context))
-        except RuntimeError:
-            self._diagnose_all("mcp_connection_error")
-
-    async def startup_async(self, context: ModuleContext) -> None:
-        for server in self.servers:
-            if not server["enabled"]:
-                continue
-            try:
-                await self._connect_server(context, server)
-            except Exception as exc:
-                client = self.clients.pop(server["id"], None)
-                if client is not None:
-                    try:
-                        await client.__aexit__(None, None, None)
-                    except Exception:
-                        logger.exception("MCP cleanup failed", extra={"server_id": server["id"]})
-                self._fail(server, "mcp_protocol_error" if isinstance(exc, MCPProtocolError) else "mcp_connection_error")
-                logger.exception("MCP server startup failed", extra={"server_id": server["id"], "error_type": type(exc).__name__})
-
-    async def shutdown_async(self, context: ModuleContext) -> None:
-        for server_id, client in list(self.clients.items()):
-            try:
-                await client.__aexit__(None, None, None)
-            except Exception:
-                logger.exception("MCP server shutdown failed", extra={"server_id": server_id})
-        self.clients.clear()
-        self._contexts.clear()
+        self._sync_tools()
 
     def shutdown(self, context: ModuleContext) -> None:
-        try:
-            asyncio.run(self.shutdown_async(context))
-        except RuntimeError:
-            logger.error("MCP shutdown skipped because an event loop is active")
+        for tool in self.repository.tools():
+            context.tools.unregister(tool["id"])
 
     def run_hook(self, hook: str, context: ModuleContext, payload: object) -> None:
         return None
 
-    def catalog_status(self) -> dict[str, Any]:
-        return {
-            "servers": [
-                {
-                    "id": server["id"],
-                    "enabled": server["enabled"],
-                    "connected": server["connected"],
-                    "discovered_tools": server["discovered_tools"],
-                    "exposed_tools": server["exposed_tools"],
-                    "last_error": server["last_error"],
-                }
-                for server in self.servers
-            ]
-        }
-
-    async def _connect_server(self, context: ModuleContext, server: dict[str, Any]) -> None:
-        client = self.client_factory(server["url"])
-        await asyncio.wait_for(client.__aenter__(), server["timeout"])
-        self.clients[server["id"]] = client
-        self._contexts[server["id"]] = context
-        tools_result = await asyncio.wait_for(client.list_tools(), server["timeout"])
-        raw_tools = getattr(tools_result, "tools", None)
-        if raw_tools is None and isinstance(tools_result, dict):
-            raw_tools = tools_result.get("tools")
-        if not isinstance(raw_tools, list):
-            raise MCPProtocolError("tools/list returned an invalid result")
-        server["connected"] = True
-        for remote_tool in raw_tools:
-            self._register_tool(context, server, remote_tool)
-
-    def _register_tool(self, context: ModuleContext, server: dict[str, Any], remote_tool: Any) -> None:
-        name = getattr(remote_tool, "name", None)
-        description = getattr(remote_tool, "description", "")
-        schema = getattr(remote_tool, "inputSchema", None)
-        if isinstance(remote_tool, dict):
-            name = remote_tool.get("name")
-            description = remote_tool.get("description", "")
-            schema = remote_tool.get("inputSchema", remote_tool.get("input_schema"))
-        if not isinstance(name, str) or not name or not isinstance(description, str) or not isinstance(schema, dict):
-            self._diagnose(server, "mcp_protocol_error")
+    def _sync_tools(self) -> None:
+        if not self.context:
             return
-        if schema.get("type") != "object":
-            self._diagnose(server, "mcp_protocol_error")
-            return
-        server["discovered_tools"] += 1
-        if name not in server["allowed_tools"]:
-            return
-        exposed_name = namespace(server["id"], name)
-        if context.tools.has(exposed_name):
-            self._diagnose(server, "tool_name_collision")
-            return
+        for tool in self.repository.tools():
+            self.context.tools.unregister(tool["id"])
+        for tool in self.repository.tools(enabled=True):
+            server = self.repository.server(tool["server_id"])
+            if not server or not server["enabled"] or server["status"] != "connected" or self.context.tools.has(tool["id"]):
+                continue
+            async def invoke(execution: ToolExecutionContext, arguments: dict[str, Any], tool=tool, server=server):
+                return await self.call(server, tool, arguments)
+            self.context.tools.register(ToolDefinition(tool["id"], tool["description"], json.loads(tool["input_schema"]), invoke, "mcp", "mcp"))
 
-        async def handler(execution: ToolExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
-            return await self._call(server, name, arguments)
-
-        context.tools.register(ToolDefinition(exposed_name, description[:1000], schema, handler, "mcp", self.manifest.id))
-        server["exposed_tools"] += 1
-
-    async def _call(self, server: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        client = self.clients.get(server["id"])
-        if client is None or name not in server["allowed_tools"]:
-            return {"error": {"code": "tool_not_allowed", "message": "La herramienta MCP no está permitida."}}
+    async def refresh(self, server: dict[str, Any]) -> dict[str, Any]:
+        self.repository.status(server["id"], "connecting", None)
         try:
-            result = await asyncio.wait_for(client.call_tool(name, arguments), server["timeout"])
+            async with self.client_factory(server["endpoint"]) as client:
+                await asyncio.wait_for(client.initialize(), server["timeout"])
+                result = await asyncio.wait_for(client.list_tools(), server["timeout"])
+            raw_tools = getattr(result, "tools", None)
+            if raw_tools is None and isinstance(result, dict):
+                raw_tools = result.get("tools")
+            if not isinstance(raw_tools, list):
+                raise MCPProtocolError("Invalid tools/list result")
+            tools = []
+            for item in raw_tools:
+                get = item.get if isinstance(item, dict) else lambda key, default=None: getattr(item, key, default)
+                name = get("name")
+                if not isinstance(name, str) or not name or len(name) > 128:
+                    continue
+                schema = normalized_schema(get("inputSchema", get("input_schema")))
+                identity = f"mcp.{server['slug']}.{name}"
+                tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema)})
+            self.repository.replace_tools(server["id"], tools)
+            self.repository.status(server["id"], "connected", None)
+            self._sync_tools()
+            return self.repository.server(server["id"])
+        except Exception as error:
+            category = "authentication_failed" if getattr(error, "status_code", None) in (401, 403) else "discovery_failed" if isinstance(error, MCPProtocolError) else "unreachable"
+            self.repository.status(server["id"], category, category)
+            self._sync_tools()
+            raise
+
+    async def call(self, server: dict[str, Any], tool: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        status, truncated = "completed", False
+        try:
+            current_server = self.repository.server(server["id"])
+            if not current_server or not current_server["enabled"] or current_server["status"] != "connected":
+                status = "stale_tool"
+                return {"error": {"code": "stale_tool", "message": "MCP tool is no longer available."}}
+            schema = json.loads(tool["input_schema"])
+            properties = schema.get("properties", {})
+            if any(key not in properties for key in arguments) or any(key not in arguments for key in schema.get("required", [])):
+                return {"error": {"code": "invalid_arguments", "message": "Arguments do not match the MCP tool schema."}}
+            async with self.client_factory(server["endpoint"]) as client:
+                await asyncio.wait_for(client.initialize(), server["timeout"])
+                result = await asyncio.wait_for(client.call_tool(tool["remote_name"], arguments), server["timeout"])
+            if getattr(result, "is_error", False):
+                status = "mcp_protocol_error"
+                return {"error": {"code": "mcp_protocol_error", "message": "MCP tool returned an error."}}
+            raw_content = getattr(result, "content", None)
+            if not isinstance(raw_content, list):
+                raise MCPProtocolError("Malformed MCP result")
+            content = []
+            for item in raw_content:
+                if getattr(item, "type", "") == "text" and isinstance(getattr(item, "text", None), str):
+                    content.append(item.text)
+            structured = getattr(result, "structured_content", None)
+            payload = {"content": "\n".join(content)}
+            if structured is not None:
+                payload["structured_data"] = json.loads(json.dumps(structured, ensure_ascii=False))
+            raw = json.dumps(payload, ensure_ascii=False)
+            truncated = len(raw) > MAX_RESULT_CHARS
+            if truncated:
+                status = "truncated"
+                payload = {"content": raw[:MAX_RESULT_CHARS - 100], "truncated": True, "truncation_notice": "MCP result exceeded the safe context limit."}
+            return payload
         except asyncio.TimeoutError:
-            return {"error": {"code": "tool_timeout", "message": "La herramienta MCP agotó el tiempo de espera."}}
+            status = "invocation_timeout"
+            self.repository.status(server["id"], "unreachable", status)
+            self._sync_tools()
+            return {"error": {"code": "invocation_timeout", "message": "MCP tool timed out."}}
+        except MCPProtocolError:
+            status = "malformed_result"
+            self.repository.status(server["id"], "degraded", status)
+            self._sync_tools()
+            return {"error": {"code": "malformed_result", "message": "MCP server returned a malformed result."}}
         except Exception:
-            logger.exception("MCP tool call failed", extra={"server_id": server["id"], "tool": name})
-            return {"error": {"code": "tool_execution_error", "message": "La herramienta MCP no pudo completar la operación."}}
-        if getattr(result, "is_error", False):
-            return {"error": {"code": "tool_execution_error", "message": "El servidor MCP rechazó la operación."}}
-        structured = getattr(result, "structured_content", None)
-        if isinstance(structured, dict):
-            return structured
-        content = getattr(result, "content", None)
-        texts = [getattr(item, "text", "") for item in content or []]
-        return {"content": "\n".join(text for text in texts if isinstance(text, str))}
+            status = "mcp_unavailable"
+            self.repository.status(server["id"], "unreachable", status)
+            self._sync_tools()
+            return {"error": {"code": "mcp_unavailable", "message": "MCP server is unavailable."}}
+        finally:
+            self.repository.invocation(server["id"], tool["id"], round((time.monotonic() - started) * 1000, 2), status, truncated)
 
-    def _fail(self, server: dict[str, Any], code: str) -> None:
-        server["last_error"] = code
-
-    def _diagnose(self, server: dict[str, Any], code: str) -> None:
-        server["last_error"] = code
-        logger.error("MCP diagnostic", extra={"server_id": server["id"], "code": code})
-
-    def _diagnose_all(self, code: str) -> None:
-        for server in self.servers:
-            if server["enabled"]:
-                self._diagnose(server, code)
+    def catalog_status(self) -> dict[str, Any]:
+        return {"servers": self.repository.servers()}
 
     @staticmethod
-    def _sdk_client(url: str) -> Any:
+    def _sdk_client(endpoint: str) -> Any:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
-
-        return _SDKClient(url, ClientSession, streamablehttp_client)
+        return _SDKClient(endpoint, ClientSession, streamablehttp_client)
 
 
 class _SDKClient:
     def __init__(self, url: str, session_type: Any, transport: Any) -> None:
-        self.url = url
-        self.session_type = session_type
-        self.transport = transport
-        self._transport_context = None
-        self._session = None
+        self.url, self.session_type, self.transport = url, session_type, transport
 
-    async def __aenter__(self) -> "_SDKClient":
-        self._transport_context = self.transport(self.url)
-        read_stream, write_stream, _ = await self._transport_context.__aenter__()
-        self._session = self.session_type(read_stream, write_stream)
-        await self._session.__aenter__()
-        await self._session.initialize()
+    async def __aenter__(self):
+        self.transport_context = self.transport(self.url)
+        read, write, _ = await self.transport_context.__aenter__()
+        self.session = self.session_type(read, write)
+        await self.session.__aenter__()
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
-        if self._session is not None:
-            await self._session.__aexit__(*args)
-        if self._transport_context is not None:
-            await self._transport_context.__aexit__(*args)
+    async def __aexit__(self, *args):
+        await self.session.__aexit__(*args)
+        await self.transport_context.__aexit__(*args)
 
-    async def list_tools(self) -> Any:
-        return await self._session.list_tools()
+    async def initialize(self):
+        return await self.session.initialize()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self._session.call_tool(name, arguments)
+    async def list_tools(self):
+        return await self.session.list_tools()
 
-
-def namespace(server_id: str, tool_name: str) -> str:
-    safe_server = re.sub(r"[^A-Za-z0-9_-]", "_", server_id)
-    safe_tool = re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)
-    return f"mcp__{safe_server}__{safe_tool}"
-
-
-def parse_server_config(raw: Any) -> list[dict[str, Any]]:
-    try:
-        value = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(value, list):
-        return []
-    servers = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        server_id, url = item.get("id"), item.get("url")
-        parsed = urlparse(url) if isinstance(url, str) else None
-        allowed = item.get("allowed_tools", [])
-        if not isinstance(server_id, str) or not _SAFE_NAME.fullmatch(server_id):
-            continue
-        if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            continue
-        if not isinstance(allowed, list) or not all(isinstance(tool, str) for tool in allowed):
-            continue
-        try:
-            timeout = max(float(item.get("timeout", 15)), 0.1)
-        except (TypeError, ValueError):
-            continue
-        servers.append({
-            "id": server_id,
-            "url": url,
-            "enabled": item.get("enabled", True) is True,
-            "allowed_tools": set(allowed),
-            "timeout": timeout,
-            "connected": False,
-            "discovered_tools": 0,
-            "exposed_tools": 0,
-            "last_error": None,
-        })
-    return servers
+    async def call_tool(self, name, arguments):
+        return await self.session.call_tool(name, arguments)

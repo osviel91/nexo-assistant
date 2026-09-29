@@ -1,117 +1,143 @@
 import asyncio
+import json
+import sqlite3
 import unittest
 from types import SimpleNamespace
 
-from fastapi import FastAPI
-
 from app.kernel import ModuleContext, ToolExecutionContext, ToolRegistry
-from app.modules.mcp import MCPModule, namespace, parse_server_config
+from app.migrations import migrate
+from app.modules.mcp import MCPManager, MCPProtocolError, normalized_schema, validate_server
+from app.native_tools import register_native_tools
+from app.agent import AgentRunRequest, AgentRuntime
+from app.agent_model import ModelStreamChunk
+from app.tools import ExposurePolicy, ToolExecutor
+
+
+class Repo:
+    def __init__(self):
+        self.server_value = {"id": "s1", "slug": "demo", "endpoint": "http://localhost/mcp", "enabled": True, "timeout": .1, "status": "connected"}
+        self.items = []
+        self.diagnostics = []
+
+    def server(self, _): return self.server_value
+    def tools(self, enabled=None): return [t for t in self.items if enabled is None or t["enabled"] == enabled]
+    def replace_tools(self, _id, tools): self.items = [dict(t, enabled=False, server_id="s1") for t in tools]
+    def status(self, _id, status, error): self.server_value.update(status=status, error_category=error)
+    def invocation(self, server_id, tool_id, duration, status, truncated): self.diagnostics.append((server_id, tool_id, duration, status, truncated))
 
 
 class FakeClient:
-    def __init__(self, tools, result=None, error=False, delay=0):
-        self.tools = tools
-        self.result = result or SimpleNamespace(content=[SimpleNamespace(text="ok")], is_error=error)
-        self.delay = delay
-        self.calls = []
-        self.entered = False
-        self.closed = False
-
-    async def __aenter__(self):
-        self.entered = True
-        return self
-
-    async def __aexit__(self, *args):
-        self.closed = True
-
+    def __init__(self, tools=None, result=None, error=None, delay=0):
+        self.tools, self.result, self.error, self.delay = tools or [], result, error, delay
+        self.initialized = False
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    async def initialize(self): self.initialized = True
     async def list_tools(self):
+        if self.error: raise self.error
         return SimpleNamespace(tools=self.tools)
-
     async def call_tool(self, name, arguments):
-        self.calls.append((name, arguments))
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        if self.delay: await asyncio.sleep(self.delay)
+        if self.error: raise self.error
         return self.result
 
 
-def tool(name, schema=None):
-    return SimpleNamespace(name=name, description=name, inputSchema=schema or {"type": "object"})
-
-
 class MCPTests(unittest.TestCase):
-    def context(self, registry, config):
-        return ModuleContext(FastAPI(), {"mcp_servers": config}, registry)
+    def test_migration_and_server_transport_validation(self):
+        db = sqlite3.connect(":memory:")
+        migrate(db)
+        self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_servers'").fetchone())
+        validate_server("Demo", "demo", "streamable-http", "https://example.test/mcp", 15)
+        for args in [("x", "bad slug", "streamable-http", "https://x/mcp", 1), ("x", "x", "stdio", "https://x", 1), ("x", "x", "streamable-http", "https://u:p@x", 1), ("x", "x", "streamable-http", "https://x/mcp?token=secret", 1)]:
+            with self.assertRaises(ValueError): validate_server(*args)
 
-    def start(self, module, context):
-        module.register(context)
-        module.startup(context)
+    def test_refresh_stable_identity_conservative_enable_and_call(self):
+        repo, registry = Repo(), ToolRegistry()
+        client = FakeClient([{"name": "query", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}}], SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")], structured_content={"rows": [[1]]}, is_error=False))
+        manager = MCPManager(repo, lambda _: client)
+        manager.register(ModuleContext(None, {}, registry))
+        asyncio.run(manager.refresh(repo.server_value))
+        self.assertEqual(repo.items[0]["id"], "mcp.demo.query")
+        self.assertFalse(registry.has("mcp.demo.query"))
+        repo.items[0]["enabled"] = True
+        manager._sync_tools()
+        result = asyncio.run(registry.invoke("mcp.demo.query", ToolExecutionContext("c", "p", "m", 1), {"q": "x"}))
+        self.assertEqual(result["structured_data"], {"rows": [[1]]})
+        self.assertEqual(result["content"], "ok")
 
-    def test_disabled_server_does_not_connect(self):
-        called = []
-        module = MCPModule(lambda url: called.append(url))
-        self.start(module, self.context(ToolRegistry(), [{"id": "one", "url": "http://one", "enabled": False, "allowed_tools": ["x"]}]))
-        self.assertEqual(called, [])
-        self.assertEqual(module.catalog_status()["servers"][0]["exposed_tools"], 0)
-
-    def test_allowlist_and_empty_allowlist(self):
-        clients = {}
-
-        def factory(url):
-            client = FakeClient([tool("read"), tool("hidden")])
-            clients[url] = client
-            return client
-
+    def test_refresh_failure_keeps_stale_snapshot_but_unexposes_tools(self):
+        repo = Repo()
+        repo.items = [{"id": "mcp.demo.old", "server_id": "s1", "remote_name": "old", "description": "", "input_schema": '{"type":"object"}', "enabled": True}]
+        manager = MCPManager(repo, lambda _: FakeClient(error=OSError("offline")))
         registry = ToolRegistry()
-        module = MCPModule(factory)
-        self.start(module, self.context(registry, [{"id": "files", "url": "http://files", "allowed_tools": ["read"]}]))
-        self.assertEqual([d["function"]["name"] for d in registry.definitions()], ["mcp__files__read"])
-        self.assertEqual(clients["http://files"].entered, True)
+        manager.register(ModuleContext(None, {}, registry))
+        with self.assertRaises(OSError): asyncio.run(manager.refresh(repo.server_value))
+        self.assertEqual(repo.items[0]["id"], "mcp.demo.old")
+        self.assertEqual(repo.server_value["status"], "unreachable")
+        self.assertFalse(registry.has("mcp.demo.old"))
 
-        empty = ToolRegistry()
-        self.start(MCPModule(lambda url: FakeClient([tool("read")])), self.context(empty, [{"id": "empty", "url": "http://empty", "allowed_tools": []}]))
-        self.assertEqual(empty.definitions(), [])
+    def test_timeout_and_malformed_schema(self):
+        repo = Repo()
+        tool = {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object"}'}
+        manager = MCPManager(repo, lambda _: FakeClient(delay=.2))
+        result = asyncio.run(manager.call(repo.server_value, tool, {}))
+        self.assertEqual(result["error"]["code"], "invocation_timeout")
+        with self.assertRaises(MCPProtocolError): normalized_schema({"type": "array"})
 
-    def test_namespaces_and_executes_call(self):
-        clients = [FakeClient([tool("search")]), FakeClient([tool("search")])]
-        module = MCPModule(lambda url: clients.pop(0))
-        registry = ToolRegistry()
-        context = self.context(registry, [
-            {"id": "one", "url": "http://one", "allowed_tools": ["search"]},
-            {"id": "two", "url": "http://two", "allowed_tools": ["search"]},
-        ])
-        self.start(module, context)
-        self.assertEqual({d["function"]["name"] for d in registry.definitions()}, {"mcp__one__search", "mcp__two__search"})
-        result = asyncio.run(registry.invoke("mcp__one__search", ToolExecutionContext("c", "p", "m", 1), {"q": "x"}))
-        self.assertEqual(result, {"content": "ok"})
+    def test_large_response_reports_truncation_without_leaking_sensitive_inputs(self):
+        repo = Repo()
+        result = SimpleNamespace(content=[SimpleNamespace(type="text", text="x" * 16000)], structured_content=None, is_error=False)
+        manager = MCPManager(repo, lambda _: FakeClient(result=result))
+        response = asyncio.run(manager.call(repo.server_value, {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object","properties":{"password":{"type":"string"}}}'}, {"password": "never-log"}))
+        self.assertTrue(response["truncated"])
+        self.assertNotIn("never-log", json.dumps(repo.diagnostics))
 
-    def test_timeout_and_bad_schema_are_safe(self):
-        client = FakeClient([tool("bad", {"type": "string"}), tool("slow")], delay=0.2)
-        registry = ToolRegistry()
-        module = MCPModule(lambda url: client)
-        self.start(module, self.context(registry, [{"id": "one", "url": "http://one", "allowed_tools": ["bad", "slow"], "timeout": 0.1}]))
-        self.assertEqual([d["function"]["name"] for d in registry.definitions()], ["mcp__one__slow"])
-        result = asyncio.run(registry.invoke("mcp__one__slow", ToolExecutionContext("c", "p", "m", 1), {}))
-        self.assertEqual(result["error"]["code"], "tool_timeout")
+    def test_structured_mcp_result_can_feed_native_artifact_and_datetime_tools_coexist(self):
+        repo, registry = Repo(), ToolRegistry()
+        client = FakeClient([{"name": "query", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[], structured_content={"columns": ["day", "count"], "rows": [["2026-09-01", 4]]}, is_error=False))
+        manager = MCPManager(repo, lambda _: client)
+        context = ModuleContext(None, {}, registry)
+        register_native_tools(context)
+        manager.register(context)
+        asyncio.run(manager.refresh(repo.server_value))
+        repo.items[0]["enabled"] = True
+        manager._sync_tools()
+        execution = ToolExecutionContext("c", "p", "m", 1)
+        result = asyncio.run(registry.invoke("mcp.demo.query", execution, {}))
+        artifact = asyncio.run(registry.invoke("native.render_artifact", execution, {"type": "table", "title": "MCP data", "data": result["structured_data"]}))
+        clock = asyncio.run(registry.invoke("native.get_current_datetime", execution, {"timezone": "UTC"}))
+        self.assertEqual(artifact["artifacts"][0]["type"], "table")
+        self.assertTrue(clock["iso"].endswith("+00:00"))
 
-    def test_connection_failure_does_not_block_registry(self):
-        class Broken:
-            async def __aenter__(self):
-                raise OSError("offline")
+    def test_mcp_tool_uses_agent_runtime_and_tool_result_turn(self):
+        repo, registry = Repo(), ToolRegistry()
+        client = FakeClient([{"name": "query", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[SimpleNamespace(type="text", text="rows")], structured_content={"rows": [[2]]}, is_error=False))
+        manager = MCPManager(repo, lambda _: client)
+        manager.register(ModuleContext(None, {}, registry))
+        asyncio.run(manager.refresh(repo.server_value))
+        repo.items[0]["enabled"] = True
+        manager._sync_tools()
 
-        registry = ToolRegistry()
-        module = MCPModule(lambda url: Broken())
-        self.start(module, self.context(registry, [{"id": "down", "url": "http://down", "allowed_tools": ["x"]}]))
-        status = module.catalog_status()["servers"][0]
-        self.assertFalse(status["connected"])
-        self.assertEqual(status["last_error"], "mcp_connection_error")
-        self.assertEqual(registry.definitions(), [])
+        class Adapter:
+            model_id = "model"
+            def __init__(self): self.messages = []
+            async def stream(self, messages, tools, temperature=None):
+                self.messages = messages
+                if not any(message.get("role") == "tool" for message in messages):
+                    yield ModelStreamChunk(tool_calls=[{"id": "call", "index": 0, "function": {"name": "mcp.demo.query", "arguments": "{}"}}])
+                else:
+                    yield ModelStreamChunk(content="done")
+        adapter = Adapter()
+        execution = ToolExecutionContext("c", "p", "model", 0)
+        effective = ExposurePolicy().resolve(registry.catalog_view(), {"tool-calling"})
+        request = AgentRunRequest(adapter, [{"role": "user", "content": "query"}], effective, ToolExecutor(), execution)
+        events = asyncio.run(self.collect(AgentRuntime(), request))
+        self.assertEqual(events[-1]["answer"], "done")
+        self.assertIn('"structured_data":{"rows":[[2]]}', adapter.messages[-1]["content"])
 
-    def test_config_and_namespace_are_deterministic(self):
-        config = parse_server_config('[{"id":"a","url":"https://example.test/mcp","allowed_tools":["x"]}]')
-        self.assertEqual(config[0]["id"], "a")
-        self.assertEqual(namespace("a", "x"), "mcp__a__x")
-        self.assertEqual(parse_server_config('[{"id":"bad id","url":"http://x"}]'), [])
+    @staticmethod
+    async def collect(runtime, request):
+        return [event async for event in runtime.stream(request)]
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()

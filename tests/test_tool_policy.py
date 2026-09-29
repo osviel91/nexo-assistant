@@ -7,7 +7,6 @@ from fastapi import FastAPI
 from app.agent import AgentRunRequest, AgentRuntime
 from app.agent_model import ModelStreamChunk
 from app.kernel import ModuleContext, ModuleRegistry, ToolDefinition, ToolExecutionContext, ToolRegistry
-from app.modules.mcp import MCPModule
 from app.tools import ExposurePolicy, ToolExecutor
 
 
@@ -85,50 +84,6 @@ class ToolPolicyTests(unittest.TestCase):
         adapter = Adapter([[{"content": "plain"}]])
         execute(registry, adapter, set())
         self.assertEqual(adapter.payloads[0]["tools"], [])
-
-    def test_mcp_tool_uses_the_same_policy_and_executor(self):
-        class Client:
-            def __init__(self):
-                self.calls = []
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-            async def list_tools(self):
-                return SimpleNamespace(tools=[
-                    SimpleNamespace(name="visible", description="Visible", inputSchema={"type": "object"}),
-                    SimpleNamespace(name="hidden", description="Hidden", inputSchema={"type": "object"}),
-                ])
-
-            async def call_tool(self, name, arguments):
-                self.calls.append((name, arguments))
-                return SimpleNamespace(content=[SimpleNamespace(text="ok")], is_error=False)
-
-        client = Client()
-        registry = ToolRegistry()
-        module = MCPModule(lambda _url: client)
-        context = ModuleContext(FastAPI(), {"mcp_servers": [{"id": "server", "url": "http://server", "allowed_tools": ["visible", "hidden"]}]}, registry)
-        module.register(context)
-        module.startup(context)
-        async def run(name):
-            adapter = Adapter([
-                [{"tool_calls": [{"id": "call", "function": {"name": name, "arguments": "{}"}}]}],
-                [{"content": "continued"}],
-            ])
-            execution_context = ToolExecutionContext("conversation", "provider", "model", 0)
-            effective = ExposurePolicy().resolve(registry.catalog_view(), {"tool-calling"}, {"mcp__server__visible"})
-            request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], effective, ToolExecutor(), execution_context)
-            return adapter, [event async for event in AgentRuntime().stream(request)]
-
-        hidden_adapter, hidden_events = asyncio.run(run("mcp__server__hidden"))
-        self.assertIn("tool_not_available", hidden_adapter.payloads[1]["messages"][-1]["content"])
-        self.assertEqual(client.calls, [])
-        adapter, events = asyncio.run(run("mcp__server__visible"))
-        self.assertEqual(client.calls, [("visible", {})])
-        self.assertEqual(events[-1]["answer"], "continued")
 
 
 if __name__ == "__main__":

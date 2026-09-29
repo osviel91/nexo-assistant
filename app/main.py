@@ -27,7 +27,7 @@ from app.diagnostics import diagnostic, recent
 from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
-from app.modules.mcp import MCPModule
+from app.modules.mcp import MCPManager, validate_server
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
@@ -71,9 +71,6 @@ if "web-search-searxng" in enabled_modules:
         "searxng_timeout": os.getenv("NEXO_SEARXNG_TIMEOUT", "10"),
     })
     module_registry.register(WebSearchSearxngModule())
-if "mcp" in enabled_modules:
-    module_registry.context.settings["mcp_servers"] = os.getenv("NEXO_MCP_SERVERS", "[]")
-    module_registry.register(MCPModule())
 if "decision-runtime" in enabled_modules:
     module_registry.context.settings.update({
         "decision_provider": os.getenv("NEXO_DECISION_PROVIDER", "arbiter"),
@@ -95,6 +92,50 @@ def db() -> sqlite3.Connection:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class MCPRepository:
+    def servers(self):
+        with db() as c:
+            rows = c.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
+            result = []
+            for row in rows:
+                item = {key: row[key] for key in ("id", "name", "slug", "enabled", "transport", "endpoint", "timeout", "status", "error_category", "last_connected_at", "created_at", "updated_at")}
+                item["enabled"] = bool(item["enabled"])
+                item["tools"] = [dict(tool) | {"enabled": bool(tool["enabled"]), "input_schema": json.loads(tool["input_schema"])} for tool in c.execute("SELECT * FROM mcp_tools WHERE server_id=? ORDER BY remote_name", (row["id"],))]
+                result.append(item)
+            return result
+
+    def server(self, server_id):
+        return next((item for item in self.servers() if item["id"] == server_id), None)
+
+    def tools(self, enabled=None):
+        with db() as c:
+            query = "SELECT * FROM mcp_tools"
+            params = ()
+            if enabled is not None:
+                query += " WHERE enabled=?"
+                params = (int(enabled),)
+            return [dict(row) for row in c.execute(query, params)]
+
+    def replace_tools(self, server_id, tools):
+        with db() as c:
+            existing = {row["remote_name"]: row for row in c.execute("SELECT * FROM mcp_tools WHERE server_id=?", (server_id,))}
+            c.execute("DELETE FROM mcp_tools WHERE server_id=?", (server_id,))
+            for tool in tools:
+                old = existing.get(tool["remote_name"])
+                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at) VALUES(?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now()))
+
+    def status(self, server_id, status, error):
+        with db() as c:
+            c.execute("UPDATE mcp_servers SET status=?,error_category=?,last_connected_at=CASE WHEN ?='connected' THEN ? ELSE last_connected_at END,updated_at=? WHERE id=?", (status, error, status, now(), now(), server_id))
+
+    def invocation(self, server_id, tool_id, duration, status, truncated):
+        diagnostic(logger, "mcp_invocation", mcp_server_id=server_id, mcp_tool_id=tool_id, duration_ms=duration, status=status, result_truncated=truncated)
+
+
+mcp_manager = MCPManager(MCPRepository())
+module_registry.register(mcp_manager)
 
 
 agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_registry.tool_catalog)
@@ -196,6 +237,97 @@ class ProviderIn(BaseModel):
     api_key: str = ""
     models: list[str] = []
     model_capabilities: dict[str, list[str]] = {}
+
+
+class MCPServerIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    slug: str = Field(min_length=1, max_length=50)
+    transport: str = "streamable-http"
+    endpoint: str = Field(min_length=1, max_length=1000)
+    timeout: float = Field(default=15, ge=0.1, le=120)
+    enabled: bool = False
+
+
+@app.get("/api/mcp/servers")
+def mcp_servers():
+    return mcp_manager.catalog_status()["servers"]
+
+
+@app.post("/api/mcp/servers")
+def mcp_add_server(item: MCPServerIn):
+    try:
+        validate_server(item.name, item.slug, item.transport, item.endpoint, item.timeout)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    server_id = str(uuid.uuid4())
+    with db() as c:
+        try:
+            c.execute("INSERT INTO mcp_servers(id,name,slug,enabled,transport,endpoint,timeout,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (server_id, item.name.strip(), item.slug, int(item.enabled), item.transport, item.endpoint, item.timeout, now(), now()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "Server slug already exists") from None
+    return mcp_manager.repository.server(server_id)
+
+
+@app.put("/api/mcp/servers/{server_id}")
+def mcp_update_server(server_id: str, item: MCPServerIn):
+    try:
+        validate_server(item.name, item.slug, item.transport, item.endpoint, item.timeout)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    with db() as c:
+        try:
+            cursor = c.execute("UPDATE mcp_servers SET name=?,slug=?,transport=?,endpoint=?,timeout=?,enabled=?,status=CASE WHEN endpoint!=? OR enabled!=? THEN 'disconnected' ELSE status END,updated_at=? WHERE id=?", (item.name.strip(), item.slug, item.transport, item.endpoint, item.timeout, int(item.enabled), item.endpoint, int(item.enabled), now(), server_id))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "Server slug already exists") from None
+        if not cursor.rowcount:
+            raise HTTPException(404, "MCP server not found")
+    mcp_manager._sync_tools()
+    return mcp_manager.repository.server(server_id)
+
+
+@app.patch("/api/mcp/servers/{server_id}")
+def mcp_enable_server(server_id: str, item: dict[str, bool]):
+    enabled = item.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "enabled must be boolean")
+    with db() as c:
+        cursor = c.execute("UPDATE mcp_servers SET enabled=?,status=CASE WHEN ?=0 THEN 'disconnected' ELSE status END,updated_at=? WHERE id=?", (int(enabled), int(enabled), now(), server_id))
+        if not cursor.rowcount:
+            raise HTTPException(404, "MCP server not found")
+    mcp_manager._sync_tools()
+    return mcp_manager.repository.server(server_id)
+
+
+@app.post("/api/mcp/servers/{server_id}/connect")
+async def mcp_connect(server_id: str):
+    server = mcp_manager.repository.server(server_id)
+    if not server:
+        raise HTTPException(404, "MCP server not found")
+    try:
+        return await mcp_manager.refresh(server)
+    except Exception:
+        return mcp_manager.repository.server(server_id)
+
+
+@app.patch("/api/mcp/servers/{server_id}/tools/{tool_id:path}")
+def mcp_set_tool(server_id: str, tool_id: str, item: dict[str, bool]):
+    enabled = item.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "enabled must be boolean")
+    with db() as c:
+        cursor = c.execute("UPDATE mcp_tools SET enabled=? WHERE server_id=? AND id=?", (int(enabled), server_id, tool_id))
+        if not cursor.rowcount:
+            raise HTTPException(404, "MCP tool not found")
+    mcp_manager._sync_tools()
+    return {"ok": True}
+
+
+@app.delete("/api/mcp/servers/{server_id}")
+def mcp_delete_server(server_id: str):
+    with db() as c:
+        c.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
+    mcp_manager._sync_tools()
+    return {"ok": True}
 
 
 class ChatIn(BaseModel):

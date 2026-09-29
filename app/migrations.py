@@ -335,6 +335,27 @@ def _migration_17(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((17, _migration_17),)
 
 
+def _migration_18(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+      transport TEXT NOT NULL CHECK(transport='streamable-http'), endpoint TEXT NOT NULL,
+      timeout REAL NOT NULL DEFAULT 15, status TEXT NOT NULL DEFAULT 'disconnected',
+      error_category TEXT, last_connected_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mcp_tools (
+      id TEXT PRIMARY KEY, server_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+      remote_name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', input_schema TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)), discovered_at TEXT NOT NULL,
+      UNIQUE(server_id, remote_name)
+    );
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((18, _migration_18),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
