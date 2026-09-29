@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -34,6 +34,69 @@ function toast(message) {
   element.textContent = message;
   element.classList.add('show');
   setTimeout(() => element.classList.remove('show'), 2600);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall back for insecure contexts and denied permissions */ }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch { copied = false; }
+  textarea.remove();
+  return copied;
+}
+
+function diagnosticValue(value) {
+  return value == null || value === '' ? 'unknown' : String(value);
+}
+
+function formatRunDiagnostics(runtime = {}) {
+  const metrics = runtime.metrics || runtime;
+  const value = (key, fallback = runtime[key]) => diagnosticValue(metrics[key] ?? fallback);
+  const mode = runtime.agent_profile_id || runtime.execution_mode === 'agent' ? 'AGENT' : 'CHAT';
+  const reranker = runtime.reranker_status || (runtime.reranker_provider_id && runtime.reranker_model ? `${runtime.reranker_provider_id} / ${runtime.reranker_model}` : 'not configured');
+  return [
+    'NEXO Run Diagnostics',
+    `Mode: ${mode}`,
+    `Agent: ${diagnosticValue(runtime.agent_profile_name)}`,
+    `Provider: ${diagnosticValue(runtime.resolved_provider_name || runtime.resolved_provider)}`,
+    `Model: ${diagnosticValue(runtime.resolved_model_name || runtime.resolved_model)}`,
+    '',
+    'Knowledge:',
+    `Notebook: ${diagnosticValue(runtime.notebook_name)}`,
+    `Available: ${runtime.knowledge_available == null ? 'unknown' : Boolean(runtime.knowledge_available)}`,
+    `Outcome: ${diagnosticValue(runtime.knowledge_outcome)}`,
+    `Retrieval: ${diagnosticValue(runtime.retrieval_status || (runtime.knowledge_retrieval_applied ? 'applied' : 'not applied'))}`,
+    `Mode: ${diagnosticValue(runtime.effective_retrieval_mode || runtime.retrieval_mode)}`,
+    `Dense candidates: ${value('dense_candidate_count')}`,
+    `Lexical candidates: ${value('lexical_candidate_count')}`,
+    `Fused candidates: ${value('fused_candidate_count')}`,
+    `Reranker: ${reranker}`,
+    `Reranker status: ${diagnosticValue(runtime.reranker_status)}`,
+    `Reranked candidates: ${value('reranked_candidate_count')}`,
+    `Rerank duration: ${runtime.rerank_duration_ms == null ? 'unknown' : `${runtime.rerank_duration_ms} ms`}`,
+    `Retrieved: ${value('retrieved_candidate_count', runtime.retrieval_count)}`,
+    `Relevant: ${value('relevant_candidate_count')}`,
+    `Relevance gate: ${diagnosticValue(runtime.relevance_gate_status)}`,
+    `Grounding chunks: ${value('grounding_chunks')}`,
+    `Context chars: ${value('context_chars', runtime.grounding_context_chars)}`,
+    `Retrieval duration: ${runtime.retrieval_duration_ms == null ? 'unknown' : `${runtime.retrieval_duration_ms} ms`}`,
+    `Cited sources: ${value('citation_count')}`,
+    '',
+    'Generation:',
+    `TTFT: ${metrics.ttft_ms == null ? 'unknown' : `${metrics.ttft_ms} ms`}`,
+    `Generation: ${metrics.generation_duration_ms == null ? 'unknown' : `${metrics.generation_duration_ms} ms`}`,
+    `Total: ${metrics.total_duration_ms == null ? 'unknown' : `${metrics.total_duration_ms} ms`}`,
+  ].join('\n');
 }
 
 function moduleEnabled(id) { return state.modules.some((module) => module.id === id); }
@@ -319,12 +382,30 @@ function beginChat() {
   state.currentNotebookId = null;
   renderNotebookPicker();
   state.lastRuntime = null;
+  state.followingBottom = true;
   $('#messages').innerHTML = '';
   $('#welcome').hidden = false;
   renderAttachments();
   renderChats();
   closeSidebar();
   $('#prompt').focus();
+}
+
+function isNearBottom() {
+  const view = $('#chat-view');
+  return view.scrollHeight - view.scrollTop - view.clientHeight < 72;
+}
+
+function updateScrollButton() {
+  const button = $('#scroll-bottom');
+  if (button) button.hidden = isNearBottom();
+}
+
+function scrollToBottom(smooth = true) {
+  const view = $('#chat-view');
+  state.followingBottom = true;
+  view.scrollTo({ top: view.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+  updateScrollButton();
 }
 
 function renderMessages() {
@@ -343,26 +424,30 @@ function renderMessages() {
      const summary = message.role === 'assistant' && (metrics.tokens_per_second != null || metrics.output_tokens != null || metrics.total_duration_ms != null)
        ? `<div class="message-metrics">${metrics.output_tokens != null ? `${escapeHtml(metrics.output_tokens)} tokens` : ''}${metrics.tokens_per_second != null ? ` · ${escapeHtml(metrics.tokens_per_second)} tok/s` : ''}${metrics.total_duration_ms != null ? ` · ${(Number(metrics.total_duration_ms) / 1000).toFixed(2)} s` : ''}</div>` : '';
      const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
-     const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button data-copy-message="${escapeHtml(message.id)}" type="button">Copy</button><button data-branch-message="${escapeHtml(message.id)}" type="button">Branch</button><button data-details-message="${escapeHtml(message.id)}" type="button">Details</button></div>` : '';
+      const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button class="icon-button" data-copy-message="${escapeHtml(message.id)}" type="button" aria-label="Copy answer" title="Copy answer"><span aria-hidden="true">⧉</span></button><button class="icon-button" data-branch-message="${escapeHtml(message.id)}" type="button" aria-label="Branch from message" title="Branch from message"><span aria-hidden="true">⑂</span></button><button class="icon-button" data-details-message="${escapeHtml(message.id)}" type="button" aria-label="Show run details" title="Show run details"><span aria-hidden="true">ⓘ</span></button></div>` : '';
      const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
       return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}<div class="message-content">${content}</div>${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
    }).join('');
-   box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (message) { await navigator.clipboard.writeText(message.content); toast('Copied'); } }; });
-   box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
-   box.querySelectorAll('[data-details-message]').forEach((button) => { button.onclick = () => { state.lastRuntime = state.messages.find((item) => item.id === button.dataset.detailsMessage)?.runtime || null; $('#config-content').innerHTML = renderConfig(); openSurface('config'); }; });
-  box.scrollTop = box.scrollHeight;
+    box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (!message) return; const copied = await copyText(message.content || ''); if (copied) { button.querySelector('span').textContent = '✓'; toast('Copied'); setTimeout(() => { if (button.isConnected) button.querySelector('span').textContent = '⧉'; }, 1200); } else toast('Copy failed'); }; });
+    box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
+    box.querySelectorAll('[data-details-message]').forEach((button) => { button.onclick = () => { state.lastRuntime = state.messages.find((item) => item.id === button.dataset.detailsMessage)?.runtime || null; $('#config-content').innerHTML = renderConfig(); openSurface('config'); bindConfig(); }; });
+   if (state.followingBottom) $('#chat-view').scrollTop = $('#chat-view').scrollHeight;
+   updateScrollButton();
 }
 
 function activityLabel(activity) {
   if (activity.type === 'RETRIEVE') return 'Consultando el notebook';
   if (activity.type === 'ACT') return `Usando herramienta ${activity.tool || ''}`.trim();
+  if (activity.type === 'REASON') return 'Thinking…';
+  if (activity.type === 'RESPOND') return 'Responding…';
   return 'Procesando respuesta';
 }
 
 function updateStreamingAnswer(answer) {
   const content = $('#messages').querySelector('.message:last-child .message-content');
   if (content) content.innerHTML = renderMarkdown(answer);
-  $('#messages').scrollTop = $('#messages').scrollHeight;
+  if (state.followingBottom) $('#chat-view').scrollTop = $('#chat-view').scrollHeight;
+  updateScrollButton();
 }
 
 function updateStreamingActivity(activity) {
@@ -383,6 +468,7 @@ async function openChat(id) {
     state.executionMode = data.conversation.execution_mode || (data.conversation.agent_profile_id ? 'agent' : 'chat');
     state.agentProfileId = data.conversation.agent_profile_id || null;
     state.currentNotebookId = data.conversation.notebook_id || null;
+    state.followingBottom = true;
     renderNotebookPicker();
     renderExecutionMode();
     state.messages = data.messages;
@@ -419,6 +505,7 @@ async function send() {
   if (!text && !state.attachments.length) return;
    if (!effectiveChoice.provider && !state.agentProfileId) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
   state.busy = true;
+  state.streamTimestamps = { request_started: performance.now() };
   state.activity = { type: 'REASON', status: 'running' };
   $('#send-button').disabled = true;
   $('#welcome').hidden = true;
@@ -457,9 +544,9 @@ async function send() {
         const data = JSON.parse(line.slice(6));
         if (data.error) throw Error(data.error);
          if (data.status) toast(data.message);
-         if (data.activity) updateStreamingActivity(data.activity);
-         if (data.delta) { answer += data.delta; state.messages.at(-1).content = answer; updateStreamingAnswer(answer); }
-          if (data.done) { state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
+         if (data.activity) { if (data.activity.type === 'REASON') state.streamTimestamps.reasoning_started ||= performance.now(); updateStreamingActivity(data.activity); }
+         if (data.delta) { state.streamTimestamps.first_answer_delta ||= performance.now(); state.activity = { type: 'RESPOND', status: 'running' }; answer += data.delta; state.messages.at(-1).content = answer; updateStreamingActivity(state.activity); updateStreamingAnswer(answer); }
+       if (data.done) { state.streamTimestamps.completed = performance.now(); state.conversationId = data.conversation_id; state.lastRuntime = data.runtime || null; state.activity = null; Object.assign(state.messages.at(-1), { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], citations: data.citations || [], runtime: data.runtime || {} }); renderMessages(); }
       }
       if (done) break;
     }
@@ -502,6 +589,14 @@ function renderConfig() {
 function bindConfig() {
   $('#thinking-enabled')?.addEventListener('change', (event) => { state.chatThinking.enabled = event.target.checked; });
   $('#thinking-budget')?.addEventListener('change', (event) => { state.chatThinking.budget = event.target.value ? Number(event.target.value) : null; });
+  const copyButton = $('#copy-diagnostics');
+  copyButton.hidden = !state.lastRuntime;
+  copyButton.onclick = async () => {
+    if (!state.lastRuntime) return;
+    const copied = await copyText(formatRunDiagnostics(state.lastRuntime));
+    if (copied) { copyButton.querySelector('span').textContent = '✓'; toast('Diagnostics copied'); setTimeout(() => { if (copyButton.isConnected) copyButton.querySelector('span').textContent = '⧉'; }, 1200); }
+    else toast('Copy failed');
+  };
 }
 function closeSurface() { $('#surface-backdrop').hidden = true; }
 function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdrop').hidden = false; $('#open-sidebar').setAttribute('aria-expanded', 'true'); }
@@ -647,6 +742,8 @@ $('#file-input').onchange = async (event) => { for (const file of event.target.f
 document.querySelectorAll('.suggestion').forEach((button) => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); }; });
 $('#refresh-chats').onclick = loadChats;
 $('#chat-search').oninput = renderChats;
+$('#chat-view').addEventListener('scroll', () => { state.followingBottom = isNearBottom(); updateScrollButton(); }, { passive: true });
+$('#scroll-bottom').onclick = () => scrollToBottom();
 $('#open-sidebar').onclick = openSidebar;
 $('#close-sidebar').onclick = closeSidebar;
 $('#sidebar-backdrop').onclick = closeSidebar;
