@@ -1,5 +1,6 @@
 import { renderMarkdown } from './markdown.js';
 import { effectiveMessageIdentity } from './identity.js';
+import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
 const state = { providers: [], knowledge: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', chatThinking: { enabled: false, budget: null } };
@@ -102,20 +103,30 @@ async function loadKnowledge() {
   const fields = { retrieval_mode: 'embedding-mode', dense_candidate_limit: 'embedding-dense-candidates', lexical_candidate_limit: 'embedding-lexical-candidates', rrf_k: 'embedding-rrf-k', final_top_k: 'embedding-final-top-k', target_chunk_size: 'embedding-target', max_chunk_size: 'embedding-max', overlap: 'embedding-overlap', batch_size: 'embedding-batch', retrieval_max_context_chars: 'embedding-context' };
   if (config) Object.entries(fields).forEach(([key, id]) => { $(`#${id}`).value = config[key]; });
   const rerankerProviders = state.knowledge.providers || state.providers;
-  $('#reranker-provider').innerHTML = rerankerProviders.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
-  const renderRerankerModels = () => { const provider = rerankerProviders.find((item) => item.id === $('#reranker-provider').value); const models = (provider?.models || []).filter((model) => (model.capabilities || []).includes('reranking')); $('#reranker-model').innerHTML = models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join(''); $('#reranker-model').disabled = !models.length; $('#reranker-empty').hidden = Boolean(models.length); if (!models.length) { $('#reranking-enabled').checked = false; $('#reranking-enabled').disabled = true; $('#test-reranker').disabled = true; } return models; };
-  $('#reranker-provider').onchange = renderRerankerModels;
-  if (config?.reranker_provider_id) $('#reranker-provider').value = config.reranker_provider_id;
-  const rerankerModels = renderRerankerModels();
-  if (config?.reranker_model && [...$('#reranker-model').options].some((option) => option.value === config.reranker_model)) $('#reranker-model').value = config.reranker_model;
-  const rerankingAvailable = rerankerModels.length > 0 && Boolean($('#reranker-model').value);
-  $('#reranking-enabled').checked = Boolean(config?.reranking_enabled) && rerankingAvailable;
-  $('#reranking-enabled').disabled = !rerankingAvailable;
+  const eligibleProviders = rerankerProviders.filter((provider) => eligibleRerankerModels(rerankerProviders, provider.id).length);
+  $('#reranker-provider').innerHTML = eligibleProviders.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
+  const persistedProvider = eligibleProviders.some((provider) => provider.id === config?.reranker_provider_id) ? config.reranker_provider_id : eligibleProviders[0]?.id || '';
+  $('#reranker-provider').value = persistedProvider;
+  $('#reranking-enabled').checked = Boolean(config?.reranking_enabled);
+  const renderRerankerModels = (selectedModel = '') => {
+    const models = eligibleRerankerModels(rerankerProviders, $('#reranker-provider').value);
+    $('#reranker-model').innerHTML = models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+    $('#reranker-model').value = models.some((model) => model.id === selectedModel) ? selectedModel : '';
+    const current = rerankerState(rerankerProviders, $('#reranker-provider').value, $('#reranker-model').value, $('#reranking-enabled').checked);
+    $('#reranker-provider').disabled = !current.capabilityAvailable;
+    $('#reranker-model').disabled = current.modelDisabled;
+    $('#reranker-empty').hidden = current.capabilityAvailable;
+    $('#reranking-enabled').disabled = !current.capabilityAvailable;
+    $('#test-reranker').disabled = !current.configured;
+    return current;
+  };
+  $('#reranker-provider').onchange = () => renderRerankerModels();
+  const rerankerView = renderRerankerModels(config?.reranker_model || '');
+  $('#reranking-enabled').checked = rerankerView.enabled;
   $('#reranker-candidates').value = config?.reranker_candidate_limit ?? 20;
   $('#reranker-timeout').value = config?.reranker_timeout_ms ?? 3000;
-  $('#reranking-enabled').onchange = () => $('#reranking-fields').hidden = !$('#reranking-enabled').checked;
-  $('#reranking-enabled').onchange();
-  $('#test-reranker').disabled = !rerankingAvailable;
+  $('#reranking-enabled').onchange = () => { const current = rerankerState(rerankerProviders, $('#reranker-provider').value, $('#reranker-model').value, $('#reranking-enabled').checked); $('#reranking-enabled').checked = current.enabled; $('#test-reranker').disabled = !current.configured; };
+  $('#reranking-fields').hidden = false;
   $('#test-reranker').onclick = async () => { const result = $('#reranker-test-result'); try { result.textContent = 'Testing…'; const data = await api('/settings/embeddings/test-reranker', { method: 'POST', body: JSON.stringify({ query: 'Rank the document most relevant to the query.' }) }); result.textContent = `${data.provider} / ${data.model} · ${data.ready ? 'Ready' : 'Unavailable'} · ${data.documents_ranked} documents · ${data.latency_ms} ms`; } catch (error) { result.textContent = 'Reranker test failed'; } };
   updateRetrievalControls();
   $('#knowledge-health').textContent = `${state.knowledge.health.ready} ready · ${state.knowledge.health.outdated} outdated · ${state.knowledge.health.failed} failed`;
@@ -579,7 +590,8 @@ $('#provider-form').onsubmit = async (event) => {
 $('#embedding-form').onsubmit = async (event) => {
   event.preventDefault();
   const finalTopK = Number($('#embedding-final-top-k').value);
-  const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_mode: $('#embedding-mode').value, dense_candidate_limit: Number($('#embedding-dense-candidates').value), lexical_candidate_limit: Number($('#embedding-lexical-candidates').value), rrf_k: Number($('#embedding-rrf-k').value), final_top_k: finalTopK, retrieval_top_k: finalTopK, retrieval_max_context_chars: Number($('#embedding-context').value), reranking_enabled: $('#reranking-enabled').checked, reranker_provider_id: $('#reranker-provider').value, reranker_model: $('#reranker-model').value, reranker_candidate_limit: Number($('#reranker-candidates').value), reranker_timeout_ms: Number($('#reranker-timeout').value) };
+  const rerankerConfigured = rerankerState((state.knowledge?.providers || state.providers), $('#reranker-provider').value, $('#reranker-model').value, $('#reranking-enabled').checked).configured;
+  const body = { provider_id: $('#embedding-provider').value, model_id: $('#embedding-model').value, target_chunk_size: Number($('#embedding-target').value), max_chunk_size: Number($('#embedding-max').value), overlap: Number($('#embedding-overlap').value), batch_size: Number($('#embedding-batch').value), retrieval_mode: $('#embedding-mode').value, dense_candidate_limit: Number($('#embedding-dense-candidates').value), lexical_candidate_limit: Number($('#embedding-lexical-candidates').value), rrf_k: Number($('#embedding-rrf-k').value), final_top_k: finalTopK, retrieval_top_k: finalTopK, retrieval_max_context_chars: Number($('#embedding-context').value), reranking_enabled: $('#reranking-enabled').checked && rerankerConfigured, reranker_provider_id: $('#reranker-provider').value, reranker_model: $('#reranker-model').value, reranker_candidate_limit: Number($('#reranker-candidates').value), reranker_timeout_ms: Number($('#reranker-timeout').value) };
   try { const result = await api('/settings/embeddings', { method: 'PUT', body: JSON.stringify(body) }); await loadKnowledge(); toast(result.invalidated ? 'Saved; indexes are outdated' : 'Knowledge configuration saved'); } catch (error) { toast(error.message); }
 };
 $('#embedding-mode').onchange = updateRetrievalControls;
