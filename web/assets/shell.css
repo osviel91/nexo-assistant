@@ -1,0 +1,52 @@
+/* Stage 10E shell rules: regions share one geometry and one control language. */
+.app-shell { background: var(--color-bg-app); }
+.sidebar { flex-basis: var(--sidebar-width); width: var(--sidebar-width); padding: var(--space-6) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); }
+.primary-nav { display: grid; gap: var(--space-1); margin-top: var(--space-6); }
+.primary-nav .side-label { margin: 0 var(--space-2) var(--space-1); }
+.primary-nav .side-link { height: var(--control-height-md); }
+.primary-nav .side-link.active { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.nav-dot { width: 6px; height: 6px; border: 1px solid currentColor; border-radius: 50%; }
+.primary-nav .active .nav-dot { background: var(--color-accent); border-color: var(--color-accent); }
+.sidebar-bottom { margin-top: var(--space-6); }
+.main-panel { background: var(--color-bg-app); }
+.workspace-header { min-height: var(--control-height-lg); height: 64px; padding-inline: var(--space-6); }
+.workspace-content { scroll-padding-bottom: var(--space-6); }
+.messages, .composer-wrap { width: min(var(--content-max-width), 100%); }
+.messages { padding-inline: var(--space-6); gap: var(--space-8); }
+.composer-wrap { width: min(var(--composer-max-width), 100%); padding-inline: var(--space-6); }
+
+/* Primitives. Feature surfaces should use these instead of one-off controls. */
+.button, .primary-button, .text-button, .tool-button, .send-button, .icon-button, .capability-chip,
+.model-picker, .agent-picker, .config-inspector-button { min-height: var(--control-height-sm); border-radius: var(--radius-sm); }
+.button, .primary-button, .text-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 0 var(--space-3); border: 1px solid transparent; }
+.primary-button, .send-button { background: var(--color-accent-strong); color: var(--color-on-accent); }
+.text-button { background: transparent; color: var(--color-text-secondary); }
+.text-button:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.icon-button { color: var(--color-text-secondary); }
+.icon-button:hover, .tool-button:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.panel, .surface, .composer, .provider-card, .lab-card { background: var(--color-bg-surface); border-color: var(--color-border); }
+.surface-backdrop, .sidebar-backdrop { background: var(--color-overlay); }
+.brand-mark, .welcome-logo { color: var(--color-on-accent); }
+.status-indicator { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
+.status-indicator::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ''; }
+.divider { border: 0; border-top: 1px solid var(--color-border); }
+.empty-state { padding: var(--space-6); border: 1px dashed var(--color-border); border-radius: var(--radius-md); color: var(--color-text-muted); text-align: center; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: index-spin .7s linear infinite; }
+
+[data-ui="developer"] { --radius-sm: 5px; --radius-md: 7px; --radius-lg: 9px; --control-height-md: 38px; --shadow-surface: none; }
+
+@media (max-width: 700px) {
+  .sidebar { width: min(290px, calc(100vw - 36px)); }
+  .workspace-header { padding-inline: var(--space-4); }
+  .messages, .composer-wrap { padding-inline: var(--space-3); }
+  .messages { gap: var(--space-6); }
+  .composer-tools { gap: var(--space-2); }
+  .composer-left { flex-wrap: wrap; }
+  .notebook-picker { max-width: 42vw; }
+}
+
+@media (max-width: 420px) {
+  .messages, .composer-wrap { padding-inline: var(--space-2); }
+  .workspace-header { padding-inline: var(--space-2); }
+  .composer-left { max-width: 72%; }
+}

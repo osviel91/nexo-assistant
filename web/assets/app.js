@@ -726,6 +726,8 @@ $('#config-inspector').onclick = () => { $('#config-content').innerHTML = render
 $('#cancel-edit').onclick = resetForm;
 $('#open-settings').onclick = () => { closeSidebar(); openSurface('settings'); };
 $('#agent-picker').onclick = () => { openSurface('agents'); $('#agent-picker').setAttribute('aria-expanded', 'true'); };
+$('#open-agents').onclick = () => { closeSidebar(); openSurface('agents'); };
+$('#open-knowledge').onclick = () => { closeSidebar(); openSurface('notebooks'); };
 $('#open-lab').onclick = () => { closeSidebar(); openSurface('lab'); };
 $('#open-notebooks').onclick = () => { closeSidebar(); openSurface('notebooks'); };
 $('#new-chat').onclick = beginChat;

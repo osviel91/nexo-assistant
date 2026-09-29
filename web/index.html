@@ -19,17 +19,25 @@
     })();
   </script>
   <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/tokens.css">
+  <link rel="stylesheet" href="/assets/shell.css">
 </head>
 <body>
   <div class="app-shell">
     <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
-    <aside class="sidebar" id="sidebar" aria-label="Navegación principal">
+    <aside class="sidebar" id="sidebar" data-region="sidebar" aria-label="Navegación principal">
       <div class="brand-row">
         <a class="brand" href="#" aria-label="Nexo, inicio"><span class="brand-mark">n</span><strong>Nexo</strong></a>
         <button class="icon-button sidebar-close" id="close-sidebar" aria-label="Cerrar navegación">×</button>
       </div>
       <button class="new-chat" id="new-chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg> Nuevo chat <kbd>⌘ K</kbd></button>
       <label class="search-box"><span aria-hidden="true">⌕</span><input id="chat-search" type="search" placeholder="Buscar chats" aria-label="Buscar chats"></label>
+      <nav class="primary-nav" aria-label="Espacios principales">
+        <span class="side-label">ESPACIOS</span>
+        <button class="side-link active" type="button" aria-current="page"><span class="nav-dot" aria-hidden="true"></span> Chat</button>
+        <button class="side-link" type="button" id="open-agents"><span class="nav-dot" aria-hidden="true"></span> Agents</button>
+        <button class="side-link" type="button" id="open-knowledge"><span class="nav-dot" aria-hidden="true"></span> Knowledge</button>
+      </nav>
       <div class="history-head"><span class="side-label">CHATS</span><button class="tiny-icon" id="refresh-chats" title="Actualizar chats" aria-label="Actualizar chats">↻</button></div>
       <div id="conversation-list" class="conversation-list"></div>
       <nav class="sidebar-bottom" aria-label="Más espacios">
@@ -41,8 +49,8 @@
       </nav>
     </aside>
 
-    <main class="main-panel">
-      <header class="topbar">
+    <main class="main-panel" data-region="workspace">
+      <header class="topbar workspace-header" data-region="header">
         <button class="icon-button menu-button" id="open-sidebar" aria-label="Abrir navegación" aria-expanded="false">☰</button>
            <div class="topbar-center">
              <div class="mode-switch" role="group" aria-label="Execution mode"><button type="button" data-mode="chat" class="active">Chat</button><button type="button" data-mode="agent">Agent</button></div>
@@ -53,7 +61,7 @@
         <button class="icon-button new-chat-top" id="new-chat-top" title="Nuevo chat" aria-label="Nuevo chat"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
       </header>
 
-      <section class="chat-view" id="chat-view" aria-live="polite">
+       <section class="chat-view workspace-content" data-region="conversation" id="chat-view" aria-live="polite">
         <div class="welcome" id="welcome">
           <div class="welcome-logo">n</div>
           <h1>¿En qué puedo ayudarte?</h1>
@@ -70,7 +78,7 @@
          </button>
        </section>
 
-      <footer class="composer-wrap">
+      <footer class="composer-wrap composer-region" data-region="composer">
         <div class="attachment-tray" id="attachment-tray"></div>
         <div class="composer">
           <textarea id="prompt" rows="1" placeholder="Pregunta lo que quieras..." aria-label="Mensaje"></textarea>
