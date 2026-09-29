@@ -320,7 +320,12 @@ def _migration_15(connection: sqlite3.Connection) -> None:
         ))""")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14), (15, _migration_15))
+def _migration_16(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "embedding_configurations", "relevance_gate_enabled", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(connection, "embedding_configurations", "relevance_gate_min_term_overlap", "INTEGER NOT NULL DEFAULT 1")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14), (15, _migration_15), (16, _migration_16))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

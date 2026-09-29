@@ -6,7 +6,7 @@ from typing import Any
 
 
 _REFERENCE_WORDS = re.compile(
-    r"\b(eso|esa|ese|esto|este|esta|aquello|aquella|ellos|ellas|it|that|this|they|them)\b",
+    r"\b(eso|esa|ese|esto|este|esta|aquello|aquella|ellos|ellas|su|sus|cual|cuál|qué|que|it|that|this|they|them)\b",
     re.IGNORECASE,
 )
 _CLAUSE_SEPARATOR = re.compile(r"\s+(?:y|and|también|also)\s+", re.IGNORECASE)

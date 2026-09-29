@@ -4,6 +4,8 @@ import time
 import asyncio
 import json
 import math
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -58,6 +60,8 @@ class RetrievalCandidate:
     rrf_rank: int | None = None
     rerank_score: float | None = None
     rerank_rank: int | None = None
+    relevant: bool = True
+    relevance_reason: str | None = None
 
     @classmethod
     def from_result(cls, result: Any) -> "RetrievalCandidate":
@@ -73,9 +77,29 @@ class RetrievalCandidate:
                  "chunk_content_hash": self.chunk_content_hash, "source_title": self.source_title,
                  "dense_rank": self.dense_rank, "dense_score": self.dense_score,
                  "lexical_rank": self.lexical_rank, "lexical_score": self.lexical_score,
-                 "rrf_rank": self.rrf_rank, "rerank_score": self.rerank_score, "rerank_rank": self.rerank_rank,
-                 "final_rank": self.final_rank, "accepted": self.rejection_reason is None,
-                "rejection_reason": self.rejection_reason}
+                  "rrf_rank": self.rrf_rank, "rerank_score": self.rerank_score, "rerank_rank": self.rerank_rank,
+                  "final_rank": self.final_rank, "accepted": self.rejection_reason is None and self.relevant,
+                 "rejection_reason": self.rejection_reason, "relevant": self.relevant,
+                 "relevance_reason": self.relevance_reason}
+
+
+def _terms(value: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKD", value.lower()).encode("ascii", "ignore").decode()
+    return {term for term in re.findall(r"[a-z0-9]{3,}", normalized) if term not in {
+        "que", "cual", "cuales", "sobre", "dice", "documento", "para", "con", "una", "uno", "del", "las", "los", "the", "what", "about",
+    }}
+
+
+def apply_relevance_gate(candidates: list[RetrievalCandidate], query_variants: tuple[str, ...], min_overlap: int) -> int:
+    query_terms = set().union(*(_terms(query) for query in query_variants))
+    relevant_count = 0
+    for candidate in candidates:
+        overlap = len(query_terms & _terms(candidate.text))
+        ranking_fallback = len(candidates) == 1 and candidate.final_rank == 1 and (candidate.dense_score is not None or candidate.lexical_score is not None)
+        candidate.relevant = overlap >= min_overlap or ranking_fallback
+        candidate.relevance_reason = "term_overlap" if overlap >= min_overlap else "ranking_fallback" if ranking_fallback else "insufficient_evidence"
+        relevant_count += candidate.relevant
+    return relevant_count
 
 
 class Retriever(Protocol):
@@ -326,6 +350,20 @@ class RetrievalService:
             rerank_duration = round((time.monotonic() - rerank_started) * 1000, 2)
         for rank, candidate in enumerate(results[:limit], 1):
             candidate.final_rank = rank
+        gate_enabled = bool(getattr(config, "relevance_gate_enabled", True))
+        gate_min_overlap = int(getattr(config, "relevance_gate_min_term_overlap", 1))
+        final_results = results[:limit]
+        relevant_count = apply_relevance_gate(final_results, plan.variants, gate_min_overlap) if gate_enabled else len(final_results)
+        if not gate_enabled:
+            for candidate in final_results:
+                candidate.relevant, candidate.relevance_reason = True, "disabled"
+        candidate_scores = [{"chunk_id": candidate.chunk_id, "dense_rank": candidate.dense_rank,
+                             "dense_score": candidate.dense_score, "lexical_rank": candidate.lexical_rank,
+                             "lexical_score": candidate.lexical_score, "rrf_rank": candidate.rrf_rank,
+                             "rrf_score": candidate.fused_score, "rerank_rank": candidate.rerank_rank,
+                             "rerank_score": candidate.rerank_score, "final_rank": candidate.final_rank,
+                             "relevant": candidate.relevant, "relevance_reason": candidate.relevance_reason}
+                            for candidate in final_results]
         self.last_diagnostics = self._diagnostics(mode, effective_mode, dense, lexical, failures, failure_reasons) | {
                                    "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
                                    "query_variant_count": len(plan.variants), "query_expanded": plan.expanded,
@@ -335,10 +373,16 @@ class RetrievalService:
                                   "reranking_enabled": reranking_enabled, "reranker_status": rerank_status,
                                   "reranker_reason": rerank_reason, "reranker_candidate_count": rerank_count,
                                   "reranked_candidate_count": reranked_count, "rerank_duration_ms": rerank_duration,
-                                  "reranker_provider_id": getattr(self.reranker, "provider_id", None) if reranking_enabled else None,
-                                  "reranker_model": getattr(self.reranker, "model_id", None) if reranking_enabled else None,
-                                  "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2)}
-        return [candidate.as_dict() for candidate in results[:limit]]
+                                   "reranker_provider_id": getattr(self.reranker, "provider_id", None) if reranking_enabled else None,
+                                   "reranker_model": getattr(self.reranker, "model_id", None) if reranking_enabled else None,
+                                   "retrieved_candidate_count": len(final_results),
+                                   "relevance_gate_applied": gate_enabled,
+                                   "relevant_candidate_count": relevant_count,
+                                   "relevance_gate_reason": None if relevant_count else "insufficient_evidence",
+                                   "relevance_gate_min_term_overlap": gate_min_overlap,
+                                   "candidate_scores": candidate_scores,
+                                   "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2)}
+        return [candidate.as_dict() for candidate in final_results]
 
     def _diagnostics(self, configured_mode: str, effective_mode: str,
                      dense: list[RetrievalCandidate], lexical: list[RetrievalCandidate],

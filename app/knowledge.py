@@ -35,6 +35,8 @@ class EmbeddingConfiguration:
     reranker_model: str = ""
     reranker_candidate_limit: int = 20
     reranker_timeout_ms: int = 3000
+    relevance_gate_enabled: bool = True
+    relevance_gate_min_term_overlap: int = 1
 
     @property
     def chunking_semantics(self) -> str:
@@ -55,6 +57,7 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         "dense_candidate_limit": (1, 200), "lexical_candidate_limit": (1, 200), "rrf_k": (1, 1000),
         "final_top_k": (1, 50),
         "reranker_candidate_limit": (1, 200), "reranker_timeout_ms": (1, 120000),
+        "relevance_gate_min_term_overlap": (1, 20),
     }
     result = dict(values)
     result.setdefault("retrieval_top_k", 5)
@@ -68,6 +71,11 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("reranker_model", "")
     result.setdefault("reranker_candidate_limit", 20)
     result.setdefault("reranker_timeout_ms", 3000)
+    result.setdefault("relevance_gate_enabled", True)
+    result.setdefault("relevance_gate_min_term_overlap", 1)
+    if isinstance(result["relevance_gate_enabled"], str):
+        result["relevance_gate_enabled"] = result["relevance_gate_enabled"].lower() in {"1", "true", "yes", "on"}
+    result["relevance_gate_enabled"] = bool(result["relevance_gate_enabled"])
     if isinstance(result["reranking_enabled"], str):
         result["reranking_enabled"] = result["reranking_enabled"].lower() in {"1", "true", "yes", "on"}
     result["reranking_enabled"] = bool(result["reranking_enabled"])
@@ -113,4 +121,6 @@ def bootstrap_values() -> dict[str, Any]:
         "reranker_model": os.getenv("NEXO_RERANKER_MODEL", ""),
         "reranker_candidate_limit": os.getenv("NEXO_RERANKER_CANDIDATES", "20"),
         "reranker_timeout_ms": os.getenv("NEXO_RERANKER_TIMEOUT_MS", "3000"),
+        "relevance_gate_enabled": os.getenv("NEXO_RELEVANCE_GATE_ENABLED", "true"),
+        "relevance_gate_min_term_overlap": os.getenv("NEXO_RELEVANCE_GATE_MIN_TERM_OVERLAP", "1"),
     }

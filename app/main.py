@@ -266,6 +266,8 @@ class EmbeddingConfigurationIn(BaseModel):
     reranker_model: str = ""
     reranker_candidate_limit: int = Field(default=20, ge=1, le=200)
     reranker_timeout_ms: int = Field(default=3000, ge=1, le=120000)
+    relevance_gate_enabled: bool = True
+    relevance_gate_min_term_overlap: int = Field(default=1, ge=1, le=20)
 
 
 def embedding_configuration() -> EmbeddingConfiguration | None:
@@ -288,8 +290,8 @@ def embedding_configuration() -> EmbeddingConfiguration | None:
             return None
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], 1, timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,relevance_gate_enabled,relevance_gate_min_term_overlap,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], values["relevance_gate_enabled"], values["relevance_gate_min_term_overlap"], 1, timestamp, timestamp))
         return EmbeddingConfiguration(**dict(connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()))
 
 
@@ -420,8 +422,8 @@ def save_embedding_settings(item: EmbeddingConfigurationIn):
         version = (old["config_version"] + 1) if old else 1
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], version, old["created_at"] if old else timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,relevance_gate_enabled,relevance_gate_min_term_overlap,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], values["relevance_gate_enabled"], values["relevance_gate_min_term_overlap"], version, old["created_at"] if old else timestamp, timestamp))
         affecting = not old or any(old[key] != values[key] for key in ("provider_id", "model_id", "target_chunk_size", "max_chunk_size", "overlap"))
         if affecting and old:
             connection.execute("UPDATE notebook_sources SET indexing_status='outdated', indexing_error=NULL, updated_at=? WHERE indexing_status='ready'", (timestamp,))
@@ -1176,11 +1178,14 @@ async def chat(req: ChatIn):
                             notebook_id, req.content, top_k,
                             [{"role": message["role"], "content": message["content"]} for message in history],
                         )
-                        grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
+                        relevant = [item for item in retrieval if item.get("relevant", True)]
+                        grounded_context = GroundedContext.build(notebook_id, req.content, relevant, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "applied" if grounded_context.retrieval_results else "not_applied",
-                                               "retrieval_reason": None if grounded_context.retrieval_results else "no_results",
-                                               "retrieval_count": len(grounded_context.retrieval_results),
-                                               "retrieval_result_count": len(grounded_context.retrieval_results),
+                                                "retrieval_reason": None if grounded_context.retrieval_results else ("insufficient_evidence" if retrieval else "no_results"),
+                                                "retrieval_count": len(grounded_context.retrieval_results),
+                                                "retrieval_result_count": len(grounded_context.retrieval_results),
+                                                "retrieved_candidate_count": len(retrieval),
+                                                "relevant_candidate_count": len(relevant),
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
                                                "retrieval_query_length": len(req.content),
                                                "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results],
@@ -1195,6 +1200,7 @@ async def chat(req: ChatIn):
                                                "context_truncated": grounded_context.truncated,
                                                 "knowledge_retrieval_applied": bool(grounded_context.retrieval_results),
                                                 "grounding_status": "applied" if grounded_context.retrieval_results else "not_applied"}
+                        retrieval_metadata["grounding_reason"] = None if grounded_context.retrieval_results else ("insufficient_evidence" if retrieval else "no_results")
                         event_sink.finish_event(retrieve_event, "completed", retrieval_metadata, retrieval_metadata["retrieval_duration_ms"])
                     except (RetrievalError, ValueError, EmbeddingError) as error:
                         grounded_context = GroundedContext.build(notebook_id, req.content, [], 0)
@@ -1202,7 +1208,10 @@ async def chat(req: ChatIn):
                                                "retrieval_result_count": 0,
                                                "retrieval_query_sha256": hashlib.sha256(req.content.encode()).hexdigest(),
                                                "retrieval_query_length": len(req.content),
-                                               "selected_chunk_ids": [], "top_scores": [],
+                                                "selected_chunk_ids": [], "top_scores": [],
+                                                "retrieved_candidate_count": 0, "relevant_candidate_count": 0,
+                                                "relevance_gate_applied": bool(getattr(embedding_configuration(), "relevance_gate_enabled", True)),
+                                                "relevance_gate_reason": "retrieval_failed",
                                                "grounded_context_created": True,
                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                                "context_chars": 0, "grounding_context_chars": 0, "grounding_chunks": 0, "grounding_applied": False, "context_truncated": False,
