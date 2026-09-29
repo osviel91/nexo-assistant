@@ -290,7 +290,7 @@ def _migration_13(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "embedding_configurations", "reranking_enabled", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(connection, "embedding_configurations", "reranker_provider_id", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(connection, "embedding_configurations", "reranker_model", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(connection, "embedding_configurations", "reranker_candidate_limit", "INTEGER NOT NULL DEFAULT 20")
+    _add_column_if_missing(connection, "embedding_configurations", "reranker_candidate_limit", "INTEGER NOT NULL DEFAULT 8")
     _add_column_if_missing(connection, "embedding_configurations", "reranker_timeout_ms", "INTEGER NOT NULL DEFAULT 3000")
 
 

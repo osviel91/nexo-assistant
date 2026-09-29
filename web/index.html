@@ -101,8 +101,20 @@
   <section class="surface-backdrop" id="surface-backdrop" hidden>
     <div class="surface" id="lab-surface" hidden role="dialog" aria-modal="true" aria-labelledby="lab-title">
        <div class="surface-header"><div><span class="eyebrow">ESPACIO DE EXPLORACIÓN</span><h2 id="lab-title">Laboratorio</h2><p>Inspecciona las capacidades reales disponibles en Nexo.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
-       <nav class="lab-tabs" id="lab-tabs" aria-label="Secciones del laboratorio"></nav>
-       <div id="lab-content"></div>
+        <nav class="lab-tabs" id="lab-tabs" aria-label="Secciones del laboratorio"></nav>
+        <div id="lab-content"></div>
+        <section id="lab-benchmark" class="lab-section knowledge-settings" aria-labelledby="retrieval-benchmark-title" hidden>
+          <div class="settings-section-heading"><div><span class="eyebrow">RETRIEVAL LAB</span><h3 id="retrieval-benchmark-title">Benchmark</h3></div><span class="settings-hint">Ephemeral overrides</span></div>
+          <form id="retrieval-benchmark-form" class="provider-form">
+            <label>Notebook<select id="benchmark-notebook" required></select></label>
+            <div class="settings-grid"><label>Candidate matrix<input id="benchmark-candidates" value="20, 15, 10, 8, 5" required aria-describedby="benchmark-help"></label><label>Warm repetitions<input id="benchmark-repetitions" type="number" min="1" max="20" value="5" required></label></div>
+            <p class="settings-hint" id="benchmark-help">Unique candidate limits from 1 to 200; up to 10 limits and 20 repetitions.</p>
+            <div class="form-actions"><button class="primary-button" id="benchmark-run" type="submit">Run benchmark</button><span class="settings-hint" id="benchmark-status" role="status" aria-live="polite"></span></div>
+          </form>
+          <div id="benchmark-progress" class="settings-hint" hidden></div>
+          <div id="benchmark-results" class="model-list" hidden></div>
+          <div class="form-actions" id="benchmark-actions" hidden><button type="button" class="text-button" id="benchmark-copy">Copy results</button><button type="button" class="text-button" id="benchmark-download">Download JSON</button></div>
+        </section>
     </div>
          <div class="surface settings-surface" id="settings-surface" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="surface-header"><div><span class="eyebrow">PREFERENCIAS</span><h2 id="settings-title">Settings</h2><p>Configura cómo se conecta Nexo a tus modelos.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
@@ -130,22 +142,10 @@
             <p class="empty-providers" id="embedding-empty" hidden>No embedding-capable models configured for the selected provider. Configure one in Providers &amp; Models.</p>
            <p class="settings-hint">Chunk sizes use estimated whitespace tokens, not tokenizer-exact tokens.</p>
              <div class="settings-grid"><label>Retrieval mode<select id="embedding-mode"><option value="hybrid">Hybrid</option><option value="dense">Dense</option><option value="lexical">Lexical</option></select></label><label>Dense candidates<input id="embedding-dense-candidates" type="number" min="1" max="200" value="20" required></label><label>Lexical candidates<input id="embedding-lexical-candidates" type="number" min="1" max="200" value="20" required></label><label>RRF K<input id="embedding-rrf-k" type="number" min="1" max="1000" value="60" required></label><label>Final Top K<input id="embedding-final-top-k" type="number" min="1" max="50" value="5" required></label><label>Target size<input id="embedding-target" type="number" min="1" max="10000" value="400" required></label><label>Maximum size<input id="embedding-max" type="number" min="1" max="20000" value="600" required></label><label>Overlap<input id="embedding-overlap" type="number" min="0" max="5000" value="40" required></label><label>Batch size<input id="embedding-batch" type="number" min="1" max="256" value="32" required></label><label>Max context<input id="embedding-context" type="number" min="1000" max="1000000" value="12000" required></label></div>
-              <div class="settings-subsection"><h4>Reranking</h4><div class="boolean-setting"><label for="reranking-enabled">Enable reranking</label><input id="reranking-enabled" type="checkbox"></div><div class="settings-grid" id="reranking-fields"><label>Provider<select id="reranker-provider"></select></label><label>Model<select id="reranker-model"></select></label><label>Candidate limit<input id="reranker-candidates" type="number" min="1" max="200" value="20" required></label><label>Timeout (ms)<input id="reranker-timeout" type="number" min="1" max="120000" value="3000" required></label></div><p class="settings-hint" id="reranker-empty" hidden>No reranking-capable models configured. Mark a model as Reranking in Providers &amp; Models.</p><p class="settings-hint">Reranking is query-time only and does not require re-indexing.</p><div class="form-actions"><button type="button" class="text-button" id="test-reranker">Test reranker</button><span class="settings-hint" id="reranker-test-result" role="status"></span></div></div>
+               <div class="settings-subsection"><h4>Reranking</h4><div class="boolean-setting"><label for="reranking-enabled">Enable reranking</label><input id="reranking-enabled" type="checkbox"></div><div class="settings-grid" id="reranking-fields"><label>Provider<select id="reranker-provider"></select></label><label>Model<select id="reranker-model"></select></label><label>Candidate limit<input id="reranker-candidates" type="number" min="1" max="200" value="8" required></label><label>Timeout (ms)<input id="reranker-timeout" type="number" min="1" max="120000" value="3000" required></label></div><p class="settings-hint" id="reranker-empty" hidden>No reranking-capable models configured. Mark a model as Reranking in Providers &amp; Models.</p><p class="settings-hint">Reranking is query-time only and does not require re-indexing.</p><div class="form-actions"><button type="button" class="text-button" id="test-reranker">Test reranker</button><span class="settings-hint" id="reranker-test-result" role="status"></span></div></div>
               <p class="settings-hint retrieval-help">Final Top K is the number of chunks passed to the model. It replaces the legacy Top K setting.</p>
            <div class="form-actions"><button type="button" class="text-button" id="test-embedding">Test embedding</button><button type="submit" class="primary-button">Save knowledge configuration</button></div>
          </form>
-        </section>
-        <section class="knowledge-settings" aria-labelledby="retrieval-benchmark-title">
-          <div class="settings-section-heading"><div><span class="eyebrow">RETRIEVAL LAB</span><h3 id="retrieval-benchmark-title">Benchmark</h3></div><span class="settings-hint">Ephemeral overrides</span></div>
-          <form id="retrieval-benchmark-form" class="provider-form">
-            <label>Notebook<select id="benchmark-notebook" required></select></label>
-            <div class="settings-grid"><label>Candidate matrix<input id="benchmark-candidates" value="20, 15, 10, 8, 5" required aria-describedby="benchmark-help"></label><label>Warm repetitions<input id="benchmark-repetitions" type="number" min="1" max="20" value="5" required></label></div>
-            <p class="settings-hint" id="benchmark-help">Unique candidate limits from 1 to 200; up to 10 limits and 20 repetitions.</p>
-            <div class="form-actions"><button class="primary-button" id="benchmark-run" type="submit">Run benchmark</button><span class="settings-hint" id="benchmark-status" role="status" aria-live="polite"></span></div>
-          </form>
-          <div id="benchmark-progress" class="settings-hint" hidden></div>
-          <div id="benchmark-results" class="model-list" hidden></div>
-          <div class="form-actions" id="benchmark-actions" hidden><button type="button" class="text-button" id="benchmark-copy">Copy results</button><button type="button" class="text-button" id="benchmark-download">Download JSON</button></div>
         </section>
         <p class="surface-foot">Las claves no se envían al navegador durante las consultas.</p>
        </div>

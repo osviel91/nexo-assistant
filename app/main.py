@@ -294,7 +294,7 @@ class EmbeddingConfigurationIn(BaseModel):
     reranking_enabled: bool = False
     reranker_provider_id: str = ""
     reranker_model: str = ""
-    reranker_candidate_limit: int = Field(default=20, ge=1, le=200)
+    reranker_candidate_limit: int = Field(default=8, ge=1, le=200)
     reranker_timeout_ms: int = Field(default=3000, ge=1, le=120000)
     relevance_gate_enabled: bool = True
     relevance_gate_min_term_overlap: int = Field(default=1, ge=1, le=20)

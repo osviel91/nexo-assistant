@@ -197,7 +197,7 @@ async function loadKnowledge() {
   $('#reranker-provider').onchange = () => renderRerankerModels();
   const rerankerView = renderRerankerModels(config?.reranker_model || '');
   $('#reranking-enabled').checked = rerankerView.enabled;
-  $('#reranker-candidates').value = config?.reranker_candidate_limit ?? 20;
+  $('#reranker-candidates').value = config?.reranker_candidate_limit ?? 8;
   $('#reranker-timeout').value = config?.reranker_timeout_ms ?? 3000;
   $('#reranking-enabled').onchange = () => { const current = rerankerState(rerankerProviders, $('#reranker-provider').value, $('#reranker-model').value, $('#reranking-enabled').checked); $('#reranking-enabled').checked = current.enabled; $('#test-reranker').disabled = !current.configured; };
   $('#reranking-fields').hidden = false;
@@ -221,7 +221,7 @@ async function loadTools() {
 
 async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
-async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); }
+async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) { benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); benchmarkNotebook.value = state.currentNotebookId || state.notebooks[0]?.id || ''; } }
 function renderNotebooks() {
   $('#notebook-list').innerHTML = state.notebooks.map((notebook) => `<article class="notebook-card" data-notebook-id="${escapeHtml(notebook.id)}"><button class="notebook-card-main"><strong>${escapeHtml(notebook.name)}</strong><span>${notebook.source_count} source${notebook.source_count === 1 ? '' : 's'}</span><small>${escapeHtml(notebook.description || 'Persistent knowledge space')}</small></button><div class="card-actions"><button data-notebook-edit="${escapeHtml(notebook.id)}">Edit</button><button data-notebook-delete="${escapeHtml(notebook.id)}">Delete</button></div></article>`).join('') || '<div class="empty-providers">No hay notebooks todavía. Crea uno para guardar fuentes.</div>';
   $('#notebook-list').querySelectorAll('.notebook-card-main').forEach((button) => { button.onclick = () => openNotebook(button.closest('[data-notebook-id]').dataset.notebookId); });
@@ -582,7 +582,7 @@ function openSurface(name) {
   $('#agents-surface').hidden = name !== 'agents';
   $('#notebooks-surface').hidden = name !== 'notebooks';
   $('#config-surface').hidden = name !== 'config';
-  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); if (state.notebooks.length) $('#benchmark-notebook').value = state.currentNotebookId || state.notebooks[0].id; $('#provider-name').focus(); }
+  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
   if (name === 'agents') { resetAgentForm(); renderAgentList(); }
   if (name === 'notebooks') { resetNotebookForm(); renderNotebooks(); }
 }
@@ -605,6 +605,7 @@ function renderBenchmarkResult(job) {
   const comparisons = experiments.flatMap((experiment) => experiment.scenarios.map((scenario) => {
     const control = scenarios.get(scenario.name);
     return { limit: experiment.candidate_limit, ...scenario,
+      candidate_limit: experiment.candidate_limit,
       latencyDelta: delta(scenario.latency_statistics.reranker_duration_ms.p50, control?.latency_statistics.reranker_duration_ms.p50, 2),
       qualityDelta: Object.fromEntries(['recall_at_k', 'precision_at_k', 'mrr', 'ndcg_at_k'].map((key) => [key, delta(scenario.quality_statistics[key], control?.quality_statistics[key])])) };
   }));
@@ -662,7 +663,7 @@ function openSidebar() { $('#sidebar').classList.add('open'); $('#sidebar-backdr
 function closeSidebar() { $('#sidebar').classList.remove('open'); $('#sidebar-backdrop').hidden = true; $('#open-sidebar').setAttribute('aria-expanded', 'false'); }
 
 function renderLab() {
-  const tabs = [{ id: 'models', label: 'Models' }];
+  const tabs = [{ id: 'models', label: 'Models' }, { id: 'benchmark', label: 'Retrieval benchmark' }];
   if (moduleEnabled('decision-runtime')) tabs.push({ id: 'decisions', label: 'Decisions' });
   if (state.modules.find((module) => module.id === 'decision-runtime')?.status?.shadow_enabled) tabs.push({ id: 'shadow', label: 'Shadow' });
   tabs.push({ id: 'runtime', label: 'Runtime' });
@@ -670,6 +671,10 @@ function renderLab() {
   if (!tabs.some((tab) => tab.id === state.labTab)) state.labTab = tabs[0].id;
   $('#lab-tabs').innerHTML = tabs.map((tab) => `<button class="lab-tab ${tab.id === state.labTab ? 'active' : ''}" data-lab-tab="${tab.id}">${tab.label}</button>`).join('');
   $('#lab-tabs').querySelectorAll('[data-lab-tab]').forEach((button) => { button.onclick = () => { state.labTab = button.dataset.labTab; renderLab(); }; });
+  const benchmarkActive = state.labTab === 'benchmark';
+  $('#lab-content').hidden = benchmarkActive;
+  $('#lab-benchmark').hidden = !benchmarkActive;
+  if (benchmarkActive) return;
    $('#lab-content').innerHTML = state.labTab === 'models' ? renderModels() : state.labTab === 'tools' ? renderTools() : state.labTab === 'shadow' ? renderShadow() : state.labTab === 'runtime' ? renderRuntime() : renderDecisions();
   if (state.labTab === 'decisions') bindDecisionPlayground();
 }

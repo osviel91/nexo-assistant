@@ -353,7 +353,7 @@ class RetrievalService:
         rerank_count = reranked_count = 0
         rerank_duration = 0.0
         if reranking_enabled:
-            rerank_count = min(getattr(config, "reranker_candidate_limit", 20), len(results))
+            rerank_count = min(getattr(config, "reranker_candidate_limit", 8), len(results))
             rerank_started = time.perf_counter()
             if self.reranker is None:
                 rerank_status, rerank_reason = "fallback", "unavailable"

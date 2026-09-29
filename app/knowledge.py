@@ -33,7 +33,7 @@ class EmbeddingConfiguration:
     reranking_enabled: bool = False
     reranker_provider_id: str = ""
     reranker_model: str = ""
-    reranker_candidate_limit: int = 20
+    reranker_candidate_limit: int = 8
     reranker_timeout_ms: int = 3000
     relevance_gate_enabled: bool = True
     relevance_gate_min_term_overlap: int = 1
@@ -69,7 +69,7 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("reranking_enabled", False)
     result.setdefault("reranker_provider_id", "")
     result.setdefault("reranker_model", "")
-    result.setdefault("reranker_candidate_limit", 20)
+    result.setdefault("reranker_candidate_limit", 8)
     result.setdefault("reranker_timeout_ms", 3000)
     result.setdefault("relevance_gate_enabled", True)
     result.setdefault("relevance_gate_min_term_overlap", 1)
@@ -119,7 +119,7 @@ def bootstrap_values() -> dict[str, Any]:
         "reranking_enabled": os.getenv("NEXO_RERANKING_ENABLED", "false"),
         "reranker_provider_id": os.getenv("NEXO_RERANKER_PROVIDER_ID", ""),
         "reranker_model": os.getenv("NEXO_RERANKER_MODEL", ""),
-        "reranker_candidate_limit": os.getenv("NEXO_RERANKER_CANDIDATES", "20"),
+        "reranker_candidate_limit": os.getenv("NEXO_RERANKER_CANDIDATES", "8"),
         "reranker_timeout_ms": os.getenv("NEXO_RERANKER_TIMEOUT_MS", "3000"),
         "relevance_gate_enabled": os.getenv("NEXO_RELEVANCE_GATE_ENABLED", "true"),
         "relevance_gate_min_term_overlap": os.getenv("NEXO_RELEVANCE_GATE_MIN_TERM_OVERLAP", "1"),
