@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -20,6 +21,7 @@ class ModelStreamChunk:
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
+    provider_ttft_ms: float | None = None
 
 
 class ModelAdapterError(Exception):
@@ -63,6 +65,8 @@ class OpenAICompatibleModelAdapter:
             "grounding_message_indexes": [index for index, message in enumerate(messages) if "Retrieved Notebook material" in str(message.get("content", ""))],
             "grounding_message_chars": sum(len(str(message.get("content", ""))) for message in messages if "Retrieved Notebook material" in str(message.get("content", ""))),
         })
+        request_started = time.perf_counter()
+        first_content = True
         try:
             async with self.client.stream("POST", self.url, headers=self.headers, json=payload) as response:
                 if response.status_code >= 400:
@@ -85,7 +89,10 @@ class OpenAICompatibleModelAdapter:
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                         tool_calls = delta.get("tool_calls", []) or []
-                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"), usage=packet.get("usage"))
+                        ttft = round((time.perf_counter() - request_started) * 1000, 2) if content and first_content else None
+                        if ttft is not None:
+                            first_content = False
+                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"), usage=packet.get("usage"), provider_ttft_ms=ttft)
                     except (ValueError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
                         continue
         except ModelAdapterError:

@@ -39,6 +39,7 @@ class AgentRunRequest:
     grounded_context: GroundedContext | None = None
     effective_configuration: "EffectiveRunConfiguration | None" = None
     knowledge_outcome: KnowledgeOutcome | None = None
+    request_started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -79,8 +80,9 @@ class AgentRuntime:
         sources: list[dict[str, Any]] = []
         tools_used: list[str] = []
         tool_rounds = 0
-        request_started = time.perf_counter()
+        request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
+        provider_ttft_ms: float | None = None
         usage: dict[str, int] = {}
         for _ in range(self.limits.max_tool_rounds + 1):
             reason_started = time.perf_counter()
@@ -114,6 +116,7 @@ class AgentRuntime:
                                 usage[key] = usage.get(key, 0) + chunk.usage[key]
                     if chunk.content:
                         first_content_at = first_content_at or time.perf_counter()
+                        provider_ttft_ms = provider_ttft_ms if provider_ttft_ms is not None else chunk.provider_ttft_ms
                         round_content += chunk.content
                         answer += chunk.content
                         yield {"delta": chunk.content}
@@ -144,7 +147,8 @@ class AgentRuntime:
             if not tool_calls:
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
                 completed_at = time.perf_counter()
-                telemetry = {**usage, "ttft_ms": round((first_content_at - request_started) * 1000, 2) if first_content_at else None,
+                telemetry = {**usage, "ttft_ms": provider_ttft_ms,
+                             "request_to_first_token_ms": round((first_content_at - request_started) * 1000, 2) if first_content_at else None,
                              "generation_duration_ms": round((completed_at - first_content_at) * 1000, 2) if first_content_at else None,
                              "total_duration_ms": round((completed_at - request_started) * 1000, 2)}
                 telemetry.update({"provider_ttft_ms": telemetry["ttft_ms"], "generation_ms": telemetry["generation_duration_ms"],

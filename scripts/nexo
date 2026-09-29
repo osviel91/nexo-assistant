@@ -60,7 +60,7 @@ case "${1:-}" in
       "$PYTHON" -m app.benchmark compare "$@"
       exit 0
     fi
-    [ "${1:-}" = "retrieval" ] || { printf '%s\n' 'Usage: ./scripts/nexo benchmark retrieval [--mode deterministic|live]' >&2; exit 2; }
+    [ "${1:-}" = "retrieval" ] || { printf '%s\n' 'Usage: ./scripts/nexo benchmark retrieval [--live] [--reranker-candidates 20,15,10,8,5]' >&2; exit 2; }
     shift
     "$PYTHON" -m app.benchmark run "$@"
     ;;

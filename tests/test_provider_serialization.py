@@ -74,6 +74,7 @@ class ProviderSerializationTests(unittest.TestCase):
         self.assertEqual(client.calls[0][2]["model"], "Gemma4-e2b")
         self.assertEqual(client.calls[0][2]["messages"][0]["role"], "system")
         self.assertEqual(events[-1].usage["total_tokens"], 6)
+        self.assertIsNotNone(events[0].provider_ttft_ms)
 
 
 if __name__ == "__main__":

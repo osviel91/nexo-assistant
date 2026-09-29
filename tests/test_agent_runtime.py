@@ -21,14 +21,15 @@ class Adapter:
             payload["tools"] = tools
         self.payloads.append(payload)
         for chunk in next(self.responses):
-            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"), usage=chunk.get("usage"))
+            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"), usage=chunk.get("usage"), provider_ttft_ms=chunk.get("provider_ttft_ms"))
 
 
-def run(runtime, adapter, registry, capabilities={"tool-calling"}):
+def run(runtime, adapter, registry, capabilities={"tool-calling"}, request_started_at=None):
     async def collect():
         context = ToolExecutionContext("conversation", "provider", "model", 0)
         effective_tools = ExposurePolicy().resolve(registry.tool_catalog_view(), capabilities)
-        request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], effective_tools, ToolExecutor(), context)
+        request = AgentRunRequest(adapter, [{"role": "user", "content": "x"}], effective_tools, ToolExecutor(), context,
+                                  request_started_at=request_started_at)
         return [event async for event in runtime.stream(request)]
     return asyncio.run(collect())
 
@@ -61,6 +62,17 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in trace_events], ["REASON", "ACT", "REASON"])
         self.assertNotIn("arguments", json.dumps(trace_events))
         self.assertIn("tools", adapter.payloads[0])
+
+    def test_provider_ttft_and_request_to_first_token_use_distinct_starts(self):
+        import time
+
+        adapter = Adapter([[{"content": "answer", "provider_ttft_ms": 12}]])
+        events = run(AgentRuntime(), adapter, self.registry(lambda *_: None), capabilities=set(),
+                     request_started_at=time.perf_counter() - 0.05)
+        telemetry = events[-1]["telemetry"]
+        self.assertEqual(telemetry["provider_ttft_ms"], 12)
+        self.assertGreaterEqual(telemetry["request_to_first_token_ms"], 40)
+        self.assertNotEqual(telemetry["provider_ttft_ms"], telemetry["request_to_first_token_ms"])
 
     def test_invalid_unknown_and_handler_errors_are_safe(self):
         async def broken(context, arguments):

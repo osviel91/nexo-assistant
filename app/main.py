@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 import uuid
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -99,10 +100,10 @@ notebooks = NotebookService(NotebookRepository(db, now), DATA_DIR / "notebook-so
 ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_root, now, MAX_UPLOAD)
 
 
-def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
+def retrieval_service(client: httpx.AsyncClient, configuration_override: EmbeddingConfiguration | None = None) -> RetrievalService:
     local_index = SQLiteVectorIndex(db, now)
     external = configured_vector_store(local_index)
-    configuration = embedding_configuration()
+    configuration = configuration_override or embedding_configuration()
     if configuration:
         with db() as connection:
             provider_row = connection.execute("SELECT * FROM providers WHERE id=?", (configuration.provider_id,)).fetchone()
@@ -325,7 +326,8 @@ def normalized_metrics(runtime: dict[str, Any]) -> dict[str, Any]:
     """One safe shape for persisted provider/runtime telemetry."""
     metrics = {key: runtime.get(key) for key in (
         "input_tokens", "output_tokens", "total_tokens", "context_window", "context_utilization",
-        "ttft_ms", "thinking_duration_ms", "thinking_tokens", "generation_duration_ms",
+        "ttft_ms", "provider_ttft_ms", "request_to_first_token_ms", "generation_ms", "total_request_ms",
+        "thinking_duration_ms", "thinking_tokens", "generation_duration_ms",
         "total_duration_ms", "tokens_per_second")}
     metrics["input_tokens"] = runtime.get("input_tokens", runtime.get("prompt_tokens"))
     metrics["output_tokens"] = runtime.get("output_tokens", runtime.get("completion_tokens"))
@@ -1029,6 +1031,7 @@ def branch_conversation(cid: str, message_id: str):
 @app.post("/api/chat")
 async def chat(req: ChatIn):
     if not req.content.strip() and not req.attachments: raise HTTPException(400, "Message is empty")
+    request_started_at = time.perf_counter()
     profile_config = None
     grounded_context: GroundedContext | None = None
     knowledge_outcome: KnowledgeOutcome | None = None
@@ -1283,7 +1286,8 @@ async def chat(req: ChatIn):
                                               profile_config.profile_id if profile_config else None,
                                                 profile_config.profile_name if profile_config else None,
                                                 runtime_snapshot, grounded_context, effective_configuration,
-                                                knowledge_outcome=knowledge_outcome)
+                                                knowledge_outcome=knowledge_outcome,
+                                                request_started_at=request_started_at)
                 async for event in agent_runtime.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]

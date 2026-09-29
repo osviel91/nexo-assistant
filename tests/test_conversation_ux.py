@@ -24,7 +24,9 @@ class ConversationUXTests(unittest.TestCase):
         self.assertEqual(main.get_preferences(), {"last_chat_model": "p::chat", "last_agent_profile": "agent-1"})
         self.assertEqual(main.normalized_metrics({"prompt_tokens": 10, "completion_tokens": 5, "context_window": 100}), {
             "input_tokens": 10, "output_tokens": 5, "total_tokens": None, "context_window": 100,
-            "context_utilization": 0.1, "ttft_ms": None, "thinking_duration_ms": None,
+            "context_utilization": 0.1, "ttft_ms": None, "provider_ttft_ms": None,
+            "request_to_first_token_ms": None, "generation_ms": None, "total_request_ms": None,
+            "thinking_duration_ms": None,
             "thinking_tokens": None, "generation_duration_ms": None, "total_duration_ms": None,
             "tokens_per_second": None,
         })

@@ -89,6 +89,7 @@ function formatRunDiagnostics(runtime = {}) {
     `Fused candidates: ${value('fused_candidate_count')}`,
     `Reranker: ${reranker}`,
     `Reranker status: ${diagnosticValue(runtime.reranker_status)}`,
+    `Reranker input candidates: ${value('reranker_candidate_count')}`,
     `Reranked candidates: ${value('reranked_candidate_count')}`,
     `Rerank duration: ${runtime.rerank_duration_ms == null ? 'unknown' : `${runtime.rerank_duration_ms} ms`}`,
     `Retrieved: ${value('retrieved_candidate_count', runtime.retrieval_count)}`,
@@ -102,9 +103,10 @@ function formatRunDiagnostics(runtime = {}) {
     `Cited sources: ${value('citation_count')}`,
     '',
     'Generation:',
-    `TTFT: ${metrics.ttft_ms == null ? 'unknown' : `${metrics.ttft_ms} ms`}`,
-    `Generation: ${metrics.generation_duration_ms == null ? 'unknown' : `${metrics.generation_duration_ms} ms`}`,
-    `Total: ${metrics.total_duration_ms == null ? 'unknown' : `${metrics.total_duration_ms} ms`}`,
+    `Request to first token: ${metrics.request_to_first_token_ms == null ? 'unknown' : `${metrics.request_to_first_token_ms} ms`}`,
+    `Provider TTFT: ${metrics.provider_ttft_ms == null ? 'unknown' : `${metrics.provider_ttft_ms} ms`}`,
+    `Generation: ${metrics.generation_ms == null ? 'unknown' : `${metrics.generation_ms} ms`}`,
+    `Total request: ${metrics.total_request_ms == null ? 'unknown' : `${metrics.total_request_ms} ms`}`,
   ].join('\n');
 }
 
@@ -593,7 +595,7 @@ function renderConfig() {
     const selectedModel = selected().model;
     const capabilities = selected().provider?.models.find((model) => model.id === selectedModel)?.capabilities || [];
     const thinkingEditor = !runtime.agent_profile_id && capabilities.includes('thinking') ? `<div class="config-block"><h3>THINKING</h3><label class="config-toggle"><input id="thinking-enabled" type="checkbox" ${state.chatThinking.enabled ? 'checked' : ''}> Enable supported thinking</label>${capabilities.includes('thinking-budget') ? `<label class="config-value">Budget <input id="thinking-budget" type="number" min="1" step="1" value="${escapeHtml(state.chatThinking.budget ?? '')}"></label>` : ''}<small class="config-note">Only adapter-declared capabilities are shown.</small></div>` : '';
-    return `${state.lastRuntime ? '' : '<div class="lab-empty">No completed run yet. Current selection will be used for the next run.</div>'}<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Mode', runtime.agent_profile_id || state.executionMode === 'agent' ? 'AGENT' : 'CHAT')}${row('Agent', runtime.agent_profile_name || currentAgent()?.name)}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider || (state.executionMode === 'agent' ? currentAgent()?.provider_id : selected().provider?.name))}${row('Model', runtime.resolved_model_name || runtime.resolved_model || (state.executionMode === 'agent' ? currentAgent()?.model_id : selected().model))}${row('Soul / instructions', runtime.system_instructions_applied ? 'Applied' : state.executionMode === 'agent' ? 'Agent controlled' : 'Not applied')}${row('Parameters', [runtime.temperature, runtime.top_p, runtime.top_k].filter((value) => value != null).join(' · '))}${row('Tools', (runtime.effective_tool_names || []).length || state.executionMode === 'agent' ? 'Agent controlled' : 'none')}</div>${thinkingEditor}<div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>GENERATION METRICS</h3>${row('Input / output', metrics.input_tokens != null || metrics.output_tokens != null ? `${metrics.input_tokens ?? 'unknown'} / ${metrics.output_tokens ?? 'unknown'}` : null)}${row('Context utilization', metrics.context_utilization)}${row('TTFT ms', metrics.ttft_ms)}${row('Generation ms', metrics.generation_duration_ms)}${row('Tokens/sec', metrics.tokens_per_second)}${row('Total ms', metrics.total_duration_ms)}</div>`;
+    return `${state.lastRuntime ? '' : '<div class="lab-empty">No completed run yet. Current selection will be used for the next run.</div>'}<div class="config-block"><h3>EFFECTIVE RUN</h3>${row('Mode', runtime.agent_profile_id || state.executionMode === 'agent' ? 'AGENT' : 'CHAT')}${row('Agent', runtime.agent_profile_name || currentAgent()?.name)}${row('Provider', runtime.resolved_provider_name || runtime.resolved_provider || (state.executionMode === 'agent' ? currentAgent()?.provider_id : selected().provider?.name))}${row('Model', runtime.resolved_model_name || runtime.resolved_model || (state.executionMode === 'agent' ? currentAgent()?.model_id : selected().model))}${row('Soul / instructions', runtime.system_instructions_applied ? 'Applied' : state.executionMode === 'agent' ? 'Agent controlled' : 'Not applied')}${row('Parameters', [runtime.temperature, runtime.top_p, runtime.top_k].filter((value) => value != null).join(' · '))}${row('Tools', (runtime.effective_tool_names || []).length || state.executionMode === 'agent' ? 'Agent controlled' : 'none')}</div>${thinkingEditor}<div class="config-block"><h3>KNOWLEDGE</h3>${knowledge}</div><div class="config-block"><h3>GENERATION METRICS</h3>${row('Input / output', metrics.input_tokens != null || metrics.output_tokens != null ? `${metrics.input_tokens ?? 'unknown'} / ${metrics.output_tokens ?? 'unknown'}` : null)}${row('Context utilization', metrics.context_utilization)}${row('Request to first token ms', metrics.request_to_first_token_ms)}${row('Provider TTFT ms', metrics.provider_ttft_ms)}${row('Generation ms', metrics.generation_ms)}${row('Total request ms', metrics.total_request_ms)}${row('Tokens/sec', metrics.tokens_per_second)}</div>`;
 }
 function bindConfig() {
   $('#thinking-enabled')?.addEventListener('change', (event) => { state.chatThinking.enabled = event.target.checked; });
