@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 import json
 import math
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from app.chunking import ChunkingConfig, chunk_document
 from app.embeddings import EmbeddingError, EmbeddingProvider, validate_batch
@@ -19,6 +20,132 @@ class IndexingInProgressError(RetrievalError):
     pass
 
 
+@dataclass(frozen=True)
+class RetrievalQuery:
+    notebook_id: str
+    text: str
+    limit: int = 5
+    mode: str = "hybrid"
+    dense_limit: int = 20
+    lexical_limit: int = 20
+    rrf_k: int = 60
+
+
+@dataclass
+class RetrievalCandidate:
+    chunk_id: str
+    source_id: str
+    document_id: str
+    text: str
+    provenance: list[dict]
+    canonical_start: int
+    canonical_end: int
+    source_title: str | None = None
+    document_content_hash: str | None = None
+    chunk_content_hash: str | None = None
+    ordinal: int = 0
+    dense_rank: int | None = None
+    dense_score: float | None = None
+    lexical_rank: int | None = None
+    lexical_score: float | None = None
+    fused_score: float = 0.0
+    rejection_reason: str | None = None
+    final_rank: int | None = None
+
+    @classmethod
+    def from_result(cls, result: Any) -> "RetrievalCandidate":
+        return cls(result.chunk_id, result.source_id, result.document_id, result.content, result.provenance,
+                   result.canonical_start, result.canonical_end, result.source_title,
+                   result.document_content_hash, result.chunk_content_hash, result.ordinal)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"chunk_id": self.chunk_id, "source_id": self.source_id, "document_id": self.document_id,
+                "score": round(self.fused_score, 6), "fused_score": round(self.fused_score, 6), "content": self.text,
+                "canonical_start": self.canonical_start, "canonical_end": self.canonical_end,
+                "provenance": self.provenance, "document_content_hash": self.document_content_hash,
+                "chunk_content_hash": self.chunk_content_hash, "source_title": self.source_title,
+                "dense_rank": self.dense_rank, "dense_score": self.dense_score,
+                "lexical_rank": self.lexical_rank, "lexical_score": self.lexical_score,
+                "final_rank": self.final_rank, "accepted": self.rejection_reason is None,
+                "rejection_reason": self.rejection_reason}
+
+
+class Retriever(Protocol):
+    async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]: ...
+
+
+class DenseRetriever:
+    def __init__(self, provider: EmbeddingProvider, index: VectorIndex, identity: dict | None = None) -> None:
+        self.provider, self.index, self.identity = provider, index, identity
+
+    async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]:
+        batch = await self.provider.embed([query.text])
+        validate_batch(batch, 1)
+        if hasattr(self.index, "search_candidates"):
+            results = self.index.search_candidates(query.notebook_id, batch.vectors[0], self.identity)
+        else:
+            results = self.index.search(query.notebook_id, batch.vectors[0], query.dense_limit, self.identity)
+        candidates = []
+        for rank, result in enumerate(results[:query.dense_limit], 1):
+            candidate = RetrievalCandidate.from_result(result)
+            candidate.dense_rank, candidate.dense_score = rank, result.score
+            candidates.append(candidate)
+        return candidates
+
+
+class LexicalRetriever:
+    def __init__(self, index: VectorIndex, identity: dict | None = None) -> None:
+        self.index, self.identity = index, identity
+
+    async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]:
+        search = getattr(self.index, "lexical_search", None)
+        if search is None:
+            raise RetrievalError("lexical retrieval is unavailable")
+        results = search(query.notebook_id, query.text, query.lexical_limit, self.identity) if self.identity is not None else search(query.notebook_id, query.text, query.lexical_limit)
+        candidates = []
+        for rank, result in enumerate(results, 1):
+            candidate = RetrievalCandidate.from_result(result)
+            candidate.lexical_rank, candidate.lexical_score = rank, result.score
+            candidates.append(candidate)
+        return candidates
+
+
+class RankFusion(Protocol):
+    def fuse(self, rankings: list[list[RetrievalCandidate]], k: int) -> list[RetrievalCandidate]: ...
+
+
+class ReciprocalRankFusion:
+    def fuse(self, rankings: list[list[RetrievalCandidate]], k: int = 60) -> list[RetrievalCandidate]:
+        merged: dict[str, RetrievalCandidate] = {}
+        for ranking in rankings:
+            for rank, candidate in enumerate(ranking, 1):
+                current = merged.setdefault(candidate.chunk_id, candidate)
+                if candidate.dense_rank is not None:
+                    current.dense_rank, current.dense_score = candidate.dense_rank, candidate.dense_score
+                if candidate.lexical_rank is not None:
+                    current.lexical_rank, current.lexical_score = candidate.lexical_rank, candidate.lexical_score
+                current.fused_score += 1 / (k + rank)
+        return sorted(merged.values(), key=lambda item: (-item.fused_score, item.chunk_id))
+
+
+def _deduplicate(candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
+    accepted: list[RetrievalCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate.chunk_id in seen:
+            continue
+        overlap = next((prior for prior in accepted if prior.source_id == candidate.source_id and
+                        min(prior.canonical_end, candidate.canonical_end) - max(prior.canonical_start, candidate.canonical_start) > 0 and
+                        (min(prior.canonical_end, candidate.canonical_end) - max(prior.canonical_start, candidate.canonical_start)) /
+                        max(1, min(prior.canonical_end - prior.canonical_start, candidate.canonical_end - candidate.canonical_start)) >= .8), None)
+        if overlap:
+            candidate.rejection_reason = "overlapping_chunk"
+            continue
+        seen.add(candidate.chunk_id)
+        accepted.append(candidate)
+    return accepted
+
+
 class RetrievalService:
     def __init__(self, repository: Any, index: VectorIndex, provider: EmbeddingProvider,
                  config: ChunkingConfig | None = None, batch_size: int = 32,
@@ -27,6 +154,7 @@ class RetrievalService:
         self.repository, self.index, self.provider = repository, index, provider
         self.config, self.batch_size = config or ChunkingConfig(), max(1, batch_size)
         self.embedding_config, self.provider_id, self.model_id = embedding_config, provider_id, model_id
+        self.last_diagnostics: dict[str, Any] = {}
 
     async def index_source(self, notebook_id: str, source_id: str) -> dict[str, Any]:
         source = self.repository.source(notebook_id, source_id)
@@ -81,24 +209,41 @@ class RetrievalService:
         if not query.strip():
             raise RetrievalError("query must not be empty")
         limit = min(max(limit, 1), 50)
-        batch = await self.provider.embed([query])
-        validate_batch(batch, 1)
-        identity = self._identity({"content_hash": ""}) if self.embedding_config else None
-        vector_results = self.index.search_candidates(notebook_id, batch.vectors[0], identity) if hasattr(self.index, "search_candidates") else self.index.search(notebook_id, batch.vectors[0], limit, identity)
-        lexical_results = self.index.lexical_search(notebook_id, query, len(vector_results), identity) if hasattr(self.index, "lexical_search") else []
-        ranked: dict[str, tuple[Any, float]] = {}
-        for rank, item in enumerate(vector_results, 1):
-            ranked[item.chunk_id] = (item, 1 / (60 + rank))
-        for rank, item in enumerate(lexical_results, 1):
-            current = ranked.get(item.chunk_id)
-            ranked[item.chunk_id] = (current[0] if current else item, (current[1] if current else 0) + 1 / (60 + rank))
-        results = [item for item, _ in sorted(ranked.values(), key=lambda value: (-value[1], -value[0].score, value[0].chunk_id))[:limit]]
-        return [{"chunk_id": item.chunk_id, "source_id": item.source_id, "document_id": item.document_id,
-                  "score": round(item.score, 6), "content": item.content, "canonical_start": item.canonical_start,
-                  "canonical_end": item.canonical_end, "provenance": item.provenance,
-                  "document_content_hash": item.document_content_hash, "chunk_content_hash": item.chunk_content_hash,
-                  "source_title": item.source_title}
-                  for item in results]
+        config = self.embedding_config
+        mode = getattr(config, "retrieval_mode", "hybrid") if config else "hybrid"
+        query_model = RetrievalQuery(notebook_id, query, limit, mode,
+                                     getattr(config, "dense_candidate_limit", max(limit * 4, 20)),
+                                     getattr(config, "lexical_candidate_limit", max(limit * 4, 20)),
+                                     getattr(config, "rrf_k", 60))
+        identity = self._identity({"content_hash": ""}) if config else None
+        dense, lexical = [], []
+        failures: list[str] = []
+        started = time.monotonic()
+        if mode in {"dense", "hybrid"}:
+            try:
+                dense = await DenseRetriever(self.provider, self.index, identity).retrieve(query_model)
+            except Exception as error:
+                failures.append("dense")
+        if mode in {"lexical", "hybrid"}:
+            try:
+                lexical = await LexicalRetriever(self.index, identity).retrieve(query_model)
+            except Exception:
+                failures.append("lexical")
+        if not dense and not lexical and failures and len(failures) == (2 if mode == "hybrid" else 1):
+            self.last_diagnostics = {"retrieval_mode": "unavailable", "errors": failures}
+            if mode == "dense":
+                raise RetrievalError("dense retrieval is unavailable")
+        fused = ReciprocalRankFusion().fuse([ranking for ranking in (dense, lexical) if ranking], query_model.rrf_k)
+        results = _deduplicate(fused)
+        effective_mode = "lexical" if not dense and mode in {"lexical", "hybrid"} else "dense" if not lexical else mode
+        for rank, candidate in enumerate(results[:limit], 1):
+            candidate.final_rank = rank
+        self.last_diagnostics = {"retrieval_mode": effective_mode,
+                                 "dense_candidate_count": len(dense), "lexical_candidate_count": len(lexical),
+                                 "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
+                                 "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2),
+                                 "fallback_errors": failures}
+        return [candidate.as_dict() for candidate in results[:limit]]
 
     async def inspect_search(self, notebook_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if not query.strip():

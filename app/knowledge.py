@@ -25,6 +25,11 @@ class EmbeddingConfiguration:
     config_version: int
     created_at: str
     updated_at: str
+    retrieval_mode: str = "hybrid"
+    dense_candidate_limit: int = 20
+    lexical_candidate_limit: int = 20
+    rrf_k: int = 60
+    final_top_k: int = 5
 
     @property
     def chunking_semantics(self) -> str:
@@ -42,6 +47,8 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
     limits = {
         "target_chunk_size": (1, 10000), "max_chunk_size": (1, 20000), "overlap": (0, 5000),
         "batch_size": (1, 256), "retrieval_top_k": (1, 50), "retrieval_max_context_chars": (1000, 1000000),
+        "dense_candidate_limit": (1, 200), "lexical_candidate_limit": (1, 200), "rrf_k": (1, 1000),
+        "final_top_k": (1, 50),
     }
     result = dict(values)
     for key, (low, high) in limits.items():
@@ -56,6 +63,11 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         raise KnowledgeConfigurationError("target_chunk_size must not exceed max_chunk_size")
     if result["overlap"] >= result["max_chunk_size"]:
         raise KnowledgeConfigurationError("overlap must be smaller than max_chunk_size")
+    result["retrieval_mode"] = str(result.get("retrieval_mode", "hybrid")).lower()
+    if result["retrieval_mode"] not in {"dense", "lexical", "hybrid"}:
+        raise KnowledgeConfigurationError("retrieval_mode must be dense, lexical, or hybrid")
+    if "final_top_k" not in values:
+        result["final_top_k"] = result["retrieval_top_k"]
     if not str(result.get("provider_id", "")).strip() or not str(result.get("model_id", "")).strip():
         raise KnowledgeConfigurationError("provider_id and model_id are required")
     return result
@@ -70,5 +82,10 @@ def bootstrap_values() -> dict[str, Any]:
         "overlap": os.getenv("NEXO_EMBEDDING_OVERLAP", "40"),
         "batch_size": os.getenv("NEXO_EMBEDDING_BATCH_SIZE", "32"),
         "retrieval_top_k": os.getenv("NEXO_RAG_TOP_K", "5"),
+        "retrieval_mode": os.getenv("NEXO_RAG_MODE", "hybrid"),
+        "dense_candidate_limit": os.getenv("NEXO_RAG_DENSE_CANDIDATES", "20"),
+        "lexical_candidate_limit": os.getenv("NEXO_RAG_LEXICAL_CANDIDATES", "20"),
+        "rrf_k": os.getenv("NEXO_RAG_RRF_K", "60"),
+        "final_top_k": os.getenv("NEXO_RAG_TOP_K", "5"),
         "retrieval_max_context_chars": os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000"),
     }

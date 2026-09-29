@@ -263,7 +263,26 @@ def _migration_11(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC, id DESC)")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11))
+def _migration_12(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
+      chunk_id UNINDEXED, notebook_id UNINDEXED, source_id UNINDEXED, content
+    );
+    INSERT INTO document_chunks_fts(chunk_id, notebook_id, source_id, content)
+      SELECT dc.id, dc.notebook_id, dc.source_id, dc.content
+      FROM document_chunks dc
+      WHERE NOT EXISTS (SELECT 1 FROM document_chunks_fts fts WHERE fts.chunk_id=dc.id);
+    """)
+    _add_column_if_missing(connection, "embedding_configurations", "retrieval_mode", "TEXT NOT NULL DEFAULT 'hybrid'")
+    _add_column_if_missing(connection, "embedding_configurations", "dense_candidate_limit", "INTEGER NOT NULL DEFAULT 20")
+    _add_column_if_missing(connection, "embedding_configurations", "lexical_candidate_limit", "INTEGER NOT NULL DEFAULT 20")
+    _add_column_if_missing(connection, "embedding_configurations", "rrf_k", "INTEGER NOT NULL DEFAULT 60")
+    _add_column_if_missing(connection, "embedding_configurations", "final_top_k", "INTEGER NOT NULL DEFAULT 5")
+    connection.execute("UPDATE embedding_configurations SET final_top_k=retrieval_top_k WHERE final_top_k IS NULL OR final_top_k=5 AND retrieval_top_k != 5")
+    connection.execute("UPDATE conversations SET execution_mode='agent' WHERE agent_profile_id IS NOT NULL AND execution_mode='chat'")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

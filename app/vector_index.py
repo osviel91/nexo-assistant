@@ -45,13 +45,6 @@ def _cosine(left: list[float], right: list[float]) -> float:
 class SQLiteVectorIndex:
     def __init__(self, connection_factory, now) -> None:
         self.connection_factory, self.now = connection_factory, now
-        with self.connection_factory() as connection:
-            connection.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
-                chunk_id UNINDEXED, notebook_id UNINDEXED, source_id UNINDEXED, content
-            )""")
-            connection.execute("""INSERT INTO document_chunks_fts(chunk_id, notebook_id, source_id, content)
-                SELECT dc.id, dc.notebook_id, dc.source_id, dc.content FROM document_chunks dc
-                WHERE NOT EXISTS (SELECT 1 FROM document_chunks_fts fts WHERE fts.chunk_id=dc.id)""")
 
     def upsert(self, chunks: list[DocumentChunk], vectors: list[list[float]], identity: dict | None = None) -> int:
         if not chunks:
@@ -127,7 +120,7 @@ class SQLiteVectorIndex:
         terms = [term for term in re.findall(r"[\wÀ-ÿ]+", query, re.UNICODE) if len(term) > 1]
         if not terms:
             return []
-        match = " OR ".join(f'{term.replace(chr(34), "")}*' for term in terms)
+        match = " OR ".join('"' + term.replace('"', '""') + '"*' for term in terms)
         with self.connection_factory() as connection:
             query_sql = """SELECT dc.*, ns.title AS source_title, cd.content_hash AS document_content_hash,
                     bm25(document_chunks_fts) AS lexical_score

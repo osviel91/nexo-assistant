@@ -217,6 +217,11 @@ class EmbeddingConfigurationIn(BaseModel):
     batch_size: int = Field(default=32, ge=1, le=256)
     retrieval_top_k: int = Field(default=5, ge=1, le=50)
     retrieval_max_context_chars: int = Field(default=12000, ge=1000, le=1000000)
+    retrieval_mode: Literal["dense", "lexical", "hybrid"] = "hybrid"
+    dense_candidate_limit: int = Field(default=20, ge=1, le=200)
+    lexical_candidate_limit: int = Field(default=20, ge=1, le=200)
+    rrf_k: int = Field(default=60, ge=1, le=1000)
+    final_top_k: int = Field(default=5, ge=1, le=50)
 
 
 def embedding_configuration() -> EmbeddingConfiguration | None:
@@ -239,8 +244,8 @@ def embedding_configuration() -> EmbeddingConfiguration | None:
             return None
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], 1, timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], 1, timestamp, timestamp))
         return EmbeddingConfiguration(**dict(connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()))
 
 
@@ -354,8 +359,8 @@ def save_embedding_settings(item: EmbeddingConfigurationIn):
         version = (old["config_version"] + 1) if old else 1
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], version, old["created_at"] if old else timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], version, old["created_at"] if old else timestamp, timestamp))
         affecting = not old or any(old[key] != values[key] for key in ("provider_id", "model_id", "target_chunk_size", "max_chunk_size", "overlap"))
         if affecting and old:
             connection.execute("UPDATE notebook_sources SET indexing_status='outdated', indexing_error=NULL, updated_at=? WHERE indexing_status='ready'", (timestamp,))
@@ -1062,9 +1067,10 @@ async def chat(req: ChatIn):
                     retrieve_event = event_sink.start_event("RETRIEVE", "notebook retrieval", {"notebook_id": notebook_id, "retrieval_count": 0})
                     try:
                         config = embedding_configuration()
-                        top_k = config.retrieval_top_k if config else min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
+                        top_k = config.final_top_k if config else min(max(int(os.getenv("NEXO_RAG_TOP_K", "5")), 1), 50)
                         max_chars = config.retrieval_max_context_chars if config else min(max(int(os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000")), 1000), 100000)
-                        retrieval = await retrieval_service(client).search(notebook_id, req.content, top_k)
+                        service = retrieval_service(client)
+                        retrieval = await service.search(notebook_id, req.content, top_k)
                         grounded_context = GroundedContext.build(notebook_id, req.content, retrieval, max_chars)
                         retrieval_metadata = {"notebook_id": notebook_id, "retrieval_status": "completed",
                                                "retrieval_count": len(grounded_context.retrieval_results),
@@ -1074,7 +1080,8 @@ async def chat(req: ChatIn):
                                                "selected_chunk_ids": [item["chunk_id"] for item in grounded_context.retrieval_results],
                                                "top_scores": [item.get("score") for item in grounded_context.retrieval_results],
                                                "grounded_context_created": True,
-                                               "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
+                                                **service.last_diagnostics,
+                                                "retrieval_duration_ms": round((asyncio.get_running_loop().time() - retrieve_started) * 1000, 2),
                                               "top_score": grounded_context.retrieval_results[0].get("score") if grounded_context.retrieval_results else None,
                                                "context_chars": grounded_context.context_chars, "grounding_context_chars": grounded_context.context_chars,
                                                "grounding_chunks": len(grounded_context.retrieval_results),
