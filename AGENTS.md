@@ -8,9 +8,9 @@
 
 ## Development
 
-- Local setup and run: `python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --reload --host 0.0.0.0 --port 8787`.
+- Canonical setup and commands: `./scripts/nexo bootstrap`, `./scripts/nexo dev`, and `./scripts/nexo check`. See `docs/development.md` and `docs/coding-agent.md`.
 - Container verification/deployment uses `docker compose up -d --build`; preserve the named `nexo-data` volume so SQLite data is not lost.
-- There are no configured tests, lint, formatter, typecheck, CI, or codegen commands. At minimum, run `python -m compileall app` after backend edits and exercise `GET /api/health` when the app is running.
+- The quality gate is `./scripts/nexo check`; it runs the pinned Python suite, `compileall`, frontend regressions, and hygiene checks. Use `./scripts/nexo smoke` for a local health endpoint check.
 
 ## Runtime Constraints
 

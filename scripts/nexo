@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VENV="$ROOT/.venv"
+PYTHON="$VENV/bin/python"
+
+cd "$ROOT"
+
+bootstrap() {
+  command -v python3 >/dev/null 2>&1 || { printf '%s\n' 'python3 is required to create .venv' >&2; exit 1; }
+  python3 -c 'import sys; sys.exit("Python 3.12+ is required") if sys.version_info < (3, 12) else None'
+  [ -x "$PYTHON" ] || python3 -m venv "$VENV"
+  "$PYTHON" -m pip install -r requirements.txt
+}
+
+require_venv() {
+  [ -x "$PYTHON" ] || { printf '%s\n' 'Missing .venv. Run ./scripts/nexo bootstrap first.' >&2; exit 1; }
+}
+
+test_backend() { require_venv; "$PYTHON" -m pytest -q tests --ignore='tests/*.mjs'; }
+test_frontend() {
+  command -v node >/dev/null 2>&1 || { printf '%s\n' 'node is required for frontend tests' >&2; exit 1; }
+  for test in tests/*.mjs; do node "$test"; done
+}
+
+case "${1:-}" in
+  bootstrap) bootstrap ;;
+  dev) bootstrap; exec "$PYTHON" -m uvicorn app.main:app --reload --host 0.0.0.0 --port "${PORT:-8787}" ;;
+  test-backend) test_backend ;;
+  test-frontend) test_frontend ;;
+  test) test_backend; test_frontend ;;
+  check)
+    git diff --check
+    require_venv
+    "$PYTHON" -m compileall -q app
+    test_backend
+    test_frontend
+    ;;
+  smoke)
+    require_venv
+    data_dir=$(mktemp -d "${TMPDIR:-/tmp}/nexo-smoke.XXXXXX")
+    port=${PORT:-18787}
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; rm -rf "$data_dir"' EXIT INT TERM
+    NEXO_DATA_DIR="$data_dir" NEXO_VECTOR_STORE=local NEXO_MODULES=attachments "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port "$port" >/tmp/nexo-smoke.log 2>&1 &
+    server_pid=$!
+    ready=0
+    for _ in $(seq 1 30); do
+      if curl --fail --silent "http://127.0.0.1:$port/api/health" >/dev/null 2>&1; then ready=1; break; fi
+      sleep 1
+    done
+    [ "$ready" -eq 1 ] || { cat /tmp/nexo-smoke.log >&2; exit 1; }
+    printf '%s\n' 'smoke: GET /api/health passed'
+    ;;
+  *)
+    printf '%s\n' 'Usage: ./scripts/nexo {bootstrap|dev|test|test-backend|test-frontend|check|smoke}' >&2
+    exit 2
+    ;;
+esac
