@@ -122,7 +122,7 @@
         <label>Modelos <span class="optional">(uno por línea; también puedes detectarlos después)</span><textarea id="provider-models" rows="3" placeholder="model-id-1&#10;model-id-2"></textarea></label>
         <div class="form-actions"><button type="button" class="text-button" id="cancel-edit" hidden>Cancelar</button><button type="submit" class="primary-button" id="save-provider">Guardar proveedor</button></div>
        </form>
-       <section class="knowledge-settings" aria-labelledby="knowledge-title">
+        <section class="knowledge-settings" aria-labelledby="knowledge-title">
          <div class="settings-section-heading"><div><span class="eyebrow">KNOWLEDGE</span><h3 id="knowledge-title">Embeddings &amp; retrieval</h3></div><span class="settings-hint" id="knowledge-health">Loading</span></div>
          <form id="embedding-form" class="provider-form">
            <label>Provider<select id="embedding-provider" required></select></label>
@@ -134,8 +134,20 @@
               <p class="settings-hint retrieval-help">Final Top K is the number of chunks passed to the model. It replaces the legacy Top K setting.</p>
            <div class="form-actions"><button type="button" class="text-button" id="test-embedding">Test embedding</button><button type="submit" class="primary-button">Save knowledge configuration</button></div>
          </form>
-       </section>
-       <p class="surface-foot">Las claves no se envían al navegador durante las consultas.</p>
+        </section>
+        <section class="knowledge-settings" aria-labelledby="retrieval-benchmark-title">
+          <div class="settings-section-heading"><div><span class="eyebrow">RETRIEVAL LAB</span><h3 id="retrieval-benchmark-title">Benchmark</h3></div><span class="settings-hint">Ephemeral overrides</span></div>
+          <form id="retrieval-benchmark-form" class="provider-form">
+            <label>Notebook<select id="benchmark-notebook" required></select></label>
+            <div class="settings-grid"><label>Candidate matrix<input id="benchmark-candidates" value="20, 15, 10, 8, 5" required aria-describedby="benchmark-help"></label><label>Warm repetitions<input id="benchmark-repetitions" type="number" min="1" max="20" value="5" required></label></div>
+            <p class="settings-hint" id="benchmark-help">Unique candidate limits from 1 to 200; up to 10 limits and 20 repetitions.</p>
+            <div class="form-actions"><button class="primary-button" id="benchmark-run" type="submit">Run benchmark</button><span class="settings-hint" id="benchmark-status" role="status" aria-live="polite"></span></div>
+          </form>
+          <div id="benchmark-progress" class="settings-hint" hidden></div>
+          <div id="benchmark-results" class="model-list" hidden></div>
+          <div class="form-actions" id="benchmark-actions" hidden><button type="button" class="text-button" id="benchmark-copy">Copy results</button><button type="button" class="text-button" id="benchmark-download">Download JSON</button></div>
+        </section>
+        <p class="surface-foot">Las claves no se envían al navegador durante las consultas.</p>
        </div>
       <div class="surface notebooks-surface" id="notebooks-surface" hidden role="dialog" aria-modal="true" aria-labelledby="notebooks-title">
        <div class="surface-header"><div><span class="eyebrow">PERSISTENT KNOWLEDGE</span><h2 id="notebooks-title">Notebooks</h2><p>Organiza fuentes persistentes. El procesamiento de conocimiento llegará en una etapa posterior.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>

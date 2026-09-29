@@ -221,7 +221,7 @@ async function loadTools() {
 
 async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
-async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); }
+async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); }
 function renderNotebooks() {
   $('#notebook-list').innerHTML = state.notebooks.map((notebook) => `<article class="notebook-card" data-notebook-id="${escapeHtml(notebook.id)}"><button class="notebook-card-main"><strong>${escapeHtml(notebook.name)}</strong><span>${notebook.source_count} source${notebook.source_count === 1 ? '' : 's'}</span><small>${escapeHtml(notebook.description || 'Persistent knowledge space')}</small></button><div class="card-actions"><button data-notebook-edit="${escapeHtml(notebook.id)}">Edit</button><button data-notebook-delete="${escapeHtml(notebook.id)}">Delete</button></div></article>`).join('') || '<div class="empty-providers">No hay notebooks todavía. Crea uno para guardar fuentes.</div>';
   $('#notebook-list').querySelectorAll('.notebook-card-main').forEach((button) => { button.onclick = () => openNotebook(button.closest('[data-notebook-id]').dataset.notebookId); });
@@ -582,10 +582,58 @@ function openSurface(name) {
   $('#agents-surface').hidden = name !== 'agents';
   $('#notebooks-surface').hidden = name !== 'notebooks';
   $('#config-surface').hidden = name !== 'config';
-  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
+  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); if (state.notebooks.length) $('#benchmark-notebook').value = state.currentNotebookId || state.notebooks[0].id; $('#provider-name').focus(); }
   if (name === 'agents') { resetAgentForm(); renderAgentList(); }
   if (name === 'notebooks') { resetNotebookForm(); renderNotebooks(); }
 }
+
+let benchmarkResult = null;
+function renderBenchmarkResult(job) {
+  const progress = $('#benchmark-progress');
+  progress.hidden = false;
+  progress.textContent = job.status === 'running'
+    ? `${job.progress.completed}/${job.progress.total} scenarios · ${job.progress.scenario || 'Preparing'} · candidate limit ${job.progress.candidate_limit ?? '—'}`
+    : job.status === 'failed' ? `Failed: ${job.error}` : 'Benchmark completed';
+  $('#benchmark-status').textContent = job.status;
+  $('#benchmark-run').disabled = job.status === 'running';
+  if (job.status !== 'completed') return;
+  benchmarkResult = job.result;
+  const experiments = benchmarkResult.experiments || [];
+  const baseline = experiments.find((experiment) => experiment.candidate_limit === 20);
+  const scenarios = new Map((baseline?.scenarios || []).map((scenario) => [scenario.name, scenario]));
+  const delta = (value, base, digits = 4) => value == null || base == null ? 'n/a' : (value - base).toFixed(digits);
+  const comparisons = experiments.flatMap((experiment) => experiment.scenarios.map((scenario) => {
+    const control = scenarios.get(scenario.name);
+    return { limit: experiment.candidate_limit, ...scenario,
+      latencyDelta: delta(scenario.latency_statistics.reranker_duration_ms.p50, control?.latency_statistics.reranker_duration_ms.p50, 2),
+      qualityDelta: Object.fromEntries(['recall_at_k', 'precision_at_k', 'mrr', 'ndcg_at_k'].map((key) => [key, delta(scenario.quality_statistics[key], control?.quality_statistics[key])])) };
+  }));
+  $('#benchmark-results').hidden = false;
+  $('#benchmark-results').innerHTML = `<div class="model-row"><strong>Limit / scenario</strong><strong>Reranker p50 Δ ms</strong><strong>Recall Δ</strong><strong>Precision Δ</strong><strong>MRR Δ</strong><strong>nDCG Δ</strong><strong>Invalid</strong></div>${comparisons.map((row) => `<div class="model-row"><strong>${row.candidate_limit} · ${escapeHtml(row.name)}</strong><span>${escapeHtml(row.latencyDelta)}</span><span>${escapeHtml(row.qualityDelta.recall_at_k)}</span><span>${escapeHtml(row.qualityDelta.precision_at_k)}</span><span>${escapeHtml(row.qualityDelta.mrr)}</span><span>${escapeHtml(row.qualityDelta.ndcg_at_k)}</span><span>${row.invalid_runs.length}</span></div>`).join('')}`;
+  $('#benchmark-actions').hidden = false;
+}
+
+$('#retrieval-benchmark-form').onsubmit = async (event) => {
+  event.preventDefault();
+  let candidate_limits;
+  try {
+    candidate_limits = $('#benchmark-candidates').value.split(',').map((value) => Number(value.trim()));
+    if (!candidate_limits.length || candidate_limits.length > 10 || candidate_limits.some((value) => !Number.isInteger(value) || value < 1 || value > 200) || new Set(candidate_limits).size !== candidate_limits.length) throw Error('Enter 1-10 unique limits from 1 to 200');
+    const repetitions = Number($('#benchmark-repetitions').value);
+    if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 20) throw Error('Repetitions must be from 1 to 20');
+    benchmarkResult = null;
+    $('#benchmark-results').hidden = true; $('#benchmark-actions').hidden = true;
+    const job = await api('/settings/retrieval-benchmark', { method: 'POST', body: JSON.stringify({ notebook_id: $('#benchmark-notebook').value, candidate_limits, repetitions }) });
+    renderBenchmarkResult(job);
+    while (job.status === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      Object.assign(job, await api(`/settings/retrieval-benchmark/${encodeURIComponent(job.id)}`));
+      renderBenchmarkResult(job);
+    }
+  } catch (error) { $('#benchmark-status').textContent = error.message; }
+};
+$('#benchmark-copy').onclick = async () => { if (benchmarkResult && await copyText(JSON.stringify(benchmarkResult, null, 2))) toast('Benchmark copied'); };
+$('#benchmark-download').onclick = () => { if (!benchmarkResult) return; const url = URL.createObjectURL(new Blob([`${JSON.stringify(benchmarkResult, null, 2)}\n`], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'retrieval-benchmark.json'; anchor.click(); URL.revokeObjectURL(url); };
 
 function renderConfig() {
   const runtime = state.lastRuntime || {};

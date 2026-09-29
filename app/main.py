@@ -44,6 +44,7 @@ from app.vector_store import LocalVectorStore, QdrantVectorStore, VectorStoreHea
 from app.grounding import GroundedContext, KnowledgeOutcome, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
 from app.chunking import ChunkingConfig
+from app.benchmark import RetrievalBenchmarkService
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,6 +99,34 @@ agent_profiles = AgentProfileService(AgentProfileRepository(db, now), module_reg
 agent_profile_resolver = AgentProfileResolver(agent_profiles.repository)
 notebooks = NotebookService(NotebookRepository(db, now), DATA_DIR / "notebook-sources")
 ingestion = NotebookIngestionService(notebooks.repository, notebooks.storage_root, now, MAX_UPLOAD)
+retrieval_benchmark = RetrievalBenchmarkService()
+
+
+class RetrievalBenchmarkRequest(BaseModel):
+    notebook_id: str
+    candidate_limits: list[int] = Field(min_length=1, max_length=10)
+    repetitions: int = Field(ge=1, le=20)
+
+
+@app.post("/api/settings/retrieval-benchmark")
+async def start_retrieval_benchmark(item: RetrievalBenchmarkRequest):
+    try:
+        notebook = notebooks.get(item.notebook_id)
+        return await retrieval_benchmark.start(item.repetitions, item.candidate_limits, notebook["name"])
+    except NotebookNotFoundError:
+        raise HTTPException(404, "notebook not found")
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
+
+
+@app.get("/api/settings/retrieval-benchmark/{job_id}")
+def get_retrieval_benchmark(job_id: str):
+    job = retrieval_benchmark.get(job_id)
+    if not job:
+        raise HTTPException(404, "benchmark job not found")
+    return job
 
 
 def retrieval_service(client: httpx.AsyncClient, configuration_override: EmbeddingConfiguration | None = None) -> RetrievalService:

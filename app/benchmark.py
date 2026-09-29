@@ -7,6 +7,7 @@ import json
 import os
 import statistics
 import subprocess
+import uuid
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,7 +128,7 @@ def _live_gold(chunks: list[Any], scenario: str) -> tuple[dict[str, list[Any]], 
     return ({"chunk_ids": [row["id"] for row in matches], "source_ids": [], "page_numbers": []}, [row["source_id"] for row in matches])
 
 
-async def _run_live(repetitions: int, candidate_limits: list[int], notebook_name: str) -> dict[str, Any]:
+async def _run_live(repetitions: int, candidate_limits: list[int], notebook_name: str, progress=None, include_git_commit=False) -> dict[str, Any]:
     from app import main
     import httpx
 
@@ -149,6 +150,10 @@ async def _run_live(repetitions: int, candidate_limits: list[int], notebook_name
     for candidate_limit in candidate_limits:
         rows = []
         for scenario_index, (name, query, conversation, _, expected_outcome) in enumerate(SCENARIOS):
+            if progress:
+                progress({"candidate_limit": candidate_limit, "scenario": name,
+                          "completed": len(output) * len(SCENARIOS) + scenario_index,
+                          "total": len(candidate_limits) * len(SCENARIOS)})
             async def measure():
                 async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                     override = replace(config, reranker_candidate_limit=candidate_limit)
@@ -212,15 +217,81 @@ async def _run_live(repetitions: int, candidate_limits: list[int], notebook_name
         output.append({"candidate_limit": candidate_limit, "provider_id": config.reranker_provider_id,
                        "model_id": config.reranker_model, "scenarios": rows})
     return {"benchmark_version": "11B.1-1", "timestamp": datetime.now(timezone.utc).isoformat(),
-            "git_commit": _git_commit(), "mode": "live", "environment": {"vector_store": "qdrant", "reranker": "configured"},
+             "git_commit": _git_commit() if include_git_commit else None, "mode": "live", "environment": {"vector_store": "qdrant", "reranker": "configured"},
             "configuration": {"candidate_limits": candidate_limits, "repetitions": repetitions, "warm_up": 1,
                                "notebook": notebook_name, "cold_scope": "first candidate-20 direct_lexical run only; remote provider state cannot be reset"},
-            "experiments": output}
+             "experiments": output}
+
+
+class RetrievalBenchmarkService:
+    """Shared CLI/API entry to the Stage 11B.1 benchmark implementation."""
+
+    MAX_CANDIDATE_LIMITS = 10
+    MAX_REPETITIONS = 20
+
+    def __init__(self):
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.active_job: str | None = None
+        self._lock = asyncio.Lock()
+
+    @classmethod
+    def validate(cls, repetitions: int, candidate_limits: list[int]) -> None:
+        if not 1 <= repetitions <= cls.MAX_REPETITIONS:
+            raise ValueError(f"repetitions must be between 1 and {cls.MAX_REPETITIONS}")
+        if not candidate_limits or len(candidate_limits) > cls.MAX_CANDIDATE_LIMITS:
+            raise ValueError(f"candidate_limits must contain 1 to {cls.MAX_CANDIDATE_LIMITS} values")
+        if any(not isinstance(value, int) or not 1 <= value <= 200 for value in candidate_limits) or len(set(candidate_limits)) != len(candidate_limits):
+            raise ValueError("candidate limits must be unique integers from 1 to 200")
+
+    async def run(self, repetitions: int, candidate_limits: list[int], notebook_name: str, include_git_commit=False) -> dict[str, Any]:
+        self.validate(repetitions, candidate_limits)
+        limits = [20, *[limit for limit in candidate_limits if limit != 20]]
+        return await _run_live(repetitions, limits, notebook_name, include_git_commit=include_git_commit)
+
+    async def start(self, repetitions: int, candidate_limits: list[int], notebook_name: str) -> dict[str, Any]:
+        self.validate(repetitions, candidate_limits)
+        async with self._lock:
+            if self.active_job:
+                raise RuntimeError("a retrieval benchmark is already running")
+            job_id = uuid.uuid4().hex
+            total = len([20, *[limit for limit in candidate_limits if limit != 20]]) * len(SCENARIOS)
+            job = {"id": job_id, "status": "running", "progress": {"completed": 0,
+                    "total": total}, "result": None, "error": None}
+            self.jobs[job_id] = job
+            self.active_job = job_id
+            asyncio.create_task(self._execute(job, repetitions, candidate_limits, notebook_name))
+            return self.public(job)
+
+    async def _execute(self, job, repetitions, candidate_limits, notebook_name):
+        def update(progress):
+            job["progress"].update(progress)
+        try:
+            job["result"] = await _run_live(repetitions, [20, *[n for n in candidate_limits if n != 20]], notebook_name, update)
+            job["progress"].update(completed=job["progress"]["total"], scenario=None, candidate_limit=None)
+            job["status"] = "completed"
+        except Exception as error:
+            job["status"] = "failed"
+            job["error"] = f"Benchmark failed ({type(error).__name__})"
+        finally:
+            async with self._lock:
+                self.active_job = None
+                while len(self.jobs) > 10:
+                    oldest = next(iter(self.jobs))
+                    if oldest == self.active_job:
+                        break
+                    self.jobs.pop(oldest)
+
+    @staticmethod
+    def public(job):
+        return {key: job[key] for key in ("id", "status", "progress", "result", "error")}
+
+    def get(self, job_id: str):
+        job = self.jobs.get(job_id)
+        return self.public(job) if job else None
 
 
 def run_live(repetitions: int, candidate_limits: list[int], notebook_name: str) -> dict[str, Any]:
-    limits = [20, *[limit for limit in candidate_limits if limit != 20]]
-    return asyncio.run(_run_live(repetitions, limits, notebook_name))
+    return asyncio.run(RetrievalBenchmarkService().run(repetitions, candidate_limits, notebook_name, include_git_commit=True))
 
 
 def _git_commit() -> str | None:
