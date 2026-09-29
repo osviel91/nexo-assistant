@@ -52,6 +52,16 @@ class ArtifactTests(unittest.TestCase):
         doc = sandbox_document(artifact["data"]["html"])
         self.assertIn("default-src 'none'", doc)
 
+    def test_render_tool_schema_and_non_table_payloads_match_validator(self):
+        tool = next(tool for tool in self.context.tools.registered_tools() if tool.name == "native.render_artifact")
+        self.assertEqual(tool.parameters["properties"]["data"]["anyOf"], [{"type": "object"}, {"type": "array"}])
+        for kind, data in (
+            ("metrics", [{"label": "p50", "value": 12}]),
+            ("bar", {"labels": ["Jan", "Feb"], "series": [{"name": "Sales", "values": [12, 15]}]}),
+        ):
+            result = asyncio.run(self.context.tools.invoke("native.render_artifact", self.execution, {"type": kind, "title": "Example", "data": data}))
+            self.assertEqual(result["artifacts"][0]["type"], kind)
+
     def test_artifact_survives_reload_and_branch(self):
         from pathlib import Path
         from app import main
