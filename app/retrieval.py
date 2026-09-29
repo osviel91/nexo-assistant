@@ -226,6 +226,7 @@ class RetrievalService:
         identity = self._identity({"content_hash": ""}) if config else None
         dense, lexical = [], []
         failures: list[str] = []
+        failure_reasons: dict[str, str] = {}
         dense_duration = lexical_duration = 0.0
         started = time.monotonic()
         if mode in {"dense", "hybrid"}:
@@ -234,16 +235,18 @@ class RetrievalService:
                 dense = await DenseRetriever(self.provider, self.index, identity).retrieve(query_model)
             except Exception as error:
                 failures.append("dense")
+                failure_reasons["dense"] = "embedding_error" if isinstance(error, EmbeddingError) else "provider_error"
             dense_duration = round((time.monotonic() - phase_started) * 1000, 2)
         if mode in {"lexical", "hybrid"}:
             phase_started = time.monotonic()
             try:
                 lexical = await LexicalRetriever(self.index, identity).retrieve(query_model)
-            except Exception:
+            except Exception as error:
                 failures.append("lexical")
+                failure_reasons["lexical"] = "unavailable" if isinstance(error, RetrievalError) else "index_error"
             lexical_duration = round((time.monotonic() - phase_started) * 1000, 2)
         if not dense and not lexical and failures and len(failures) == (2 if mode == "hybrid" else 1):
-            self.last_diagnostics = {"retrieval_mode": "unavailable", "errors": failures}
+            self.last_diagnostics = self._diagnostics(mode, "none", dense, lexical, failures, failure_reasons)
             if mode == "dense":
                 raise RetrievalError("dense retrieval is unavailable")
         fusion_started = time.monotonic()
@@ -252,7 +255,7 @@ class RetrievalService:
         for rank, candidate in enumerate(fused, 1):
             candidate.rrf_rank = rank
         results = _deduplicate(fused)
-        effective_mode = "lexical" if not dense and mode in {"lexical", "hybrid"} else "dense" if not lexical else mode
+        effective_mode = "hybrid" if dense and lexical else "dense" if dense else "lexical" if lexical else "none"
         reranking_enabled = bool(getattr(config, "reranking_enabled", False))
         rerank_status, rerank_reason = "disabled", None
         rerank_count = reranked_count = 0
@@ -282,8 +285,7 @@ class RetrievalService:
             rerank_duration = round((time.monotonic() - rerank_started) * 1000, 2)
         for rank, candidate in enumerate(results[:limit], 1):
             candidate.final_rank = rank
-        self.last_diagnostics = {"retrieval_mode": effective_mode,
-                                  "dense_candidate_count": len(dense), "lexical_candidate_count": len(lexical),
+        self.last_diagnostics = self._diagnostics(mode, effective_mode, dense, lexical, failures, failure_reasons) | {
                                   "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
                                   "dense_duration_ms": dense_duration, "lexical_duration_ms": lexical_duration,
                                   "fusion_duration_ms": fusion_duration,
@@ -292,9 +294,19 @@ class RetrievalService:
                                   "reranked_candidate_count": reranked_count, "rerank_duration_ms": rerank_duration,
                                   "reranker_provider_id": getattr(self.reranker, "provider_id", None) if reranking_enabled else None,
                                   "reranker_model": getattr(self.reranker, "model_id", None) if reranking_enabled else None,
-                                  "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2),
-                                 "fallback_errors": failures}
+                                  "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2)}
         return [candidate.as_dict() for candidate in results[:limit]]
+
+    def _diagnostics(self, configured_mode: str, effective_mode: str,
+                     dense: list[RetrievalCandidate], lexical: list[RetrievalCandidate],
+                     failures: list[str], failure_reasons: dict[str, str]) -> dict[str, Any]:
+        fts_available = getattr(self.index, "fts_available", lambda: None)()
+        return {"retrieval_mode": configured_mode, "configured_retrieval_mode": configured_mode,
+                "effective_retrieval_mode": effective_mode, "dense_attempted": configured_mode in {"dense", "hybrid"},
+                "dense_candidate_count": len(dense), "dense_failure_reason": failure_reasons.get("dense"),
+                "lexical_attempted": configured_mode in {"lexical", "hybrid"}, "lexical_candidate_count": len(lexical),
+                "lexical_failure_reason": failure_reasons.get("lexical"), "fts_available": fts_available,
+                "fallback_errors": failures}
 
     async def inspect_search(self, notebook_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if not query.strip():

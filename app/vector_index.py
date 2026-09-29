@@ -84,6 +84,10 @@ class SQLiteVectorIndex:
             connection.execute("DELETE FROM document_chunks WHERE document_id=?", (document_id,))
             connection.execute("DELETE FROM vector_index_identities WHERE document_id=?", (document_id,))
 
+    def fts_available(self) -> bool:
+        with self.connection_factory() as connection:
+            return connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_chunks_fts'").fetchone() is not None
+
     def search(self, notebook_id: str, vector: list[float], limit: int, identity: dict | None = None) -> list[VectorSearchResult]:
         return self.search_candidates(notebook_id, vector, identity)[:limit]
 

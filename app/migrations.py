@@ -294,7 +294,16 @@ def _migration_13(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "embedding_configurations", "reranker_timeout_ms", "INTEGER NOT NULL DEFAULT 3000")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13))
+def _migration_14(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM document_chunks_fts WHERE chunk_id NOT IN (SELECT id FROM document_chunks)")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS document_chunks_fts_after_delete
+        AFTER DELETE ON document_chunks
+        BEGIN
+          DELETE FROM document_chunks_fts WHERE chunk_id=OLD.id;
+        END""")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13), (14, _migration_14))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -19,7 +19,7 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 13)
+            self.assertEqual(version_count, 14)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
@@ -66,7 +66,7 @@ class MigrationTests(unittest.TestCase):
                 INSERT INTO conversations VALUES ('chat', 'Raw chat', 'created', 'updated');
                 """)
                 connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-                for version, migration in MIGRATIONS[:-1]:
+                for version, migration in MIGRATIONS[:-2]:
                     migration(connection)
                     connection.execute("INSERT INTO schema_migrations VALUES (?, 'now')", (version,))
                 connection.execute("UPDATE conversations SET agent_profile_id='profile' WHERE id='agent'")
@@ -77,14 +77,14 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(rows["agent"][1], "agent")
             self.assertEqual(rows["chat"][1], "chat")
             self.assertEqual(rows["agent"][2], "Agent chat")
-            self.assertEqual(version_count, 13)
+            self.assertEqual(version_count, 14)
 
     def test_stage9a_migration_backfills_existing_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stage8.sqlite3"
             with sqlite3.connect(path) as connection:
                 connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-                for version, migration in MIGRATIONS[:-1]:
+                for version, migration in MIGRATIONS[:11]:
                     migration(connection)
                     connection.execute("INSERT INTO schema_migrations VALUES (?, 'now')", (version,))
                 connection.execute("INSERT INTO notebooks VALUES ('n','N','','now','now')")
@@ -94,3 +94,21 @@ class MigrationTests(unittest.TestCase):
                 migrate(connection)
                 row = connection.execute("SELECT chunk_id, notebook_id, source_id, content FROM document_chunks_fts").fetchone()
             self.assertEqual(row, ("c", "n", "s", "rare lexical phrase"))
+
+    def test_fts_cleanup_removes_orphans_and_tracks_chunk_deletes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fts.sqlite3"
+            with sqlite3.connect(path) as connection:
+                migrate(connection)
+                connection.execute("INSERT INTO notebooks VALUES ('n','N','','now','now')")
+                connection.execute("INSERT INTO notebook_sources(id,notebook_id,type,title,status,metadata,content_hash,created_at,updated_at) VALUES ('s','n','file','S','ready','{}','hash','now','now')")
+                connection.execute("INSERT INTO canonical_documents VALUES ('d','n','s','S','text','hash','text',NULL,'{}','now','now')")
+                connection.execute("INSERT INTO document_chunks(id,notebook_id,document_id,source_id,ordinal,content,canonical_start,canonical_end,token_count,metadata,content_hash,created_at) VALUES ('c','n','d','s',0,'text',0,4,1,'{}','chunk','now')")
+                connection.execute("INSERT INTO document_chunks_fts VALUES ('orphan','n','s','orphan')")
+                connection.execute("DELETE FROM document_chunks WHERE id='c'")
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM document_chunks_fts").fetchone()[0], 1)
+                connection.execute("INSERT INTO document_chunks(id,notebook_id,document_id,source_id,ordinal,content,canonical_start,canonical_end,token_count,metadata,content_hash,created_at) VALUES ('c','n','d','s',0,'text',0,4,1,'{}','chunk','now')")
+                connection.execute("INSERT INTO document_chunks_fts VALUES ('c','n','s','text')")
+                connection.execute("DELETE FROM document_chunks_fts WHERE chunk_id='orphan'")
+                connection.execute("DELETE FROM document_chunks WHERE id='c'")
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM document_chunks_fts WHERE chunk_id='c'").fetchone()[0], 0)
