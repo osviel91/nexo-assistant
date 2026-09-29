@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -221,6 +222,10 @@ class RetrievalIn(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
 
 
+class RerankerTestIn(BaseModel):
+    query: str = Field(default="Rank the document most relevant to the query.", min_length=1, max_length=500)
+
+
 class EmbeddingConfigurationIn(BaseModel):
     provider_id: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
@@ -377,8 +382,11 @@ def save_embedding_settings(item: EmbeddingConfigurationIn):
             reranker = connection.execute("SELECT id FROM providers WHERE id=?", (values["reranker_provider_id"],)).fetchone()
             if not reranker:
                 raise HTTPException(400, "reranker_provider_id must reference an existing provider")
-            if not connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (values["reranker_provider_id"], values["reranker_model"])).fetchone():
+            reranker_model = connection.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (values["reranker_provider_id"], values["reranker_model"])).fetchone()
+            if not reranker_model:
                 raise HTTPException(400, "reranker_model must reference an existing provider model")
+            if "reranking" not in json.loads(reranker_model["capabilities"] or "[]"):
+                raise HTTPException(400, "reranker_model must be explicitly designated with reranking capability")
         old = connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()
         version = (old["config_version"] + 1) if old else 1
         timestamp = now()
@@ -411,6 +419,33 @@ async def test_embedding():
         return {"ok": True, "provider": provider["name"], "provider_id": configuration.provider_id, "model": configuration.model_id, "status": "Ready", "dimension": dimension, "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
     except Exception as error:
         raise HTTPException(502, f"Embedding test failed: {str(error)[:180]}")
+
+
+@app.post("/api/settings/embeddings/test-reranker")
+async def test_reranker(item: RerankerTestIn):
+    configuration = embedding_configuration()
+    if not configuration or not configuration.reranker_provider_id or not configuration.reranker_model:
+        raise HTTPException(400, "reranker configuration is not available")
+    with db() as connection:
+        provider = connection.execute("SELECT * FROM providers WHERE id=?", (configuration.reranker_provider_id,)).fetchone()
+        model = connection.execute("SELECT capabilities FROM models WHERE provider_id=? AND id=?", (configuration.reranker_provider_id, configuration.reranker_model)).fetchone()
+    if not provider or not model or "reranking" not in json.loads(model["capabilities"] or "[]"):
+        raise HTTPException(400, "model must be explicitly designated with reranking capability")
+    started = asyncio.get_running_loop().time()
+    documents = [
+        SimpleNamespace(text="Synthetic document about unrelated weather.", rerank_score=None),
+        SimpleNamespace(text="Synthetic document directly answering the query.", rerank_score=None),
+    ]
+    headers = {"Content-Type": "application/json"} | ({"Authorization": f"Bearer {provider['api_key']}"} if provider["api_key"] else {})
+    try:
+        async with httpx.AsyncClient(timeout=max(configuration.reranker_timeout_ms, 1) / 1000) as client:
+            reranker = OpenAICompatibleReranker(client, provider["base_url"], headers, provider["id"], configuration.reranker_model)
+            ranked = await reranker.rerank(item.query, documents, len(documents))
+        return {"provider": provider["name"], "model": configuration.reranker_model, "ready": True,
+                "documents_ranked": len(ranked), "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
+    except Exception:
+        return {"provider": provider["name"], "model": configuration.reranker_model, "ready": False,
+                "documents_ranked": 0, "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)}
 
 
 @app.patch("/api/providers/{pid}/models/{model_id:path}")

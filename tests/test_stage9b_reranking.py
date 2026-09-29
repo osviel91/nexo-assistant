@@ -1,10 +1,13 @@
 import asyncio
 import unittest
+import httpx
+from types import SimpleNamespace
 
 from app.grounding import GroundedContext, cited_results
 from app.embeddings import EmbeddingBatch
 from app.knowledge import EmbeddingConfiguration, validate_configuration
 from app.retrieval import RetrievalCandidate, RetrievalService
+from app.reranking import OpenAICompatibleReranker, RerankerError
 from app.retrieval_evaluation import EvaluationCase, RetrievalEvaluationHarness, mrr, ndcg_at_k, precision_at_k, recall_at_k
 from app.vector_index import VectorSearchResult
 
@@ -81,6 +84,25 @@ class Stage9BRerankingTests(unittest.TestCase):
         cases = [EvaluationCase("q", "n", {"chunk_ids": ["page-38"], "source_ids": [], "page_numbers": []})]
         report = asyncio.run(RetrievalEvaluationHarness({"hybrid": lambda n, q: [{"chunk_id": "page-38"}], "hybrid+rerank": lambda n, q: [{"chunk_id": "page-38"}]}, cases).run(1))
         self.assertEqual(report["hybrid"]["recall_at_k"], report["hybrid+rerank"]["recall_at_k"])
+
+    def test_reranker_protocol_success_and_malformed_failure_are_safe(self):
+        def success(request):
+            return httpx.Response(200, json={"results": [{"index": 1, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.1}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(success))
+        try:
+            ranked = asyncio.run(OpenAICompatibleReranker(client, "http://provider", {}, "p", "m").rerank("q", [SimpleNamespace(text="a", rerank_score=None), SimpleNamespace(text="b", rerank_score=None)], 2))
+            self.assertEqual([item.text for item in ranked], ["b", "a"])
+            self.assertEqual(ranked[0].rerank_score, 0.9)
+        finally:
+            asyncio.run(client.aclose())
+
+        async def malformed():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))) as malformed_client:
+                await OpenAICompatibleReranker(malformed_client, "http://provider", {}, "p", "m").rerank("q", [SimpleNamespace(text="a")], 1)
+
+        with self.assertRaises(RerankerError):
+            asyncio.run(malformed())
 
 
 if __name__ == "__main__":
