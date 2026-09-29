@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 import json
 import math
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from app.chunking import ChunkingConfig, chunk_document
 from app.embeddings import EmbeddingError, EmbeddingProvider, validate_batch
 from app.vector_index import SQLiteVectorIndex, VectorIndex
 from app.knowledge import EmbeddingConfiguration
+from app.reranking import Reranker, RerankerError, with_timeout
 
 
 class RetrievalError(ValueError):
@@ -51,6 +53,9 @@ class RetrievalCandidate:
     fused_score: float = 0.0
     rejection_reason: str | None = None
     final_rank: int | None = None
+    rrf_rank: int | None = None
+    rerank_score: float | None = None
+    rerank_rank: int | None = None
 
     @classmethod
     def from_result(cls, result: Any) -> "RetrievalCandidate":
@@ -62,11 +67,12 @@ class RetrievalCandidate:
         return {"chunk_id": self.chunk_id, "source_id": self.source_id, "document_id": self.document_id,
                 "score": round(self.fused_score, 6), "fused_score": round(self.fused_score, 6), "content": self.text,
                 "canonical_start": self.canonical_start, "canonical_end": self.canonical_end,
-                "provenance": self.provenance, "document_content_hash": self.document_content_hash,
-                "chunk_content_hash": self.chunk_content_hash, "source_title": self.source_title,
-                "dense_rank": self.dense_rank, "dense_score": self.dense_score,
-                "lexical_rank": self.lexical_rank, "lexical_score": self.lexical_score,
-                "final_rank": self.final_rank, "accepted": self.rejection_reason is None,
+                 "provenance": self.provenance, "document_content_hash": self.document_content_hash,
+                 "chunk_content_hash": self.chunk_content_hash, "source_title": self.source_title,
+                 "dense_rank": self.dense_rank, "dense_score": self.dense_score,
+                 "lexical_rank": self.lexical_rank, "lexical_score": self.lexical_score,
+                 "rrf_rank": self.rrf_rank, "rerank_score": self.rerank_score, "rerank_rank": self.rerank_rank,
+                 "final_rank": self.final_rank, "accepted": self.rejection_reason is None,
                 "rejection_reason": self.rejection_reason}
 
 
@@ -150,10 +156,12 @@ class RetrievalService:
     def __init__(self, repository: Any, index: VectorIndex, provider: EmbeddingProvider,
                  config: ChunkingConfig | None = None, batch_size: int = 32,
                  embedding_config: EmbeddingConfiguration | None = None,
-                 provider_id: str | None = None, model_id: str | None = None) -> None:
+                 provider_id: str | None = None, model_id: str | None = None,
+                 reranker: Reranker | None = None) -> None:
         self.repository, self.index, self.provider = repository, index, provider
         self.config, self.batch_size = config or ChunkingConfig(), max(1, batch_size)
         self.embedding_config, self.provider_id, self.model_id = embedding_config, provider_id, model_id
+        self.reranker = reranker
         self.last_diagnostics: dict[str, Any] = {}
 
     async def index_source(self, notebook_id: str, source_id: str) -> dict[str, Any]:
@@ -218,30 +226,73 @@ class RetrievalService:
         identity = self._identity({"content_hash": ""}) if config else None
         dense, lexical = [], []
         failures: list[str] = []
+        dense_duration = lexical_duration = 0.0
         started = time.monotonic()
         if mode in {"dense", "hybrid"}:
+            phase_started = time.monotonic()
             try:
                 dense = await DenseRetriever(self.provider, self.index, identity).retrieve(query_model)
             except Exception as error:
                 failures.append("dense")
+            dense_duration = round((time.monotonic() - phase_started) * 1000, 2)
         if mode in {"lexical", "hybrid"}:
+            phase_started = time.monotonic()
             try:
                 lexical = await LexicalRetriever(self.index, identity).retrieve(query_model)
             except Exception:
                 failures.append("lexical")
+            lexical_duration = round((time.monotonic() - phase_started) * 1000, 2)
         if not dense and not lexical and failures and len(failures) == (2 if mode == "hybrid" else 1):
             self.last_diagnostics = {"retrieval_mode": "unavailable", "errors": failures}
             if mode == "dense":
                 raise RetrievalError("dense retrieval is unavailable")
+        fusion_started = time.monotonic()
         fused = ReciprocalRankFusion().fuse([ranking for ranking in (dense, lexical) if ranking], query_model.rrf_k)
+        fusion_duration = round((time.monotonic() - fusion_started) * 1000, 2)
+        for rank, candidate in enumerate(fused, 1):
+            candidate.rrf_rank = rank
         results = _deduplicate(fused)
         effective_mode = "lexical" if not dense and mode in {"lexical", "hybrid"} else "dense" if not lexical else mode
+        reranking_enabled = bool(getattr(config, "reranking_enabled", False))
+        rerank_status, rerank_reason = "disabled", None
+        rerank_count = reranked_count = 0
+        rerank_duration = 0.0
+        if reranking_enabled:
+            rerank_count = min(getattr(config, "reranker_candidate_limit", 20), len(results))
+            rerank_started = time.monotonic()
+            if self.reranker is None:
+                rerank_status, rerank_reason = "fallback", "unavailable"
+            else:
+                try:
+                    selected = results[:rerank_count]
+                    ranked = await with_timeout(self.reranker, query, selected, rerank_count,
+                                                getattr(config, "reranker_timeout_ms", 3000))
+                    if len(ranked) != rerank_count or {item.chunk_id for item in ranked} != {item.chunk_id for item in selected}:
+                        raise RerankerError("partial_result")
+                    results = ranked + results[rerank_count:]
+                    for rank, candidate in enumerate(ranked, 1):
+                        candidate.rerank_rank = rank
+                    reranked_count = len(ranked)
+                    rerank_status = "applied"
+                except asyncio.TimeoutError:
+                    rerank_status, rerank_reason = "fallback", "timeout"
+                except Exception as error:
+                    reason = str(error) if isinstance(error, RerankerError) else "provider_error"
+                    rerank_status, rerank_reason = "fallback", reason if reason in {"empty_result", "malformed_response", "partial_result"} else "provider_error"
+            rerank_duration = round((time.monotonic() - rerank_started) * 1000, 2)
         for rank, candidate in enumerate(results[:limit], 1):
             candidate.final_rank = rank
         self.last_diagnostics = {"retrieval_mode": effective_mode,
-                                 "dense_candidate_count": len(dense), "lexical_candidate_count": len(lexical),
-                                 "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
-                                 "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2),
+                                  "dense_candidate_count": len(dense), "lexical_candidate_count": len(lexical),
+                                  "fused_candidate_count": len(fused), "final_candidate_count": min(limit, len(results)),
+                                  "dense_duration_ms": dense_duration, "lexical_duration_ms": lexical_duration,
+                                  "fusion_duration_ms": fusion_duration,
+                                  "reranking_enabled": reranking_enabled, "reranker_status": rerank_status,
+                                  "reranker_reason": rerank_reason, "reranker_candidate_count": rerank_count,
+                                  "reranked_candidate_count": reranked_count, "rerank_duration_ms": rerank_duration,
+                                  "reranker_provider_id": getattr(self.reranker, "provider_id", None) if reranking_enabled else None,
+                                  "reranker_model": getattr(self.reranker, "model_id", None) if reranking_enabled else None,
+                                  "retrieval_duration_ms": round((time.monotonic() - started) * 1000, 2),
                                  "fallback_errors": failures}
         return [candidate.as_dict() for candidate in results[:limit]]
 

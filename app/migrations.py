@@ -282,7 +282,19 @@ def _migration_12(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE conversations SET execution_mode='agent' WHERE agent_profile_id IS NOT NULL AND execution_mode='chat'")
 
 
-MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12))
+def _migration_13(connection: sqlite3.Connection) -> None:
+    connection.execute("UPDATE conversations SET execution_mode='agent' WHERE agent_profile_id IS NOT NULL AND execution_mode='chat'")
+    connection.execute("""INSERT INTO document_chunks_fts(chunk_id,notebook_id,source_id,content)
+        SELECT dc.id, dc.notebook_id, dc.source_id, dc.content FROM document_chunks dc
+        WHERE NOT EXISTS (SELECT 1 FROM document_chunks_fts fts WHERE fts.chunk_id=dc.id)""")
+    _add_column_if_missing(connection, "embedding_configurations", "reranking_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(connection, "embedding_configurations", "reranker_provider_id", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "embedding_configurations", "reranker_model", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "embedding_configurations", "reranker_candidate_limit", "INTEGER NOT NULL DEFAULT 20")
+    _add_column_if_missing(connection, "embedding_configurations", "reranker_timeout_ms", "INTEGER NOT NULL DEFAULT 3000")
+
+
+MIGRATIONS = ((1, _migration_1), (2, _migration_2), (3, _migration_3), (4, _migration_4), (5, _migration_5), (6, _migration_6), (7, _migration_7), (8, _migration_8), (9, _migration_9), (10, _migration_10), (11, _migration_11), (12, _migration_12), (13, _migration_13))
 
 
 def migrate(connection: sqlite3.Connection) -> None:

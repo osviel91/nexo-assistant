@@ -36,6 +36,7 @@ from app.notebooks import NotebookInput, NotebookNotFoundError, NotebookReposito
 from app.ingestion import NotebookIngestionService
 from app.embeddings import EmbeddingError, OpenAICompatibleEmbeddingProvider
 from app.retrieval import IndexingInProgressError, RetrievalError, RetrievalService
+from app.reranking import OpenAICompatibleReranker
 from app.vector_index import SQLiteVectorIndex
 from app.grounding import GroundedContext, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
@@ -101,14 +102,19 @@ def retrieval_service(client: httpx.AsyncClient) -> RetrievalService:
     if configuration:
         with db() as connection:
             provider_row = connection.execute("SELECT * FROM providers WHERE id=?", (configuration.provider_id,)).fetchone()
+            reranker_row = connection.execute("SELECT * FROM providers WHERE id=?", (configuration.reranker_provider_id,)).fetchone() if configuration.reranking_enabled else None
         if not provider_row:
             raise RetrievalError("embedding provider is not configured")
         base_url, model_id, api_key = provider_row["base_url"], configuration.model_id, provider_row["api_key"]
         headers = {"Content-Type": "application/json"} | ({"Authorization": f"Bearer {api_key}"} if api_key else {})
         provider = OpenAICompatibleEmbeddingProvider(client, base_url, headers, model_id)
+        reranker_headers = {"Content-Type": "application/json"} | ({"Authorization": f"Bearer {reranker_row['api_key']}"} if reranker_row and reranker_row["api_key"] else {})
+        reranker = OpenAICompatibleReranker(client, reranker_row["base_url"], reranker_headers,
+                                            configuration.reranker_provider_id, configuration.reranker_model) \
+            if configuration.reranking_enabled and reranker_row and configuration.reranker_model else None
         return RetrievalService(notebooks.repository, SQLiteVectorIndex(db, now), provider,
                                 ChunkingConfig(configuration.target_chunk_size, configuration.max_chunk_size, configuration.overlap),
-                                configuration.batch_size, configuration, configuration.provider_id, configuration.model_id)
+                                configuration.batch_size, configuration, configuration.provider_id, configuration.model_id, reranker)
     base_url = os.getenv("NEXO_EMBEDDING_BASE_URL", "").strip()
     if not base_url:
         raise RetrievalError("embedding provider is not configured")
@@ -229,6 +235,11 @@ class EmbeddingConfigurationIn(BaseModel):
     lexical_candidate_limit: int = Field(default=20, ge=1, le=200)
     rrf_k: int = Field(default=60, ge=1, le=1000)
     final_top_k: int = Field(default=5, ge=1, le=50)
+    reranking_enabled: bool = False
+    reranker_provider_id: str = ""
+    reranker_model: str = ""
+    reranker_candidate_limit: int = Field(default=20, ge=1, le=200)
+    reranker_timeout_ms: int = Field(default=3000, ge=1, le=120000)
 
 
 def embedding_configuration() -> EmbeddingConfiguration | None:
@@ -251,8 +262,8 @@ def embedding_configuration() -> EmbeddingConfiguration | None:
             return None
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], 1, timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], 1, timestamp, timestamp))
         return EmbeddingConfiguration(**dict(connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()))
 
 
@@ -362,12 +373,18 @@ def save_embedding_settings(item: EmbeddingConfigurationIn):
             raise HTTPException(400, "provider_id and model_id must reference an existing provider model")
         if "embedding" not in json.loads(model["capabilities"] or "[]"):
             raise HTTPException(400, "model must be explicitly designated with embedding capability")
+        if values["reranking_enabled"]:
+            reranker = connection.execute("SELECT id FROM providers WHERE id=?", (values["reranker_provider_id"],)).fetchone()
+            if not reranker:
+                raise HTTPException(400, "reranker_provider_id must reference an existing provider")
+            if not connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (values["reranker_provider_id"], values["reranker_model"])).fetchone():
+                raise HTTPException(400, "reranker_model must reference an existing provider model")
         old = connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()
         version = (old["config_version"] + 1) if old else 1
         timestamp = now()
         connection.execute("""INSERT INTO embedding_configurations
-            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,config_version,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], version, old["created_at"] if old else timestamp, timestamp))
+            (id,provider_id,model_id,target_chunk_size,max_chunk_size,overlap,batch_size,retrieval_top_k,retrieval_max_context_chars,retrieval_mode,dense_candidate_limit,lexical_candidate_limit,rrf_k,final_top_k,reranking_enabled,reranker_provider_id,reranker_model,reranker_candidate_limit,reranker_timeout_ms,config_version,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (str(uuid.uuid4()), values["provider_id"], values["model_id"], values["target_chunk_size"], values["max_chunk_size"], values["overlap"], values["batch_size"], values["retrieval_top_k"], values["retrieval_max_context_chars"], values["retrieval_mode"], values["dense_candidate_limit"], values["lexical_candidate_limit"], values["rrf_k"], values["final_top_k"], values["reranking_enabled"], values["reranker_provider_id"], values["reranker_model"], values["reranker_candidate_limit"], values["reranker_timeout_ms"], version, old["created_at"] if old else timestamp, timestamp))
         affecting = not old or any(old[key] != values[key] for key in ("provider_id", "model_id", "target_chunk_size", "max_chunk_size", "overlap"))
         if affecting and old:
             connection.execute("UPDATE notebook_sources SET indexing_status='outdated', indexing_error=NULL, updated_at=? WHERE indexing_status='ready'", (timestamp,))

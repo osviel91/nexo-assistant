@@ -30,6 +30,11 @@ class EmbeddingConfiguration:
     lexical_candidate_limit: int = 20
     rrf_k: int = 60
     final_top_k: int = 5
+    reranking_enabled: bool = False
+    reranker_provider_id: str = ""
+    reranker_model: str = ""
+    reranker_candidate_limit: int = 20
+    reranker_timeout_ms: int = 3000
 
     @property
     def chunking_semantics(self) -> str:
@@ -49,6 +54,7 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         "batch_size": (1, 256), "retrieval_top_k": (1, 50), "retrieval_max_context_chars": (1000, 1000000),
         "dense_candidate_limit": (1, 200), "lexical_candidate_limit": (1, 200), "rrf_k": (1, 1000),
         "final_top_k": (1, 50),
+        "reranker_candidate_limit": (1, 200), "reranker_timeout_ms": (1, 120000),
     }
     result = dict(values)
     result.setdefault("retrieval_top_k", 5)
@@ -57,6 +63,14 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("lexical_candidate_limit", 20)
     result.setdefault("rrf_k", 60)
     result.setdefault("final_top_k", result["retrieval_top_k"])
+    result.setdefault("reranking_enabled", False)
+    result.setdefault("reranker_provider_id", "")
+    result.setdefault("reranker_model", "")
+    result.setdefault("reranker_candidate_limit", 20)
+    result.setdefault("reranker_timeout_ms", 3000)
+    if isinstance(result["reranking_enabled"], str):
+        result["reranking_enabled"] = result["reranking_enabled"].lower() in {"1", "true", "yes", "on"}
+    result["reranking_enabled"] = bool(result["reranking_enabled"])
     for key, (low, high) in limits.items():
         try:
             value = int(result[key])
@@ -74,6 +88,8 @@ def validate_configuration(values: dict[str, Any]) -> dict[str, Any]:
         raise KnowledgeConfigurationError("retrieval_mode must be dense, lexical, or hybrid")
     if not str(result.get("provider_id", "")).strip() or not str(result.get("model_id", "")).strip():
         raise KnowledgeConfigurationError("provider_id and model_id are required")
+    if result["reranking_enabled"] and (not str(result["reranker_provider_id"]).strip() or not str(result["reranker_model"]).strip()):
+        raise KnowledgeConfigurationError("reranker_provider_id and reranker_model are required when reranking is enabled")
     return result
 
 
@@ -92,4 +108,9 @@ def bootstrap_values() -> dict[str, Any]:
         "rrf_k": os.getenv("NEXO_RAG_RRF_K", "60"),
         "final_top_k": os.getenv("NEXO_RAG_TOP_K", "5"),
         "retrieval_max_context_chars": os.getenv("NEXO_RAG_MAX_CONTEXT_CHARS", "12000"),
+        "reranking_enabled": os.getenv("NEXO_RERANKING_ENABLED", "false"),
+        "reranker_provider_id": os.getenv("NEXO_RERANKER_PROVIDER_ID", ""),
+        "reranker_model": os.getenv("NEXO_RERANKER_MODEL", ""),
+        "reranker_candidate_limit": os.getenv("NEXO_RERANKER_CANDIDATES", "20"),
+        "reranker_timeout_ms": os.getenv("NEXO_RERANKER_TIMEOUT_MS", "3000"),
     }

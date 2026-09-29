@@ -19,7 +19,7 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 12)
+            self.assertEqual(version_count, 13)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
@@ -77,7 +77,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(rows["agent"][1], "agent")
             self.assertEqual(rows["chat"][1], "chat")
             self.assertEqual(rows["agent"][2], "Agent chat")
-            self.assertEqual(version_count, 12)
+            self.assertEqual(version_count, 13)
 
     def test_stage9a_migration_backfills_existing_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
