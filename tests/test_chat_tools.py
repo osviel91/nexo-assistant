@@ -191,6 +191,8 @@ class ChatToolTests(unittest.TestCase):
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="sin herramientas")))
                 asyncio.run(self.collect(response.body_iterator))
+                with main.db() as connection:
+                    capability_runtime = json.loads(connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="adjunto", attachments=[{"kind": "text", "name": "note.txt", "text": "contexto"}])))
                 asyncio.run(self.collect(response.body_iterator))
@@ -204,6 +206,12 @@ class ChatToolTests(unittest.TestCase):
             self.assertEqual(compatible_payload["tools"][0]["type"], "function")
             self.assertEqual(compatible_payload["tools"][0]["function"]["name"], "web_search")
             self.assertEqual(compatible_payload["tools"][0]["function"]["parameters"], {"type": "object"})
+            self.assertFalse(capability_runtime["model_tool_calling_supported"])
+            self.assertTrue(capability_runtime["web_tools_enabled"])
+            self.assertTrue(capability_runtime["tools_enabled"])
+            self.assertEqual(capability_runtime["registered_tool_names"], ["web_search"])
+            self.assertEqual(capability_runtime["effective_tool_names"], [])
+            self.assertEqual(capability_runtime["tool_availability_reason"], "model_capability_not_enabled")
             self.assertIn('"sources": [{"title": "Nexo", "url": "https://nexo.test"}]', body)
             self.assertIn("Respuesta con fuente", body)
             self.assertEqual(tool_result_payload["messages"][-1]["role"], "tool")

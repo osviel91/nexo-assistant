@@ -70,6 +70,11 @@ function formatRunDiagnostics(runtime = {}) {
     `Agent: ${diagnosticValue(runtime.agent_profile_name)}`,
     `Provider: ${diagnosticValue(runtime.resolved_provider_name || runtime.resolved_provider)}`,
     `Model: ${diagnosticValue(runtime.resolved_model_name || runtime.resolved_model)}`,
+    `Model tool-calling capability: ${runtime.model_tool_calling_supported == null ? 'unknown' : runtime.model_tool_calling_supported ? 'enabled' : 'not enabled'}`,
+    `Tool toggles: web=${runtime.web_tools_enabled == null ? 'unknown' : runtime.web_tools_enabled}, tools=${runtime.tools_enabled == null ? 'unknown' : runtime.tools_enabled}`,
+    `Registered tools: ${(runtime.registered_tool_names || []).join(', ') || 'none'}`,
+    `Effective tools: ${(runtime.effective_tool_names || []).join(', ') || 'none'}`,
+    `Tool availability: ${diagnosticValue(runtime.tool_availability_reason || 'available')}`,
     `Tools used: ${(runtime.tools_used || []).join(', ') || 'No tools'}`,
     '',
     'Knowledge:',
@@ -569,6 +574,8 @@ async function send() {
    const effectiveChoice = state.executionMode === 'agent' && agent ? { provider: state.providers.find((provider) => provider.id === agent.provider_id), model: agent.model_id } : choice;
   if (!text && !state.attachments.length) return;
    if (!effectiveChoice.provider && !state.agentProfileId) { openSurface('settings'); toast('Configura un proveedor y selecciona un modelo'); return; }
+  const modelCapabilities = effectiveChoice.provider?.models.find((model) => model.id === effectiveChoice.model)?.capabilities || [];
+  if ((state.webEnabled || state.toolsEnabled) && !modelCapabilities.includes('tool-calling')) toast('El modelo no tiene Tool calling habilitado. Compruébalo en Settings > Providers & Models.');
   state.busy = true;
   state.streamTimestamps = { request_started: performance.now() };
   state.activity = { type: 'REASON', status: 'running' };

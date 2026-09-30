@@ -1422,10 +1422,23 @@ async def chat(req: ChatIn):
                 catalog = module_registry.tool_catalog_view()
                 web_enabled = req.web_enabled if "web_enabled" in req.model_fields_set else True
                 tools_enabled = req.tools_enabled if "tools_enabled" in req.model_fields_set else True
+                registered_tool_names = [entry.name for entry in catalog.entries()]
                 allowed_tools = {entry.name for entry in catalog.entries() if (entry.name == "web_search" and web_enabled) or (entry.name != "web_search" and tools_enabled)}
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
-                runtime_snapshot["effective_tool_names"] = effective_tool_names
+                runtime_snapshot.update({
+                    "model_capabilities": model_capability_list,
+                    "model_tool_calling_supported": supports_tools,
+                    "web_tools_enabled": web_enabled,
+                    "tools_enabled": tools_enabled,
+                    "registered_tool_names": registered_tool_names,
+                    "effective_tool_names": effective_tool_names,
+                    "tool_availability_reason": "model_capability_not_enabled" if not supports_tools else
+                        "chat_tool_toggles_disabled" if not allowed_tools else
+                        "no_tools_registered" if not registered_tool_names else
+                        "agent_profile_tool_filter_empty" if profile_config and not effective_tool_names else
+                        "tool_policy_filtered_all_tools" if not effective_tool_names else None,
+                })
                 runtime_snapshot["thinking_available"] = thinking_flags["thinking"]
                 runtime_snapshot["thinking_budget"] = thinking.get("budget") if thinking_flags["thinking-budget"] else None
                 runtime_snapshot["thinking_content_available"] = thinking_flags["reasoning-content"]
