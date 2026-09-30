@@ -61,9 +61,14 @@ class TextToolCallResponse:
     def __init__(self, payload): self.payload = payload
 
     async def aiter_lines(self):
-        tool_result = next((message for message in reversed(self.payload["messages"]) if message.get("role") == "tool"), None)
+        tool_results = [message for message in self.payload["messages"] if message.get("role") == "tool"]
+        tool_result = tool_results[-1] if tool_results else None
         if tool_result is None:
-            output = "<tool_call>\n<function=web_search>\n<parameter=query>Madrid forecast próximos días</parameter>\n</function>\n</tool_call>"
+            output = "<tool_call>\n<function=native.get_current_datetime>\n<parameter=timezone>Europe/Madrid</parameter>\n</function>\n</tool_call>"
+        elif tool_result["name"] == "native.get_current_datetime":
+            output = "<tool_call>\n<function=web_search>\n<parameter=query>Madrid forecast next days AEMET</parameter>\n</function>\n</tool_call>"
+        elif tool_result["name"] == "web_search" and sum(item["name"] == "web_search" for item in tool_results) == 1:
+            output = "<tool_call>\n<function=web_search>\n<parameter=query>Madrid forecast daily average temperature</parameter>\n</function>\n</tool_call>"
         elif tool_result["name"] == "web_search":
             result = json.loads(tool_result["content"])
             snippet = result["results"][0]["snippet"]
@@ -97,7 +102,7 @@ class TextToolCallClient:
 
 
 class ChatToolTests(unittest.TestCase):
-    def test_text_tool_calls_search_results_and_chart_flow_end_to_end(self):
+    def test_date_two_searches_and_chart_flow_end_to_end(self):
         from app import main
         from app.native_tools import register_native_tools
 
@@ -122,21 +127,23 @@ class ChatToolTests(unittest.TestCase):
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="grafica la temperatura promedio para madrid para los próximos días", web_enabled=True, tools_enabled=True)))
                 body = asyncio.run(self.collect(response.body_iterator))
                 with main.db() as connection:
+                    run = connection.execute("SELECT status FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()
                     message = connection.execute("SELECT content,runtime_metadata,artifacts FROM messages WHERE role='assistant'").fetchone()
-                runtime, artifacts = json.loads(message["runtime_metadata"]), json.loads(message["artifacts"])
             finally:
                 main.httpx.AsyncClient = old_client
                 main.DB_PATH = old_db
                 main.module_registry.context.tools._tools.clear()
                 main.module_registry.context.tools._tools.update(old_tools)
 
-        self.assertEqual(runtime["tools_used"], ["web_search", "native.render_artifact"])
+        self.assertEqual(run["status"], "completed")
+        runtime, artifacts = json.loads(message["runtime_metadata"]), json.loads(message["artifacts"])
+        self.assertEqual(runtime["tools_used"], ["native.get_current_datetime", "web_search", "web_search", "native.render_artifact"])
         self.assertEqual(artifacts[0]["type"], "line")
         self.assertEqual(artifacts[0]["data"]["series"][0]["values"], [20, 22, 21])
         self.assertIn("20, 22 y 21", message["content"])
         self.assertNotIn("<tool_call>", body)
-        self.assertEqual(len(TextToolCallClient.payloads), 3)
-        search_result = next(message for message in TextToolCallClient.payloads[1]["messages"] if message.get("role") == "tool" and message.get("name") == "web_search")
+        self.assertEqual(len(TextToolCallClient.payloads), 5)
+        search_result = next(message for message in TextToolCallClient.payloads[3]["messages"] if message.get("role") == "tool" and message.get("name") == "web_search")
         self.assertIn("1 Oct 20 C", search_result["content"])
 
     def test_compatible_model_gets_tool_and_persists_cited_sources(self):

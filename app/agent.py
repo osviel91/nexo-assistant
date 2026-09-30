@@ -19,7 +19,7 @@ logger = logging.getLogger("nexo.agent")
 
 @dataclass(frozen=True)
 class AgentRuntimeLimits:
-    max_tool_rounds: int = 3
+    max_tool_rounds: int = 5
     max_tool_output_chars: int = 12000
 
 
