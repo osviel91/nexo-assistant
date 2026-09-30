@@ -49,6 +49,11 @@ class ConversationUXTests(unittest.TestCase):
         self.assertIsNone(result["thinking"]["content"])
         self.assertNotIn("thinking_content", result)
 
+    def test_reasoning_content_capability_exposes_streamed_thinking_panel(self):
+        result = self.main.public_runtime({"thinking_content_available": True, "thinking_content": "step", "thinking_available": False})
+        self.assertTrue(result["thinking"]["available"])
+        self.assertEqual(result["thinking"]["content"], "step")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,7 @@ class Adapter:
             payload["tools"] = tools
         self.payloads.append(payload)
         for chunk in next(self.responses):
-            yield ModelStreamChunk(content=chunk.get("content", ""), tool_calls=chunk.get("tool_calls"), usage=chunk.get("usage"), provider_ttft_ms=chunk.get("provider_ttft_ms"))
+            yield ModelStreamChunk(content=chunk.get("content", ""), reasoning_content=chunk.get("reasoning_content", ""), tool_calls=chunk.get("tool_calls"), usage=chunk.get("usage"), provider_ttft_ms=chunk.get("provider_ttft_ms"))
 
 
 def run(runtime, adapter, registry, capabilities={"tool-calling"}, request_started_at=None):
@@ -69,6 +69,12 @@ class AgentRuntimeTests(unittest.TestCase):
         system_message = next(message for message in adapter.payloads[0]["messages"] if message["role"] == "system")
         self.assertIn("test_tool", system_message["content"])
         self.assertIn("interpret", system_message["content"].lower())
+
+    def test_reasoning_deltas_are_streamed_separately_from_answer_content(self):
+        adapter = Adapter([[{"reasoning_content": "private reasoning", "content": "visible answer"}]])
+        events = run(AgentRuntime(), adapter, self.registry(lambda *_: {}), capabilities=set())
+        self.assertIn({"thinking_delta": "private reasoning"}, events)
+        self.assertEqual(events[-1]["answer"], "visible answer")
 
     def test_provider_ttft_and_request_to_first_token_use_distinct_starts(self):
         import time

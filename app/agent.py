@@ -127,6 +127,8 @@ class AgentRuntime:
                         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                             if isinstance(chunk.usage.get(key), int):
                                 usage[key] = usage.get(key, 0) + chunk.usage[key]
+                    if chunk.reasoning_content:
+                        yield {"thinking_delta": chunk.reasoning_content}
                     if chunk.content:
                         first_content_at = first_content_at or time.perf_counter()
                         provider_ttft_ms = provider_ttft_ms if provider_ttft_ms is not None else chunk.provider_ttft_ms

@@ -508,7 +508,7 @@ def public_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
     result = dict(runtime)
     result["metrics"] = normalized_metrics(runtime)
     result["thinking"] = {
-        "available": bool(runtime.get("thinking_available")),
+        "available": bool(runtime.get("thinking_available") or runtime.get("thinking_content_available")),
         "content": runtime.get("thinking_content") if runtime.get("thinking_content_available") else None,
         "duration_ms": runtime.get("thinking_duration_ms"),
         "tokens": runtime.get("thinking_tokens"),
@@ -1473,6 +1473,9 @@ async def chat(req: ChatIn):
                         continue
                     if "activity" in event:
                         yield "data: " + json.dumps({"activity": event["activity"]}) + "\n\n"
+                        continue
+                    if "thinking_delta" in event:
+                        yield "data: " + json.dumps({"thinking_delta": event["thinking_delta"]}) + "\n\n"
                         continue
                     if "artifact" in event:
                         artifacts.append(event["artifact"])

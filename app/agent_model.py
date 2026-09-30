@@ -21,6 +21,7 @@ logger = logging.getLogger("nexo.agent.model")
 @dataclass(frozen=True)
 class ModelStreamChunk:
     content: str = ""
+    reasoning_content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -150,8 +151,10 @@ class OpenAICompatibleModelAdapter:
                         delta = choice.get("delta", {})
                         content = delta.get("content", "")
                         reasoning = delta.get("reasoning_content", delta.get("reasoning", ""))
+                        reasoning_delta = ""
                         if isinstance(reasoning, str) and self.thinking.get("reasoning_content"):
                             self.reasoning_content += reasoning
+                            reasoning_delta = reasoning
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                         ttft = round((time.perf_counter() - request_started) * 1000, 2) if content and first_content else None
@@ -172,12 +175,12 @@ class OpenAICompatibleModelAdapter:
                             tool_calls = [*tool_calls, *fallback_calls]
                         usage = packet.get("usage")
                         finish_reason = choice.get("finish_reason")
-                        if not content and not tool_calls and (usage or finish_reason):
+                        if not content and not reasoning_delta and not tool_calls and (usage or finish_reason):
                             pending_usage = usage or pending_usage
                             pending_finish_reason = finish_reason or pending_finish_reason
                             continue
                         chunk_ttft = pending_ttft if content else ttft
-                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=finish_reason or pending_finish_reason, usage=usage or pending_usage, provider_ttft_ms=chunk_ttft)
+                        yield ModelStreamChunk(content=content, reasoning_content=reasoning_delta, tool_calls=tool_calls, finish_reason=finish_reason or pending_finish_reason, usage=usage or pending_usage, provider_ttft_ms=chunk_ttft)
                         pending_usage = pending_finish_reason = None
                         if content:
                             pending_ttft = None
