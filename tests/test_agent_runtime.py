@@ -63,6 +63,13 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertNotIn("arguments", json.dumps(trace_events))
         self.assertIn("tools", adapter.payloads[0])
 
+    def test_tool_enabled_turn_tells_model_to_use_and_interpret_available_tools(self):
+        adapter = Adapter([[{"content": "answer"}]])
+        events = run(AgentRuntime(), adapter, self.registry(lambda *_: {}))
+        system_message = next(message for message in adapter.payloads[0]["messages"] if message["role"] == "system")
+        self.assertIn("test_tool", system_message["content"])
+        self.assertIn("interpret", system_message["content"].lower())
+
     def test_provider_ttft_and_request_to_first_token_use_distinct_starts(self):
         import time
 

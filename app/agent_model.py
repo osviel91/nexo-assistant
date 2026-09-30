@@ -113,6 +113,7 @@ class OpenAICompatibleModelAdapter:
                 payload["thinking"]["budget"] = self.thinking["budget"]
         if tools:
             payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         diagnostic(logger, "provider_request", **{
             "api_mode": "chat_completions",
             "endpoint": self.url,

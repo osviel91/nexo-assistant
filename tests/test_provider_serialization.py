@@ -54,6 +54,7 @@ class ProviderSerializationTests(unittest.TestCase):
         asyncio.run(run())
         method, endpoint, payload = client.calls[0]
         self.assertEqual((method, endpoint), ("POST", "https://omlx.example/v1/chat/completions"))
+        self.assertEqual(payload["tool_choice"], "auto")
         self.assertEqual(payload["tools"][0], {
             "type": "function",
             "function": {

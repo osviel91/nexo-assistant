@@ -626,9 +626,11 @@ async function send() {
     if (!answer) state.messages.pop();
     await loadChats();
   } catch (error) {
-    state.messages.at(-1).content = 'No se pudo completar la respuesta.';
+    const reason = error.message || 'Error desconocido';
+    state.activity = null;
+    state.messages.at(-1).content = `No se pudo completar la respuesta: ${reason}`;
     renderMessages();
-    toast(error.message || 'No se pudo completar la respuesta.');
+    toast(reason);
   } finally {
     state.activity = null;
     state.busy = false;
