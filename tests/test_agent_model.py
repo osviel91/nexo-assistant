@@ -49,5 +49,14 @@ class AgentModelTests(unittest.TestCase):
         self.assertEqual(calls[1]["function"]["name"], "native.render_artifact")
         self.assertEqual(json.loads(calls[1]["function"]["arguments"]), {"data": {"type": "bar"}})
 
+    def test_hides_explicit_tool_markup_when_tools_are_not_advertised(self):
+        markup = "<tool_call><function=web_search><parameter=query>Madrid</parameter></function></tool_call>"
+        adapter = OpenAICompatibleModelAdapter(Client([{"choices": [{"delta": {"content": markup}}]}]), "http://provider", {}, "model")
+
+        async def collect(): return [chunk async for chunk in adapter.stream([], [])]
+        chunks = asyncio.run(collect())
+        self.assertEqual("".join(chunk.content for chunk in chunks), "")
+        self.assertEqual(chunks[0].tool_calls[0]["function"]["name"], "web_search")
+
 
 if __name__ == "__main__": unittest.main()

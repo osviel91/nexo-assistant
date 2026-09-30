@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,7 +55,90 @@ class FakeClient:
         return FakeStream(json)
 
 
+class TextToolCallResponse:
+    status_code = 200
+
+    def __init__(self, payload): self.payload = payload
+
+    async def aiter_lines(self):
+        tool_result = next((message for message in reversed(self.payload["messages"]) if message.get("role") == "tool"), None)
+        if tool_result is None:
+            output = "<tool_call>\n<function=web_search>\n<parameter=query>Madrid forecast próximos días</parameter>\n</function>\n</tool_call>"
+        elif tool_result["name"] == "web_search":
+            result = json.loads(tool_result["content"])
+            snippet = result["results"][0]["snippet"]
+            labels = re.findall(r"\d+ Oct", snippet)
+            values = [int(value) for value in re.findall(r"(\d+) C", snippet)]
+            data = json.dumps({"labels": labels, "series": [{"name": "Temperatura media (°C)", "values": values}]})
+            output = ("<tool_call>\n<function=native.render_artifact>\n<parameter=type>line</parameter>\n"
+                      "<parameter=title>Temperatura media en Madrid</parameter>\n"
+                      f"<parameter=data>{data}</parameter>\n</function>\n</tool_call>")
+        else:
+            output = "La previsión muestra temperaturas medias de 20, 22 y 21 °C para los próximos días."
+        for chunk in (output,):
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": chunk}}]})
+        yield "data: [DONE]"
+
+
+class TextToolCallStream:
+    def __init__(self, payload): self.response = TextToolCallResponse(payload)
+    async def __aenter__(self): return self.response
+    async def __aexit__(self, *args): pass
+
+
+class TextToolCallClient:
+    payloads = []
+    def __init__(self, **kwargs): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    def stream(self, method, url, headers, json):
+        self.payloads.append(json)
+        return TextToolCallStream(json)
+
+
 class ChatToolTests(unittest.TestCase):
+    def test_text_tool_calls_search_results_and_chart_flow_end_to_end(self):
+        from app import main
+        from app.native_tools import register_native_tools
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
+            old_tools = main.module_registry.context.tools._tools.copy()
+            main.DB_PATH = Path(directory) / "text-tools.sqlite3"
+            main.startup()
+            with main.db() as connection:
+                connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))
+                connection.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("m", "p", "m", '["tool-calling"]'))
+            main.module_registry.context.tools._tools.clear()
+            register_native_tools(main.module_registry.context)
+
+            async def search(_context, _arguments):
+                return {"results": [{"title": "Pronóstico AEMET", "url": "https://weather.test/madrid", "snippet": "1 Oct 20 C; 2 Oct 22 C; 3 Oct 21 C"}]}
+
+            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search))
+            TextToolCallClient.payloads = []
+            main.httpx.AsyncClient = TextToolCallClient
+            try:
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="grafica la temperatura promedio para madrid para los próximos días", web_enabled=True, tools_enabled=True)))
+                body = asyncio.run(self.collect(response.body_iterator))
+                with main.db() as connection:
+                    message = connection.execute("SELECT content,runtime_metadata,artifacts FROM messages WHERE role='assistant'").fetchone()
+                runtime, artifacts = json.loads(message["runtime_metadata"]), json.loads(message["artifacts"])
+            finally:
+                main.httpx.AsyncClient = old_client
+                main.DB_PATH = old_db
+                main.module_registry.context.tools._tools.clear()
+                main.module_registry.context.tools._tools.update(old_tools)
+
+        self.assertEqual(runtime["tools_used"], ["web_search", "native.render_artifact"])
+        self.assertEqual(artifacts[0]["type"], "line")
+        self.assertEqual(artifacts[0]["data"]["series"][0]["values"], [20, 22, 21])
+        self.assertIn("20, 22 y 21", message["content"])
+        self.assertNotIn("<tool_call>", body)
+        self.assertEqual(len(TextToolCallClient.payloads), 3)
+        search_result = next(message for message in TextToolCallClient.payloads[1]["messages"] if message.get("role") == "tool" and message.get("name") == "web_search")
+        self.assertIn("1 Oct 20 C", search_result["content"])
+
     def test_compatible_model_gets_tool_and_persists_cited_sources(self):
         from app import main
 

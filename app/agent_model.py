@@ -126,8 +126,11 @@ class OpenAICompatibleModelAdapter:
         })
         request_started = time.perf_counter()
         first_content = True
-        text_tool_parser = _TextToolCallParser() if tools else None
+        text_tool_parser = _TextToolCallParser()
         next_tool_index = 0
+        pending_usage = None
+        pending_finish_reason = None
+        pending_ttft = None
         try:
             async with self.client.stream("POST", self.url, headers=self.headers, json=payload) as response:
                 if response.status_code >= 400:
@@ -149,31 +152,41 @@ class OpenAICompatibleModelAdapter:
                             self.reasoning_content += reasoning
                         if isinstance(content, list):
                             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+                        ttft = round((time.perf_counter() - request_started) * 1000, 2) if content and first_content else None
+                        if ttft is not None:
+                            first_content = False
+                            pending_ttft = ttft
                         tool_calls = delta.get("tool_calls", []) or []
                         for call in tool_calls:
                             try:
                                 next_tool_index = max(next_tool_index, int(call.get("index", 0)) + 1)
                             except (AttributeError, TypeError, ValueError):
                                 continue
-                        if text_tool_parser is not None and isinstance(content, str):
+                        if isinstance(content, str):
                             content, fallback_calls = text_tool_parser.feed(content)
                             for call in fallback_calls:
                                 call["index"] = next_tool_index
                                 next_tool_index += 1
                             tool_calls = [*tool_calls, *fallback_calls]
-                        ttft = round((time.perf_counter() - request_started) * 1000, 2) if content and first_content else None
-                        if ttft is not None:
-                            first_content = False
-                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=choice.get("finish_reason"), usage=packet.get("usage"), provider_ttft_ms=ttft)
+                        usage = packet.get("usage")
+                        finish_reason = choice.get("finish_reason")
+                        if not content and not tool_calls and (usage or finish_reason):
+                            pending_usage = usage or pending_usage
+                            pending_finish_reason = finish_reason or pending_finish_reason
+                            continue
+                        chunk_ttft = pending_ttft if content else ttft
+                        yield ModelStreamChunk(content=content, tool_calls=tool_calls, finish_reason=finish_reason or pending_finish_reason, usage=usage or pending_usage, provider_ttft_ms=chunk_ttft)
+                        pending_usage = pending_finish_reason = None
+                        if content:
+                            pending_ttft = None
                     except (ValueError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
                         continue
-                if text_tool_parser is not None:
-                    content, fallback_calls = text_tool_parser.feed("", final=True)
-                    for call in fallback_calls:
-                        call["index"] = next_tool_index
-                        next_tool_index += 1
-                    if content or fallback_calls:
-                        yield ModelStreamChunk(content=content, tool_calls=fallback_calls)
+                content, fallback_calls = text_tool_parser.feed("", final=True)
+                for call in fallback_calls:
+                    call["index"] = next_tool_index
+                    next_tool_index += 1
+                if content or fallback_calls or pending_usage or pending_finish_reason:
+                    yield ModelStreamChunk(content=content, tool_calls=fallback_calls, finish_reason=pending_finish_reason, usage=pending_usage, provider_ttft_ms=pending_ttft)
         except ModelAdapterError:
             raise
         except httpx.RequestError as exc:
