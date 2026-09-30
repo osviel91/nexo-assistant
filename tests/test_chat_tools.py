@@ -145,6 +145,8 @@ class ChatToolTests(unittest.TestCase):
         self.assertEqual(len(TextToolCallClient.payloads), 5)
         search_result = next(message for message in TextToolCallClient.payloads[3]["messages"] if message.get("role") == "tool" and message.get("name") == "web_search")
         self.assertIn("1 Oct 20 C", search_result["content"])
+        call_ids = [call["id"] for message in TextToolCallClient.payloads[-1]["messages"] for call in message.get("tool_calls", [])]
+        self.assertEqual(len(call_ids), len(set(call_ids)))
 
     def test_compatible_model_gets_tool_and_persists_cited_sources(self):
         from app import main

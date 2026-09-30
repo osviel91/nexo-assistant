@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -82,7 +83,7 @@ class _TextToolCallParser:
                     arguments[parameter.group(1)] = json.loads(raw)
                 except json.JSONDecodeError:
                     arguments[parameter.group(1)] = raw
-            calls.append({"index": self.index, "id": f"text-tool-{self.index}", "type": "function", "function": {"name": match.group(1), "arguments": json.dumps(arguments, ensure_ascii=False)}})
+            calls.append({"index": self.index, "id": f"call_{uuid.uuid4().hex}", "type": "function", "function": {"name": match.group(1), "arguments": json.dumps(arguments, ensure_ascii=False)}})
             self.index += 1
         return "".join(visible), calls
 

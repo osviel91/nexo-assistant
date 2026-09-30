@@ -77,7 +77,7 @@ class AgentRuntime:
                         "Use an available tool when it can answer the request; do not claim a capability is unavailable if it is listed.",
                         "After tool calls, interpret their returned data and answer from it. Never invent external facts or show tool-call syntax to the user."]
             if "web_search" in effective_tools.names:
-                guidance.append("For current or external facts, use web_search and base conclusions on its results.")
+                guidance.append("For current or external facts, use web_search and base conclusions on its results. Do not repeat an equivalent search; after a relevant result, proceed unless a material fact is still missing.")
             if "native.get_current_datetime" in effective_tools.names:
                 guidance.append("For relative dates such as today, the next few days, or the last N days, call native.get_current_datetime first.")
             if "native.render_artifact" in effective_tools.names:
