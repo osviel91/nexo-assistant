@@ -8,3 +8,4 @@ assert.equal(result.status, 0, result.stderr || result.stdout);
 const source = readFileSync('web/assets/app.js', 'utf8');
 assert.match(source, /state\.currentNotebookId = null;\n\s*renderNotebookPicker\(\);/);
 assert.match(source, /visibleNotebookId !== state\.currentNotebookId/);
+assert.match(source, /state\.webEnabled = false;\s*state\.toolsEnabled = false;\s*renderToolToggles\(\);/);

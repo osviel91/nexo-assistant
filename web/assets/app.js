@@ -117,6 +117,10 @@ function formatRunDiagnostics(runtime = {}) {
 }
 
 function moduleEnabled(id) { return state.modules.some((module) => module.id === id); }
+function renderToolToggles() {
+  $('#web-chip').setAttribute('aria-pressed', String(state.webEnabled));
+  $('#tools-chip').setAttribute('aria-pressed', String(state.toolsEnabled));
+}
 function allModels() { return state.providers.flatMap((provider) => provider.models.map((model) => ({ provider, model }))); }
 async function savePreference(key, value) { state.preferences[key] = value; try { await api('/preferences', { method: 'PATCH', body: JSON.stringify({ [key]: value }) }); } catch (error) { toast(error.message); } }
 function selected() {
@@ -373,8 +377,7 @@ async function loadModules() {
   $('#attach-button').hidden = !state.modules.some((module) => module.interface_extensions.some((extension) => extension.id === 'attach-files'));
   $('#web-chip').hidden = !moduleEnabled('web-search-searxng');
   $('#tools-chip').hidden = !hasTools;
-  $('#web-chip').setAttribute('aria-pressed', String(state.webEnabled));
-  $('#tools-chip').setAttribute('aria-pressed', String(state.toolsEnabled));
+  renderToolToggles();
   $('#mcp-setting').hidden = !moduleEnabled('mcp');
   $('#decision-setting').hidden = !moduleEnabled('decision-runtime');
   renderLab();
@@ -414,6 +417,7 @@ function beginChat() {
   state.executionMode = 'chat';
   state.webEnabled = false;
   state.toolsEnabled = false;
+  renderToolToggles();
   state.currentNotebookId = null;
   renderNotebookPicker();
   state.lastRuntime = null;
@@ -844,7 +848,7 @@ $('#notebook-form').onsubmit = async (event) => {
 
 $('#model-select').onchange = () => { updateComposerModel(); if ($('#model-select').value) savePreference('last_chat_model', $('#model-select').value); };
 document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
-['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; $(`#${id}`).setAttribute('aria-pressed', String(state[key])); }; });
+['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; renderToolToggles(); }; });
 $('#notebook-picker').onchange = async (event) => {
   state.currentNotebookId = event.target.value || null;
   if (!state.conversationId) return;
