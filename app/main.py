@@ -373,6 +373,19 @@ async def mcp_connect(server_id: str):
         return mcp_manager.repository.server(server_id)
 
 
+@app.patch("/api/mcp/servers/{server_id}/tools")
+def mcp_set_all_tools(server_id: str, item: dict[str, bool]):
+    enabled = item.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "enabled must be boolean")
+    if not mcp_manager.repository.server(server_id):
+        raise HTTPException(404, "MCP server not found")
+    with db() as c:
+        c.execute("UPDATE mcp_tools SET enabled=? WHERE server_id=?", (int(enabled), server_id))
+    mcp_manager._sync_tools()
+    return {"ok": True}
+
+
 @app.patch("/api/mcp/servers/{server_id}/tools/{tool_id:path}")
 def mcp_set_tool(server_id: str, tool_id: str, item: dict[str, bool]):
     enabled = item.get("enabled")

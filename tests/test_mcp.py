@@ -87,6 +87,29 @@ class MCPTests(unittest.TestCase):
                 main.mcp_manager.client_factory = old_factory
                 main.DB_PATH = old_path
 
+    def test_bulk_tool_toggle_enables_and_disables_all(self):
+        from app import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_path, old_factory = main.DB_PATH, main.mcp_manager.client_factory
+            main.DB_PATH = Path(directory) / "mcp-bulk.sqlite3"
+            main.startup()
+            client = FakeClient([{"name": "one", "inputSchema": {"type": "object"}}, {"name": "two", "inputSchema": {"type": "object"}}])
+            main.mcp_manager.client_factory = lambda *_: client
+            try:
+                with TestClient(main.app) as http:
+                    server = http.post("/api/mcp/servers", json={"name": "Bulk", "slug": "bulk", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "none"}).json()
+                    http.post(f"/api/mcp/servers/{server['id']}/connect")
+                    self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={"enabled": True}).status_code, 200)
+                    self.assertTrue(all(tool["enabled"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]))
+                    self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={"enabled": False}).status_code, 200)
+                    self.assertFalse(any(tool["enabled"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]))
+                    self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={}).status_code, 422)
+                    self.assertEqual(http.patch("/api/mcp/servers/missing/tools", json={"enabled": True}).status_code, 404)
+            finally:
+                main.mcp_manager.client_factory = old_factory
+                main.DB_PATH = old_path
+
     def test_sdk_client_adds_bearer_header_only_when_configured(self):
         unauthenticated = MCPManager._sdk_client("https://mcp.example/mcp")
         authenticated = MCPManager._sdk_client("https://mcp.example/mcp", "example-secret")
