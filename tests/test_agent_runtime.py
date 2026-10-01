@@ -171,6 +171,24 @@ class AgentRuntimeTests(unittest.TestCase):
         guidance = next(message["content"] for message in adapter.payloads[0]["messages"] if message["role"] == "system")
         self.assertIn("at most once", guidance)
 
+    def test_successful_artifact_renders_do_not_consume_retry_budget(self):
+        calls = []
+
+        async def render(_context, arguments):
+            calls.append(arguments)
+            return {"artifacts": [{"type": "bar", "title": arguments["title"], "data": {}}]}
+
+        registry = ModuleRegistry(FastAPI())
+        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render))
+        responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "native.render_artifact", "arguments": json.dumps({"title": str(i)})}}]}] for i in range(3)]
+        responses.append([{"content": "Generated three charts."}])
+        adapter = Adapter(responses)
+        events = run(AgentRuntime(), adapter, registry)
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(events[-1]["artifacts"]), 3)
+        self.assertNotIn("artifact_retry_limit", json.dumps(events))
+
     def test_system_instruction_is_an_independent_message_and_metrics_are_normalized(self):
         adapter = Adapter([[{"content": "answer"}]])
         adapter.responses = iter([[{"content": "answer", "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}]])

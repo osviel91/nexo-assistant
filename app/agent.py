@@ -94,7 +94,7 @@ class AgentRuntime:
         artifacts: list[dict[str, Any]] = []
         tool_rounds = 0
         tool_call_count = 0
-        artifact_render_attempts = 0
+        artifact_render_failures = 0
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
@@ -197,9 +197,8 @@ class AgentRuntime:
                 status = "ok"
                 result = None
                 if call["name"] == "native.render_artifact":
-                    artifact_render_attempts += 1
-                    if artifact_render_attempts > 2:
-                        result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ya se intentó dos veces. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
+                    if artifact_render_failures >= 2:
+                        result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ha fallado dos veces seguidas. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
                         status = "artifact_retry_limit"
                 if result is None:
                     try:
@@ -224,6 +223,8 @@ class AgentRuntime:
                     status = "tool_execution_error"
                 if result.get("error") and status == "ok":
                     status = result["error"].get("code", "tool_error")
+                if call["name"] == "native.render_artifact":
+                    artifact_render_failures = artifact_render_failures + 1 if result.get("error") else 0
                 duration_ms = round(time.monotonic() - started, 4) * 1000
                 event_status = "success" if status == "ok" and not result.get("error") else status
                 request.event_sink.finish_event(event_id, event_status, {"tool": call["name"], "round": tool_rounds, **({"error_code": result.get("error", {}).get("code")} if result.get("error") else {})}, duration_ms)
