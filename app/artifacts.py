@@ -47,7 +47,8 @@ def validate_artifact(value: Any) -> dict[str, Any]:
             raise ArtifactError("Métricas inválidas.")
     else:
         if not isinstance(data, dict):
-            raise ArtifactError("Dataset de gráfico inválido.")
+            shape = "labels y series" if kind in {"bar", "line", "pie"} else "points" if kind == "scatter" else "html"
+            raise ArtifactError(f"Los datos de {kind} deben ser un objeto JSON con {shape}; no envíes data como texto JSON.")
         if kind == "scatter":
             points = data.get("points", [])
             if not isinstance(points, list) or len(points) > MAX_POINTS or any(not isinstance(p, dict) or not all(isinstance(p.get(k), (int, float)) and math.isfinite(p[k]) for k in ("x", "y")) for p in points):
