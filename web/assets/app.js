@@ -240,13 +240,19 @@ async function loadKnowledge() {
 async function loadToolSettings() {
   state.toolSettings = await api('/settings/tools');
   $('#max-tool-calls').value = state.toolSettings.max_tool_calls;
+  $('#aemet-api-key').value = '';
+  $('#aemet-clear-key').checked = false;
+  $('#aemet-key-status').textContent = state.toolSettings.has_aemet_api_key ? 'Token AEMET configurado; no se muestra por seguridad.' : 'Token AEMET no configurado.';
 }
 
 $('#tool-settings-form').onsubmit = async (event) => {
   event.preventDefault();
   try {
-    state.toolSettings = await api('/settings/tools', { method: 'PUT', body: JSON.stringify({ max_tool_calls: Number($('#max-tool-calls').value) }) });
+    state.toolSettings = await api('/settings/tools', { method: 'PUT', body: JSON.stringify({ max_tool_calls: Number($('#max-tool-calls').value), aemet_api_key: $('#aemet-api-key').value, clear_aemet_api_key: $('#aemet-clear-key').checked }) });
     $('#max-tool-calls').value = state.toolSettings.max_tool_calls;
+    $('#aemet-api-key').value = '';
+    $('#aemet-clear-key').checked = false;
+    $('#aemet-key-status').textContent = state.toolSettings.has_aemet_api_key ? 'Token AEMET configurado; no se muestra por seguridad.' : 'Token AEMET no configurado.';
     toast('Tool settings saved');
   } catch (error) { toast(error.message); }
 };

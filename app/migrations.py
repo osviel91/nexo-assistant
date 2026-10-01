@@ -376,6 +376,13 @@ def _migration_19(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((19, _migration_19),)
 
 
+def _migration_20(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE IF NOT EXISTS aemet_credentials (id INTEGER PRIMARY KEY CHECK(id=1), api_key TEXT NOT NULL, updated_at TEXT NOT NULL)")
+
+
+MIGRATIONS = MIGRATIONS + ((20, _migration_20),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

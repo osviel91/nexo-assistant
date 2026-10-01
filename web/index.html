@@ -182,7 +182,10 @@
            <div class="settings-section-heading"><div><span class="eyebrow">AGENT RUNTIME</span><h3 id="tool-settings-title">Tool execution</h3></div></div>
            <form id="tool-settings-form" class="provider-form">
              <label>Maximum tool calls per turn<input id="max-tool-calls" type="number" min="1" max="50" step="1" value="10" required></label>
-             <p class="settings-hint">Limits actual tool invocations across native, module, and MCP tools. A provider response may request multiple tools in parallel.</p>
+              <p class="settings-hint">Limits actual tool invocations across native, module, and MCP tools. A provider response may request multiple tools in parallel.</p>
+              <label>Token API AEMET<input id="aemet-api-key" type="password" autocomplete="new-password" maxlength="512" placeholder="Dejar vacío para conservar el token"></label>
+              <p class="settings-hint" id="aemet-key-status" role="status"></p>
+              <label class="boolean-setting"><span>Eliminar token AEMET guardado</span><input id="aemet-clear-key" type="checkbox"></label>
              <div class="form-actions"><button type="submit" class="primary-button">Save tool settings</button></div>
            </form>
          </section>

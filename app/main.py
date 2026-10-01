@@ -28,6 +28,7 @@ from app.decision.models import ShadowDecision
 from app.kernel import ModuleRegistry, ToolExecutionContext, enabled_module_ids
 from app.modules.attachments import AttachmentsModule
 from app.modules.mcp import MCPManager, validate_server
+from app.modules.aemet import register_aemet_tool
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
@@ -56,6 +57,7 @@ app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
 register_native_tools(module_registry.context)
+register_aemet_tool(module_registry.context, lambda: aemet_api_key())
 exposure_policy = ExposurePolicy()
 shadow_tasks: set[asyncio.Task[None]] = set()
 enabled_modules = enabled_module_ids()
@@ -266,19 +268,32 @@ class MCPServerIn(BaseModel):
 
 class ToolRuntimeSettingsIn(BaseModel):
     max_tool_calls: int = Field(ge=1, le=50)
+    aemet_api_key: str | None = Field(default=None, max_length=512)
+    clear_aemet_api_key: bool = False
+
+
+def aemet_api_key() -> str | None:
+    with db() as connection:
+        row = connection.execute("SELECT api_key FROM aemet_credentials WHERE id=1").fetchone()
+    return row["api_key"] if row else None
 
 
 @app.get("/api/settings/tools")
 def get_tool_settings():
     with db() as c:
         row = c.execute("SELECT max_tool_calls FROM agent_runtime_settings WHERE id=1").fetchone()
-    return {"max_tool_calls": row["max_tool_calls"] if row else 10}
+        has_aemet_api_key = c.execute("SELECT 1 FROM aemet_credentials WHERE id=1").fetchone() is not None
+    return {"max_tool_calls": row["max_tool_calls"] if row else 10, "has_aemet_api_key": has_aemet_api_key}
 
 
 @app.put("/api/settings/tools")
 def save_tool_settings(item: ToolRuntimeSettingsIn):
     with db() as c:
         c.execute("INSERT INTO agent_runtime_settings(id,max_tool_calls,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET max_tool_calls=excluded.max_tool_calls,updated_at=excluded.updated_at", (item.max_tool_calls, now()))
+        if item.clear_aemet_api_key:
+            c.execute("DELETE FROM aemet_credentials WHERE id=1")
+        elif item.aemet_api_key and item.aemet_api_key.strip():
+            c.execute("INSERT INTO aemet_credentials(id,api_key,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET api_key=excluded.api_key,updated_at=excluded.updated_at", (item.aemet_api_key.strip(), now()))
     return get_tool_settings()
 
 

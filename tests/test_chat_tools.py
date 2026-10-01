@@ -113,10 +113,10 @@ class ChatToolTests(unittest.TestCase):
             main.startup()
             try:
                 with TestClient(main.app) as client:
-                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 10})
+                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 10, "has_aemet_api_key": False})
                     saved = client.put("/api/settings/tools", json={"max_tool_calls": 9})
                     self.assertEqual(saved.status_code, 200)
-                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 9})
+                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 9, "has_aemet_api_key": False})
                     self.assertEqual(main.configured_agent_runtime().limits.max_tool_calls, 9)
                     self.assertEqual(client.put("/api/settings/tools", json={"max_tool_calls": 51}).status_code, 422)
             finally:
