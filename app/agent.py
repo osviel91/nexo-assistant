@@ -19,7 +19,7 @@ logger = logging.getLogger("nexo.agent")
 
 @dataclass(frozen=True)
 class AgentRuntimeLimits:
-    max_tool_rounds: int = 5
+    max_tool_calls: int = 10
     max_tool_output_chars: int = 12000
 
 
@@ -93,11 +93,12 @@ class AgentRuntime:
         tools_used: list[str] = []
         artifacts: list[dict[str, Any]] = []
         tool_rounds = 0
+        tool_call_count = 0
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
         usage: dict[str, int] = {}
-        for _ in range(self.limits.max_tool_rounds + 1):
+        for _ in range(self.limits.max_tool_calls + 1):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
                                "grounding_applied": grounded_context is not None and bool(grounded_context.retrieval_results),
@@ -121,7 +122,7 @@ class AgentRuntime:
             round_content = ""
             finish_reason = None
             try:
-                async for chunk in request.model.stream(messages, definitions if tool_rounds < self.limits.max_tool_rounds else [], temperature):
+                async for chunk in request.model.stream(messages, definitions if tool_call_count < self.limits.max_tool_calls else [], temperature):
                     finish_reason = chunk.finish_reason or finish_reason
                     if chunk.usage:
                         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -176,10 +177,6 @@ class AgentRuntime:
                 yield {"complete": True, "answer": answer, "sources": sources, "artifacts": artifacts, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry,
                        "native_tool_calls": sum(name.startswith("native.") for name in tools_used)}
                 return
-            if tool_rounds >= self.limits.max_tool_rounds:
-                yield {"error": "Se alcanzó el límite de rondas de herramientas."}
-                return
-
             messages.append({
                 "role": "assistant",
                 "content": round_content or None,
@@ -187,6 +184,10 @@ class AgentRuntime:
             })
             tool_rounds += 1
             for call in tool_calls.values():
+                if tool_call_count >= self.limits.max_tool_calls:
+                    yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
+                    return
+                tool_call_count += 1
                 tools_used.append(call["name"])
                 tool_context = ToolExecutionContext(request.context.conversation_id, request.context.provider_id, request.context.model_id, tool_rounds, request.context.run_id)
                 started = time.monotonic()
@@ -240,7 +241,7 @@ class AgentRuntime:
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
             diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
-        yield {"error": "Se alcanzó el límite de rondas de herramientas."}
+        yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
 
     def _serialize_tool_result(self, result: dict[str, Any]) -> str:
         raw = json.dumps(result, ensure_ascii=False, separators=(",", ":"))

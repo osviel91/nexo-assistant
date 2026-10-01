@@ -138,7 +138,7 @@ class AgentRuntimeTests(unittest.TestCase):
         run(AgentRuntime(), second, second_registry, set())
         self.assertEqual(first.payloads, second.payloads)
 
-    def test_round_limit_and_output_limit(self):
+    def test_tool_call_limit_and_output_limit(self):
         async def handler(context, arguments):
             return {"value": "x" * 1000}
 
@@ -147,8 +147,9 @@ class AgentRuntimeTests(unittest.TestCase):
         registry = self.registry(handler)
         events = run(AgentRuntime(AgentRuntimeLimits(3, 100)), adapter, registry)
         self.assertEqual(len(adapter.payloads), 4)
-        self.assertEqual(events[-1]["error"], "Se alcanzó el límite de rondas de herramientas.")
-        self.assertLessEqual(len(adapter.payloads[1]["messages"][-1]["content"]), 100)
+        self.assertEqual(events[-1]["error"], "Se alcanzó el límite configurado de llamadas a herramientas.")
+        tool_message = next(message for message in adapter.payloads[1]["messages"] if message.get("role") == "tool")
+        self.assertLessEqual(len(tool_message["content"]), 100)
 
     def test_system_instruction_is_an_independent_message_and_metrics_are_normalized(self):
         adapter = Adapter([[{"content": "answer"}]])

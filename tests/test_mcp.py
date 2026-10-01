@@ -1,8 +1,12 @@
 import asyncio
 import json
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+
+from fastapi.testclient import TestClient
 
 from app.kernel import ModuleContext, ToolExecutionContext, ToolRegistry
 from app.migrations import migrate
@@ -23,6 +27,7 @@ class Repo:
     def tools(self, enabled=None): return [t for t in self.items if enabled is None or t["enabled"] == enabled]
     def replace_tools(self, _id, tools): self.items = [dict(t, enabled=False, server_id="s1") for t in tools]
     def status(self, _id, status, error): self.server_value.update(status=status, error_category=error)
+    def auth_token(self, _id): return None
     def invocation(self, server_id, tool_id, duration, status, truncated): self.diagnostics.append((server_id, tool_id, duration, status, truncated))
 
 
@@ -51,10 +56,47 @@ class MCPTests(unittest.TestCase):
         for args in [("x", "bad slug", "streamable-http", "https://x/mcp", 1), ("x", "x", "stdio", "https://x", 1), ("x", "x", "streamable-http", "https://u:p@x", 1), ("x", "x", "streamable-http", "https://x/mcp?token=secret", 1)]:
             with self.assertRaises(ValueError): validate_server(*args)
 
+    def test_bearer_credential_is_used_but_never_returned(self):
+        from app import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_path, old_factory = main.DB_PATH, main.mcp_manager.client_factory
+            main.DB_PATH = Path(directory) / "mcp-auth.sqlite3"
+            main.startup()
+            seen = []
+            client = FakeClient([{"name": "read", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[], structured_content=None, is_error=False))
+            main.mcp_manager.client_factory = lambda endpoint, token: (seen.append((endpoint, token)) or client)
+            token = "test-bearer-secret"
+            try:
+                with TestClient(main.app) as http:
+                    created = http.post("/api/mcp/servers", json={"name": "Private", "slug": "private", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "bearer", "auth_token": token})
+                    self.assertEqual(created.status_code, 200)
+                    server = created.json()
+                    self.assertTrue(server["has_auth"])
+                    self.assertNotIn(token, created.text)
+                    connected = http.post(f"/api/mcp/servers/{server['id']}/connect")
+                    self.assertEqual(connected.status_code, 200)
+                    self.assertEqual(seen, [("https://mcp.example/mcp", token)])
+                    self.assertNotIn(token, connected.text)
+                    unchanged = http.put(f"/api/mcp/servers/{server['id']}", json={"name": "Private", "slug": "private", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "bearer"})
+                    self.assertTrue(unchanged.json()["has_auth"])
+                    removed = http.put(f"/api/mcp/servers/{server['id']}", json={"name": "Private", "slug": "private", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "none"})
+                    self.assertFalse(removed.json()["has_auth"])
+                    self.assertNotIn(token, removed.text)
+            finally:
+                main.mcp_manager.client_factory = old_factory
+                main.DB_PATH = old_path
+
+    def test_sdk_client_adds_bearer_header_only_when_configured(self):
+        unauthenticated = MCPManager._sdk_client("https://mcp.example/mcp")
+        authenticated = MCPManager._sdk_client("https://mcp.example/mcp", "example-secret")
+        self.assertIsNone(unauthenticated.headers)
+        self.assertEqual(authenticated.headers, {"Authorization": "Bearer example-secret"})
+
     def test_refresh_stable_identity_conservative_enable_and_call(self):
         repo, registry = Repo(), ToolRegistry()
         client = FakeClient([{"name": "query", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}}], SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")], structured_content={"rows": [[1]]}, is_error=False))
-        manager = MCPManager(repo, lambda _: client)
+        manager = MCPManager(repo, lambda *_: client)
         manager.register(ModuleContext(None, {}, registry))
         asyncio.run(manager.refresh(repo.server_value))
         self.assertEqual(repo.items[0]["id"], "mcp.demo.query")
@@ -68,7 +110,7 @@ class MCPTests(unittest.TestCase):
     def test_refresh_failure_keeps_stale_snapshot_but_unexposes_tools(self):
         repo = Repo()
         repo.items = [{"id": "mcp.demo.old", "server_id": "s1", "remote_name": "old", "description": "", "input_schema": '{"type":"object"}', "enabled": True}]
-        manager = MCPManager(repo, lambda _: FakeClient(error=OSError("offline")))
+        manager = MCPManager(repo, lambda *_: FakeClient(error=OSError("offline")))
         registry = ToolRegistry()
         manager.register(ModuleContext(None, {}, registry))
         with self.assertRaises(OSError): asyncio.run(manager.refresh(repo.server_value))
@@ -79,7 +121,7 @@ class MCPTests(unittest.TestCase):
     def test_timeout_and_malformed_schema(self):
         repo = Repo()
         tool = {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object"}'}
-        manager = MCPManager(repo, lambda _: FakeClient(delay=.2))
+        manager = MCPManager(repo, lambda *_: FakeClient(delay=.2))
         result = asyncio.run(manager.call(repo.server_value, tool, {}))
         self.assertEqual(result["error"]["code"], "invocation_timeout")
         with self.assertRaises(MCPProtocolError): normalized_schema({"type": "array"})
@@ -87,7 +129,7 @@ class MCPTests(unittest.TestCase):
     def test_large_response_reports_truncation_without_leaking_sensitive_inputs(self):
         repo = Repo()
         result = SimpleNamespace(content=[SimpleNamespace(type="text", text="x" * 16000)], structured_content=None, is_error=False)
-        manager = MCPManager(repo, lambda _: FakeClient(result=result))
+        manager = MCPManager(repo, lambda *_: FakeClient(result=result))
         response = asyncio.run(manager.call(repo.server_value, {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object","properties":{"password":{"type":"string"}}}'}, {"password": "never-log"}))
         self.assertTrue(response["truncated"])
         self.assertNotIn("never-log", json.dumps(repo.diagnostics))
@@ -95,7 +137,7 @@ class MCPTests(unittest.TestCase):
     def test_structured_mcp_result_can_feed_native_artifact_and_datetime_tools_coexist(self):
         repo, registry = Repo(), ToolRegistry()
         client = FakeClient([{"name": "query", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[], structured_content={"columns": ["day", "count"], "rows": [["2026-09-01", 4]]}, is_error=False))
-        manager = MCPManager(repo, lambda _: client)
+        manager = MCPManager(repo, lambda *_: client)
         context = ModuleContext(None, {}, registry)
         register_native_tools(context)
         manager.register(context)
@@ -112,7 +154,7 @@ class MCPTests(unittest.TestCase):
     def test_mcp_tool_uses_agent_runtime_and_tool_result_turn(self):
         repo, registry = Repo(), ToolRegistry()
         client = FakeClient([{"name": "query", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[SimpleNamespace(type="text", text="rows")], structured_content={"rows": [[2]]}, is_error=False))
-        manager = MCPManager(repo, lambda _: client)
+        manager = MCPManager(repo, lambda *_: client)
         manager.register(ModuleContext(None, {}, registry))
         asyncio.run(manager.refresh(repo.server_value))
         repo.items[0]["enabled"] = True

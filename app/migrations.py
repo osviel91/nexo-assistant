@@ -356,6 +356,26 @@ def _migration_18(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((18, _migration_18),)
 
 
+def _migration_19(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "mcp_servers", "auth_type", "TEXT NOT NULL DEFAULT 'none' CHECK(auth_type IN ('none','bearer'))")
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS mcp_server_credentials (
+      server_id TEXT PRIMARY KEY REFERENCES mcp_servers(id) ON DELETE CASCADE,
+      bearer_token TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_runtime_settings (
+      id INTEGER PRIMARY KEY CHECK(id=1),
+      max_tool_calls INTEGER NOT NULL DEFAULT 10 CHECK(max_tool_calls BETWEEN 1 AND 50),
+      updated_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO agent_runtime_settings(id,max_tool_calls,updated_at) VALUES(1,10,datetime('now'));
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((19, _migration_19),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

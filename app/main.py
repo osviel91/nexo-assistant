@@ -56,7 +56,6 @@ app = FastAPI(title="Nexo Chat", version="0.1.0")
 logger = logging.getLogger("nexo.chat")
 module_registry = ModuleRegistry(app, {"max_upload": MAX_UPLOAD})
 register_native_tools(module_registry.context)
-agent_runtime = AgentRuntime(AgentRuntimeLimits(max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000"))))
 exposure_policy = ExposurePolicy()
 shadow_tasks: set[asyncio.Task[None]] = set()
 enabled_modules = enabled_module_ids()
@@ -94,14 +93,24 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def configured_agent_runtime() -> AgentRuntime:
+    with db() as c:
+        row = c.execute("SELECT max_tool_calls FROM agent_runtime_settings WHERE id=1").fetchone()
+    return AgentRuntime(AgentRuntimeLimits(
+        max_tool_calls=row["max_tool_calls"] if row else 10,
+        max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000")),
+    ))
+
+
 class MCPRepository:
     def servers(self):
         with db() as c:
             rows = c.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
             result = []
             for row in rows:
-                item = {key: row[key] for key in ("id", "name", "slug", "enabled", "transport", "endpoint", "timeout", "status", "error_category", "last_connected_at", "created_at", "updated_at")}
+                item = {key: row[key] for key in ("id", "name", "slug", "enabled", "transport", "endpoint", "timeout", "status", "error_category", "last_connected_at", "created_at", "updated_at", "auth_type")}
                 item["enabled"] = bool(item["enabled"])
+                item["has_auth"] = c.execute("SELECT 1 FROM mcp_server_credentials WHERE server_id=?", (row["id"],)).fetchone() is not None
                 item["tools"] = [dict(tool) | {"enabled": bool(tool["enabled"]), "input_schema": json.loads(tool["input_schema"])} for tool in c.execute("SELECT * FROM mcp_tools WHERE server_id=? ORDER BY remote_name", (row["id"],))]
                 result.append(item)
             return result
@@ -117,6 +126,11 @@ class MCPRepository:
                 query += " WHERE enabled=?"
                 params = (int(enabled),)
             return [dict(row) for row in c.execute(query, params)]
+
+    def auth_token(self, server_id):
+        with db() as c:
+            row = c.execute("SELECT bearer_token FROM mcp_server_credentials WHERE server_id=?", (server_id,)).fetchone()
+            return row["bearer_token"] if row else None
 
     def replace_tools(self, server_id, tools):
         with db() as c:
@@ -246,6 +260,26 @@ class MCPServerIn(BaseModel):
     endpoint: str = Field(min_length=1, max_length=1000)
     timeout: float = Field(default=15, ge=0.1, le=120)
     enabled: bool = False
+    auth_type: Literal["none", "bearer"] = "none"
+    auth_token: str | None = Field(default=None, max_length=4096)
+
+
+class ToolRuntimeSettingsIn(BaseModel):
+    max_tool_calls: int = Field(ge=1, le=50)
+
+
+@app.get("/api/settings/tools")
+def get_tool_settings():
+    with db() as c:
+        row = c.execute("SELECT max_tool_calls FROM agent_runtime_settings WHERE id=1").fetchone()
+    return {"max_tool_calls": row["max_tool_calls"] if row else 10}
+
+
+@app.put("/api/settings/tools")
+def save_tool_settings(item: ToolRuntimeSettingsIn):
+    with db() as c:
+        c.execute("INSERT INTO agent_runtime_settings(id,max_tool_calls,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET max_tool_calls=excluded.max_tool_calls,updated_at=excluded.updated_at", (item.max_tool_calls, now()))
+    return get_tool_settings()
 
 
 @app.get("/api/mcp/servers")
@@ -259,10 +293,14 @@ def mcp_add_server(item: MCPServerIn):
         validate_server(item.name, item.slug, item.transport, item.endpoint, item.timeout)
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
+    if item.auth_type == "bearer" and not (item.auth_token or "").strip():
+        raise HTTPException(422, "Bearer authentication requires a token")
     server_id = str(uuid.uuid4())
     with db() as c:
         try:
-            c.execute("INSERT INTO mcp_servers(id,name,slug,enabled,transport,endpoint,timeout,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (server_id, item.name.strip(), item.slug, int(item.enabled), item.transport, item.endpoint, item.timeout, now(), now()))
+            c.execute("INSERT INTO mcp_servers(id,name,slug,enabled,transport,endpoint,timeout,auth_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (server_id, item.name.strip(), item.slug, int(item.enabled), item.transport, item.endpoint, item.timeout, item.auth_type, now(), now()))
+            if item.auth_type == "bearer":
+                c.execute("INSERT INTO mcp_server_credentials(server_id,bearer_token,updated_at) VALUES(?,?,?)", (server_id, item.auth_token.strip(), now()))
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Server slug already exists") from None
     return mcp_manager.repository.server(server_id)
@@ -275,12 +313,23 @@ def mcp_update_server(server_id: str, item: MCPServerIn):
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     with db() as c:
+        old = c.execute("SELECT auth_type FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+        if not old:
+            raise HTTPException(404, "MCP server not found")
+        stored_credential = c.execute("SELECT bearer_token FROM mcp_server_credentials WHERE server_id=?", (server_id,)).fetchone()
+        token = (item.auth_token or "").strip()
+        if item.auth_type == "bearer" and not (token or (old["auth_type"] == "bearer" and stored_credential)):
+            raise HTTPException(422, "Bearer authentication requires a token")
         try:
-            cursor = c.execute("UPDATE mcp_servers SET name=?,slug=?,transport=?,endpoint=?,timeout=?,enabled=?,status=CASE WHEN endpoint!=? OR enabled!=? THEN 'disconnected' ELSE status END,updated_at=? WHERE id=?", (item.name.strip(), item.slug, item.transport, item.endpoint, item.timeout, int(item.enabled), item.endpoint, int(item.enabled), now(), server_id))
+            auth_changed = item.auth_type != old["auth_type"] or bool(token)
+            cursor = c.execute("UPDATE mcp_servers SET name=?,slug=?,transport=?,endpoint=?,timeout=?,enabled=?,auth_type=?,status=CASE WHEN endpoint!=? OR enabled!=? OR ? THEN 'disconnected' ELSE status END,updated_at=? WHERE id=?", (item.name.strip(), item.slug, item.transport, item.endpoint, item.timeout, int(item.enabled), item.auth_type, item.endpoint, int(item.enabled), int(auth_changed), now(), server_id))
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Server slug already exists") from None
-        if not cursor.rowcount:
-            raise HTTPException(404, "MCP server not found")
+        if item.auth_type == "bearer":
+            if token:
+                c.execute("INSERT INTO mcp_server_credentials(server_id,bearer_token,updated_at) VALUES(?,?,?) ON CONFLICT(server_id) DO UPDATE SET bearer_token=excluded.bearer_token,updated_at=excluded.updated_at", (server_id, token, now()))
+        else:
+            c.execute("DELETE FROM mcp_server_credentials WHERE server_id=?", (server_id,))
     mcp_manager._sync_tools()
     return mcp_manager.repository.server(server_id)
 
@@ -1456,6 +1505,8 @@ async def chat(req: ChatIn):
                     knowledge_outcome,
                 )
                 runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + (["system"] if knowledge_outcome and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED else []) + [message["role"] for message in messages]
+                run_agent = configured_agent_runtime()
+                runtime_snapshot["max_tool_calls"] = run_agent.limits.max_tool_calls
                 _update_runtime_metadata(run_id, runtime_snapshot)
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
@@ -1465,7 +1516,7 @@ async def chat(req: ChatIn):
                                                 runtime_snapshot, grounded_context, effective_configuration,
                                                 knowledge_outcome=knowledge_outcome,
                                                 request_started_at=request_started_at)
-                async for event in agent_runtime.stream(run_request):
+                async for event in run_agent.stream(run_request):
                     if "trace" in event:
                         trace = event["trace"]
                         _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))

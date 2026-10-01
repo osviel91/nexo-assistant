@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app.kernel import ToolDefinition
 
 
@@ -102,6 +104,24 @@ class TextToolCallClient:
 
 
 class ChatToolTests(unittest.TestCase):
+    def test_tool_round_limit_is_persisted_and_used_by_agent_runtime(self):
+        from app import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_db = main.DB_PATH
+            main.DB_PATH = Path(directory) / "tool-settings.sqlite3"
+            main.startup()
+            try:
+                with TestClient(main.app) as client:
+                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 10})
+                    saved = client.put("/api/settings/tools", json={"max_tool_calls": 9})
+                    self.assertEqual(saved.status_code, 200)
+                    self.assertEqual(client.get("/api/settings/tools").json(), {"max_tool_calls": 9})
+                    self.assertEqual(main.configured_agent_runtime().limits.max_tool_calls, 9)
+                    self.assertEqual(client.put("/api/settings/tools", json={"max_tool_calls": 51}).status_code, 422)
+            finally:
+                main.DB_PATH = old_db
+
     def test_date_two_searches_and_chart_flow_end_to_end(self):
         from app import main
         from app.native_tools import register_native_tools

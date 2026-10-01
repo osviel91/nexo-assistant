@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -75,6 +75,7 @@ function formatRunDiagnostics(runtime = {}) {
     `Registered tools: ${(runtime.registered_tool_names || []).join(', ') || 'none'}`,
     `Effective tools: ${(runtime.effective_tool_names || []).join(', ') || 'none'}`,
     `Tool availability: ${diagnosticValue(runtime.tool_availability_reason || 'available')}`,
+    `Tool-call limit: ${diagnosticValue(runtime.max_tool_calls)}`,
     `Tools used: ${(runtime.tools_used || []).join(', ') || 'No tools'}`,
     '',
     'Knowledge:',
@@ -117,6 +118,26 @@ function formatRunDiagnostics(runtime = {}) {
 }
 
 function moduleEnabled(id) { return state.modules.some((module) => module.id === id); }
+function renderSettingsTabs() {
+  const decision = state.modules.find((module) => module.id === 'decision-runtime');
+  const available = new Set(['providers', 'general', 'knowledge', 'tools']);
+  if (moduleEnabled('mcp')) available.add('mcp');
+  if (decision) available.add('decision');
+  if (!available.has(state.settingsTab)) state.settingsTab = 'providers';
+  document.querySelectorAll('[data-settings-tab]').forEach((tab) => {
+    const selected = tab.dataset.settingsTab === state.settingsTab && available.has(tab.dataset.settingsTab);
+    tab.hidden = !available.has(tab.dataset.settingsTab);
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    tab.classList.toggle('settings-nav-active', selected);
+  });
+  document.querySelectorAll('[data-settings-panel]').forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== state.settingsTab; });
+  const status = $('#decision-runtime-status');
+  if (status && decision) {
+    const value = decision.status || {};
+    status.textContent = `${value.available ? 'Available' : 'Unavailable'} · ${value.provider || 'provider unknown'}${value.last_error ? ` · ${value.last_error}` : ''}. Endpoint and credentials are managed by the server environment.`;
+  }
+}
 function renderToolToggles() {
   $('#web-chip').setAttribute('aria-pressed', String(state.webEnabled));
   $('#tools-chip').setAttribute('aria-pressed', String(state.toolsEnabled));
@@ -216,6 +237,20 @@ async function loadKnowledge() {
   $('#knowledge-health').textContent = `${state.knowledge.health.ready} ready · ${state.knowledge.health.outdated} outdated · ${state.knowledge.health.failed} failed`;
 }
 
+async function loadToolSettings() {
+  state.toolSettings = await api('/settings/tools');
+  $('#max-tool-calls').value = state.toolSettings.max_tool_calls;
+}
+
+$('#tool-settings-form').onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    state.toolSettings = await api('/settings/tools', { method: 'PUT', body: JSON.stringify({ max_tool_calls: Number($('#max-tool-calls').value) }) });
+    $('#max-tool-calls').value = state.toolSettings.max_tool_calls;
+    toast('Tool settings saved');
+  } catch (error) { toast(error.message); }
+};
+
 function updateRetrievalControls() {
   const mode = $('#embedding-mode').value;
   $('#embedding-dense-candidates').disabled = mode === 'lexical';
@@ -231,21 +266,22 @@ async function loadTools() {
 
 async function loadMCP() {
   const servers = await api('/mcp/servers');
-  $('#mcp-list').innerHTML = servers.map((server) => `<article class="provider-card"><div class="provider-card-head"><strong>${escapeHtml(server.name)}</strong><span class="settings-hint">${server.status === 'connected' ? '● Connected' : server.status === 'authentication_failed' ? '× Authentication failed' : server.status === 'unreachable' ? '× Unreachable' : server.enabled ? '○ Degraded' : '○ Disabled'}</span></div><p class="settings-hint">${escapeHtml(server.endpoint)} · ${server.tools.length} discovered</p><label class="boolean-setting"><span>Enable server</span><input type="checkbox" data-mcp-enabled="${escapeHtml(server.id)}" ${server.enabled ? 'checked' : ''}></label><div class="card-actions"><button data-mcp-connect="${escapeHtml(server.id)}">Connect / refresh</button><button data-mcp-edit="${escapeHtml(server.id)}">Edit</button><button data-mcp-delete="${escapeHtml(server.id)}">Remove</button></div>${server.tools.map((tool) => `<label class="boolean-setting"><span>${escapeHtml(tool.remote_name)} <small>${server.status === 'connected' ? 'available' : 'stale / unavailable'}</small></span><input type="checkbox" data-mcp-tool="${escapeHtml(server.id)}" data-tool-id="${escapeHtml(tool.id)}" ${tool.enabled ? 'checked' : ''} ${server.status !== 'connected' || !server.enabled ? 'disabled' : ''}></label>`).join('')}</article>`).join('') || '<p class="empty-providers">No MCP servers configured.</p>';
+  $('#mcp-list').innerHTML = servers.map((server) => `<article class="provider-card"><div class="provider-card-head"><strong>${escapeHtml(server.name)}</strong><span class="settings-hint">${server.status === 'connected' ? '● Connected' : server.status === 'authentication_failed' ? '× Authentication failed' : server.status === 'unreachable' ? '× Unreachable' : server.enabled ? '○ Degraded' : '○ Disabled'}</span></div><p class="settings-hint">${escapeHtml(server.endpoint)} · ${server.auth_type === 'bearer' && server.has_auth ? 'Bearer auth configured' : 'No auth'} · ${server.tools.length} discovered</p><label class="boolean-setting"><span>Enable server</span><input type="checkbox" data-mcp-enabled="${escapeHtml(server.id)}" ${server.enabled ? 'checked' : ''}></label><div class="card-actions"><button data-mcp-connect="${escapeHtml(server.id)}">Connect / refresh</button><button data-mcp-edit="${escapeHtml(server.id)}">Edit</button><button data-mcp-delete="${escapeHtml(server.id)}">Remove</button></div>${server.tools.map((tool) => `<label class="boolean-setting"><span>${escapeHtml(tool.remote_name)} <small>${server.status === 'connected' ? 'available' : 'stale / unavailable'}</small></span><input type="checkbox" data-mcp-tool="${escapeHtml(server.id)}" data-tool-id="${escapeHtml(tool.id)}" ${tool.enabled ? 'checked' : ''} ${server.status !== 'connected' || !server.enabled ? 'disabled' : ''}></label>`).join('')}</article>`).join('') || '<p class="empty-providers">No MCP servers configured.</p>';
   $('#mcp-list').querySelectorAll('[data-mcp-connect]').forEach((button) => { button.onclick = async () => { button.disabled = true; try { await api(`/mcp/servers/${button.dataset.mcpConnect}/connect`, { method: 'POST' }); await loadMCP(); await loadTools(); } catch (error) { toast(error.message); } }; });
   $('#mcp-list').querySelectorAll('[data-mcp-tool]').forEach((input) => { input.onchange = async () => { await api(`/mcp/servers/${input.dataset.mcpTool}/tools/${encodeURIComponent(input.dataset.toolId)}`, { method: 'PATCH', body: JSON.stringify({ enabled: input.checked }) }); await loadTools(); }; });
   $('#mcp-list').querySelectorAll('[data-mcp-enabled]').forEach((input) => { input.onchange = async () => { await api(`/mcp/servers/${input.dataset.mcpEnabled}`, { method: 'PATCH', body: JSON.stringify({ enabled: input.checked }) }); await loadMCP(); await loadTools(); }; });
-  $('#mcp-list').querySelectorAll('[data-mcp-edit]').forEach((button) => { button.onclick = () => { const server = servers.find((item) => item.id === button.dataset.mcpEdit); $('#mcp-id').value = server.id; $('#mcp-name').value = server.name; $('#mcp-slug').value = server.slug; $('#mcp-endpoint').value = server.endpoint; $('#mcp-timeout').value = server.timeout; $('#mcp-cancel').hidden = false; $('#mcp-form-title').textContent = 'Edit MCP server'; }; });
+  $('#mcp-list').querySelectorAll('[data-mcp-edit]').forEach((button) => { button.onclick = () => { const server = servers.find((item) => item.id === button.dataset.mcpEdit); $('#mcp-id').value = server.id; $('#mcp-enabled').value = String(server.enabled); $('#mcp-name').value = server.name; $('#mcp-slug').value = server.slug; $('#mcp-endpoint').value = server.endpoint; $('#mcp-timeout').value = server.timeout; $('#mcp-auth-type').value = server.auth_type || 'none'; $('#mcp-auth-type').dispatchEvent(new Event('change')); $('#mcp-auth-state').hidden = !(server.auth_type === 'bearer' && server.has_auth); $('#mcp-cancel').hidden = false; $('#mcp-form-title').textContent = 'Edit MCP server'; }; });
   $('#mcp-list').querySelectorAll('[data-mcp-delete]').forEach((button) => { button.onclick = async () => { await api(`/mcp/servers/${button.dataset.mcpDelete}`, { method: 'DELETE' }); await loadMCP(); await loadTools(); }; });
 }
 
 $('#mcp-form').onsubmit = async (event) => {
   event.preventDefault();
   const id = $('#mcp-id').value;
-  const body = { name: $('#mcp-name').value, slug: $('#mcp-slug').value, endpoint: $('#mcp-endpoint').value, timeout: Number($('#mcp-timeout').value), transport: 'streamable-http', enabled: true };
-  try { await api(`/mcp/servers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); event.target.reset(); $('#mcp-id').value = ''; $('#mcp-cancel').hidden = true; await loadMCP(); toast('MCP server saved'); } catch (error) { toast(error.message); }
+  const body = { name: $('#mcp-name').value, slug: $('#mcp-slug').value, endpoint: $('#mcp-endpoint').value, timeout: Number($('#mcp-timeout').value), transport: 'streamable-http', enabled: id ? $('#mcp-enabled').value === 'true' : true, auth_type: $('#mcp-auth-type').value, auth_token: $('#mcp-auth-token').value || null };
+  try { await api(`/mcp/servers${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); event.target.reset(); $('#mcp-id').value = ''; $('#mcp-enabled').value = 'true'; $('#mcp-cancel').hidden = true; $('#mcp-auth-token-field').hidden = true; $('#mcp-auth-state').hidden = true; await loadMCP(); toast('MCP server saved'); } catch (error) { toast(error.message); }
 };
-$('#mcp-cancel').onclick = () => { $('#mcp-form').reset(); $('#mcp-id').value = ''; $('#mcp-cancel').hidden = true; };
+$('#mcp-cancel').onclick = () => { $('#mcp-form').reset(); $('#mcp-id').value = ''; $('#mcp-enabled').value = 'true'; $('#mcp-auth-token-field').hidden = true; $('#mcp-auth-state').hidden = true; $('#mcp-cancel').hidden = true; };
+$('#mcp-auth-type').onchange = () => { $('#mcp-auth-token-field').hidden = $('#mcp-auth-type').value !== 'bearer'; if ($('#mcp-auth-type').value !== 'bearer') $('#mcp-auth-state').hidden = true; };
 
 async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
@@ -380,6 +416,7 @@ async function loadModules() {
   renderToolToggles();
   $('#mcp-setting').hidden = !moduleEnabled('mcp');
   $('#decision-setting').hidden = !moduleEnabled('decision-runtime');
+  renderSettingsTabs();
   renderLab();
 }
 
@@ -651,7 +688,7 @@ function openSurface(name) {
   $('#agents-surface').hidden = name !== 'agents';
   $('#notebooks-surface').hidden = name !== 'notebooks';
   $('#config-surface').hidden = name !== 'config';
-  if (name === 'settings') { resetForm(); applyPreferences(); renderProviderList(); $('#provider-name').focus(); }
+  if (name === 'settings') { resetForm(); applyPreferences(); renderSettingsTabs(); renderProviderList(); $('#provider-name').focus(); }
   if (name === 'agents') { resetAgentForm(); renderAgentList(); }
   if (name === 'notebooks') { resetNotebookForm(); renderNotebooks(); }
 }
@@ -849,6 +886,7 @@ $('#notebook-form').onsubmit = async (event) => {
 
 $('#model-select').onchange = () => { updateComposerModel(); if ($('#model-select').value) savePreference('last_chat_model', $('#model-select').value); };
 document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
+document.querySelectorAll('[data-settings-tab]').forEach((button) => { button.onclick = () => { state.settingsTab = button.dataset.settingsTab; renderSettingsTabs(); }; });
 ['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; renderToolToggles(); }; });
 $('#notebook-picker').onchange = async (event) => {
   state.currentNotebookId = event.target.value || null;
@@ -891,7 +929,7 @@ document.addEventListener('keydown', (event) => { if ((event.metaKey || event.ct
 applyPreferences();
 (async () => {
   await loadPreferences();
-  const results = await Promise.allSettled([loadModules(), loadProviders(), loadKnowledge(), loadTools(), loadMCP(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]);
+  const results = await Promise.allSettled([loadModules(), loadProviders(), loadKnowledge(), loadToolSettings(), loadTools(), loadMCP(), loadAgents(), loadNotebooks(), loadShadow(), loadTraces(), loadChats()]);
   const failure = results.find((result) => result.status === 'rejected');
   if (failure) toast(failure.reason?.message || 'No se pudieron cargar todos los datos.');
 })();

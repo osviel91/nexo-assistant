@@ -304,6 +304,9 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 @media (max-width: 420px) { .topbar-center { gap: 3px; }.mode-switch button { padding-inline: 4px; font-size: 8px; }.model-picker select, .agent-picker strong { max-width: 72px; font-size: 10px; }.config-inspector-button { max-width: 84px; overflow: hidden; padding-inline: 3px; text-overflow: ellipsis; white-space: nowrap; font-size: 8px; } }
 
 .notebook-list { display: grid; gap: 9px; margin-top: 25px; }
+.settings-nav button { border: 0; padding: 0 0 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.settings-nav button[aria-selected="true"] { color: var(--text); border-bottom: 2px solid var(--accent); }
+.settings-panel[hidden] { display: none; }
 .notebook-card { display: flex; align-items: stretch; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .notebook-card-main { display: grid; flex: 1; gap: 4px; padding: 0; border: 0; background: transparent; text-align: left; }
 .notebook-card-main strong { font-size: 14px; }.notebook-card-main span, .notebook-card-main small { color: var(--muted); font-size: 10px; }.notebook-card-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

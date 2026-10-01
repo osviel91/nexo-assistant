@@ -118,13 +118,16 @@
     </div>
          <div class="surface settings-surface" id="settings-surface" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="surface-header"><div><span class="eyebrow">PREFERENCIAS</span><h2 id="settings-title">Settings</h2><p>Configura cómo se conecta Nexo a tus modelos.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
-       <section class="appearance-settings" aria-labelledby="appearance-title">
-         <div class="settings-section-heading"><div><span class="eyebrow">APPEARANCE</span><h3 id="appearance-title">Interface</h3></div><span class="settings-hint">Saved on this device</span></div>
-         <fieldset class="setting-group"><legend>Interface style</legend><div class="setting-options"><label class="setting-option"><input type="radio" name="ui-style" value="standard"><span><strong>Standard</strong><small>Calm, spacious presentation</small></span></label><label class="setting-option"><input type="radio" name="ui-style" value="developer"><span><strong>Developer</strong><small>Dense technical workspace</small></span></label></div></fieldset>
-         <fieldset class="setting-group"><legend>Color scheme</legend><div class="setting-options setting-options-three"><label class="setting-option"><input type="radio" name="color-scheme" value="system"><span><strong>System</strong><small>Follow device</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="dark"><span><strong>Dark</strong><small>Low-light surfaces</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="light"><span><strong>Light</strong><small>Bright surfaces</small></span></label></div></fieldset>
-       </section>
-       <div class="settings-nav"><span class="settings-nav-active">Providers &amp; Models</span><span>General</span><span class="optional-setting" id="mcp-setting" hidden>MCP</span><span class="optional-setting" id="decision-setting" hidden>Decision Runtime</span></div>
-      <div class="provider-list" id="provider-list"></div>
+       <div class="settings-nav" role="tablist" aria-label="Settings">
+         <button type="button" role="tab" id="settings-tab-providers" aria-controls="settings-panel-providers" data-settings-tab="providers">Providers &amp; Models</button>
+         <button type="button" role="tab" id="settings-tab-general" aria-controls="settings-panel-general" data-settings-tab="general">General</button>
+         <button type="button" role="tab" id="settings-tab-knowledge" aria-controls="settings-panel-knowledge" data-settings-tab="knowledge">Knowledge</button>
+         <button type="button" role="tab" id="settings-tab-tools" aria-controls="settings-panel-tools" data-settings-tab="tools">Tools</button>
+         <button type="button" role="tab" id="mcp-setting" aria-controls="settings-panel-mcp" data-settings-tab="mcp" hidden>MCP</button>
+         <button type="button" role="tab" id="decision-setting" aria-controls="settings-panel-decision" data-settings-tab="decision" hidden>Decision Runtime</button>
+       </div>
+       <section class="settings-panel" role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" data-settings-panel="providers">
+       <div class="provider-list" id="provider-list"></div>
        <form id="provider-form" class="provider-form">
         <h3 id="form-title">Añadir proveedor</h3>
         <input id="provider-id" type="hidden">
@@ -132,20 +135,35 @@
         <label>URL base compatible con OpenAI<input id="provider-url" type="url" required placeholder="https://servidor:1234/v1"></label>
         <label>API key <span class="optional">(opcional para servidores locales)</span><input id="provider-key" type="password" autocomplete="new-password" placeholder="Se almacena en tu servidor"></label>
         <label>Modelos <span class="optional">(uno por línea; también puedes detectarlos después)</span><textarea id="provider-models" rows="3" placeholder="model-id-1&#10;model-id-2"></textarea></label>
-        <div class="form-actions"><button type="button" class="text-button" id="cancel-edit" hidden>Cancelar</button><button type="submit" class="primary-button" id="save-provider">Guardar proveedor</button></div>
-       </form>
-       <section class="knowledge-settings" aria-labelledby="mcp-title">
-         <div class="settings-section-heading"><div><span class="eyebrow">TOOLS</span><h3 id="mcp-title">MCP servers</h3></div><span class="settings-hint">Streamable HTTP · no saved credentials</span></div>
+         <div class="form-actions"><button type="button" class="text-button" id="cancel-edit" hidden>Cancelar</button><button type="submit" class="primary-button" id="save-provider">Guardar proveedor</button></div>
+        </form>
+        <p class="surface-foot">Las claves de proveedor no se envían al navegador durante las consultas.</p>
+       </section>
+       <section class="settings-panel" role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" data-settings-panel="general" hidden>
+        <section class="appearance-settings" aria-labelledby="appearance-title">
+          <div class="settings-section-heading"><div><span class="eyebrow">APPEARANCE</span><h3 id="appearance-title">Interface</h3></div><span class="settings-hint">Saved on this device</span></div>
+          <fieldset class="setting-group"><legend>Interface style</legend><div class="setting-options"><label class="setting-option"><input type="radio" name="ui-style" value="standard"><span><strong>Standard</strong><small>Calm, spacious presentation</small></span></label><label class="setting-option"><input type="radio" name="ui-style" value="developer"><span><strong>Developer</strong><small>Dense technical workspace</small></span></label></div></fieldset>
+          <fieldset class="setting-group"><legend>Color scheme</legend><div class="setting-options setting-options-three"><label class="setting-option"><input type="radio" name="color-scheme" value="system"><span><strong>System</strong><small>Follow device</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="dark"><span><strong>Dark</strong><small>Low-light surfaces</small></span></label><label class="setting-option"><input type="radio" name="color-scheme" value="light"><span><strong>Light</strong><small>Bright surfaces</small></span></label></div></fieldset>
+        </section>
+       </section>
+       <section class="settings-panel" role="tabpanel" id="settings-panel-mcp" aria-labelledby="mcp-setting" data-settings-panel="mcp" hidden>
+        <section class="knowledge-settings" aria-labelledby="mcp-title">
+          <div class="settings-section-heading"><div><span class="eyebrow">TOOLS</span><h3 id="mcp-title">MCP servers</h3></div><span class="settings-hint">Streamable HTTP · optional Bearer token</span></div>
          <div id="mcp-list" class="provider-list"></div>
          <form id="mcp-form" class="provider-form">
-           <h4 id="mcp-form-title">Add MCP server</h4><input id="mcp-id" type="hidden">
-           <label>Name<input id="mcp-name" required maxlength="80"></label><label>Slug<input id="mcp-slug" required pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="50"></label>
-           <label>Streamable HTTP endpoint<input id="mcp-endpoint" type="url" required placeholder="https://mcp.example/mcp"></label>
-           <label>Timeout (seconds)<input id="mcp-timeout" type="number" min="0.1" max="120" step="0.1" value="15"></label>
-           <div class="form-actions"><button type="button" class="text-button" id="mcp-cancel" hidden>Cancel</button><button class="primary-button">Save server</button></div>
-         </form>
+              <h4 id="mcp-form-title">Add MCP server</h4><input id="mcp-id" type="hidden"><input id="mcp-enabled" type="hidden" value="true">
+            <label>Name<input id="mcp-name" required maxlength="80"></label><label>Slug<input id="mcp-slug" required pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="50"></label>
+            <label>Streamable HTTP endpoint<input id="mcp-endpoint" type="url" required placeholder="https://mcp.example/mcp"></label>
+            <label>Timeout (seconds)<input id="mcp-timeout" type="number" min="0.1" max="120" step="0.1" value="15"></label>
+            <label>Authentication<select id="mcp-auth-type"><option value="none">None</option><option value="bearer">Bearer token</option></select></label>
+            <label id="mcp-auth-token-field" hidden>Bearer token<input id="mcp-auth-token" type="password" autocomplete="new-password" placeholder="Stored server-side; blank keeps saved token"></label>
+            <p id="mcp-auth-state" class="settings-hint" hidden>Token saved. It is never returned to the browser; enter a new one to replace it.</p>
+            <div class="form-actions"><button type="button" class="text-button" id="mcp-cancel" hidden>Cancel</button><button class="primary-button">Save server</button></div>
+          </form>
+        </section>
        </section>
-        <section class="knowledge-settings" aria-labelledby="knowledge-title">
+       <section class="settings-panel" role="tabpanel" id="settings-panel-knowledge" aria-labelledby="settings-tab-knowledge" data-settings-panel="knowledge" hidden>
+         <section class="knowledge-settings" aria-labelledby="knowledge-title">
          <div class="settings-section-heading"><div><span class="eyebrow">KNOWLEDGE</span><h3 id="knowledge-title">Embeddings &amp; retrieval</h3></div><span class="settings-hint" id="knowledge-health">Loading</span></div>
          <form id="embedding-form" class="provider-form">
            <label>Provider<select id="embedding-provider" required></select></label>
@@ -156,11 +174,27 @@
                <div class="settings-subsection"><h4>Reranking</h4><div class="boolean-setting"><label for="reranking-enabled">Enable reranking</label><input id="reranking-enabled" type="checkbox"></div><div class="settings-grid" id="reranking-fields"><label>Provider<select id="reranker-provider"></select></label><label>Model<select id="reranker-model"></select></label><label>Candidate limit<input id="reranker-candidates" type="number" min="1" max="200" value="8" required></label><label>Timeout (ms)<input id="reranker-timeout" type="number" min="1" max="120000" value="3000" required></label></div><p class="settings-hint" id="reranker-empty" hidden>No reranking-capable models configured. Mark a model as Reranking in Providers &amp; Models.</p><p class="settings-hint">Reranking is query-time only and does not require re-indexing.</p><div class="form-actions"><button type="button" class="text-button" id="test-reranker">Test reranker</button><span class="settings-hint" id="reranker-test-result" role="status"></span></div></div>
               <p class="settings-hint retrieval-help">Final Top K is the number of chunks passed to the model. It replaces the legacy Top K setting.</p>
            <div class="form-actions"><button type="button" class="text-button" id="test-embedding">Test embedding</button><button type="submit" class="primary-button">Save knowledge configuration</button></div>
-         </form>
+          </form>
+         </section>
+       </section>
+       <section class="settings-panel" role="tabpanel" id="settings-panel-tools" aria-labelledby="settings-tab-tools" data-settings-panel="tools" hidden>
+         <section class="knowledge-settings" aria-labelledby="tool-settings-title">
+           <div class="settings-section-heading"><div><span class="eyebrow">AGENT RUNTIME</span><h3 id="tool-settings-title">Tool execution</h3></div></div>
+           <form id="tool-settings-form" class="provider-form">
+             <label>Maximum tool calls per turn<input id="max-tool-calls" type="number" min="1" max="50" step="1" value="10" required></label>
+             <p class="settings-hint">Limits actual tool invocations across native, module, and MCP tools. A provider response may request multiple tools in parallel.</p>
+             <div class="form-actions"><button type="submit" class="primary-button">Save tool settings</button></div>
+           </form>
+         </section>
+       </section>
+       <section class="settings-panel" role="tabpanel" id="settings-panel-decision" aria-labelledby="decision-setting" data-settings-panel="decision" hidden>
+         <section class="knowledge-settings" aria-labelledby="decision-runtime-title">
+           <div class="settings-section-heading"><div><span class="eyebrow">OPTIONAL MODULE</span><h3 id="decision-runtime-title">Decision Runtime</h3></div></div>
+           <p id="decision-runtime-status" class="settings-hint">Decision provider configuration is managed by the server environment.</p>
+          </section>
         </section>
-        <p class="surface-foot">Las claves no se envían al navegador durante las consultas.</p>
        </div>
-      <div class="surface notebooks-surface" id="notebooks-surface" hidden role="dialog" aria-modal="true" aria-labelledby="notebooks-title">
+       <div class="surface notebooks-surface" id="notebooks-surface" hidden role="dialog" aria-modal="true" aria-labelledby="notebooks-title">
        <div class="surface-header"><div><span class="eyebrow">PERSISTENT KNOWLEDGE</span><h2 id="notebooks-title">Notebooks</h2><p>Organiza fuentes persistentes. El procesamiento de conocimiento llegará en una etapa posterior.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
        <div id="notebook-list" class="notebook-list"></div>
        <form id="notebook-form" class="notebook-form" hidden><h3 id="notebook-form-title">New notebook</h3><input id="notebook-id" type="hidden"><label>Name<input id="notebook-name" required maxlength="120"></label><label>Description<input id="notebook-description" maxlength="2000"></label><div class="form-actions"><button type="button" class="text-button" id="cancel-notebook-edit">Cancel</button><button type="submit" class="primary-button">Save notebook</button></div></form>

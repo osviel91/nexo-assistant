@@ -22,7 +22,7 @@ def validate_server(name: str, slug: str, transport: str, endpoint: str, timeout
     if not name.strip() or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?", slug):
         raise ValueError("Invalid server name or slug")
     if transport != "streamable-http" or parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("Use an unauthenticated http(s) Streamable HTTP endpoint")
+        raise ValueError("Use a Streamable HTTP endpoint without URL credentials, query, or fragment")
     if not 0.1 <= timeout <= 120:
         raise ValueError("Timeout must be between 0.1 and 120 seconds")
 
@@ -45,7 +45,7 @@ class MCPManager:
     manifest = ModuleManifest("mcp", "Model Context Protocol", "2.0.0", 1, ("mcp", "tools"))
     interface_extensions = ()
 
-    def __init__(self, repository: Any, client_factory: Callable[[str], Any] | None = None) -> None:
+    def __init__(self, repository: Any, client_factory: Callable[[str, str | None], Any] | None = None) -> None:
         self.repository = repository
         self.client_factory = client_factory or self._sdk_client
         self.context: ModuleContext | None = None
@@ -80,7 +80,7 @@ class MCPManager:
     async def refresh(self, server: dict[str, Any]) -> dict[str, Any]:
         self.repository.status(server["id"], "connecting", None)
         try:
-            async with self.client_factory(server["endpoint"]) as client:
+            async with self.client_factory(server["endpoint"], self.repository.auth_token(server["id"])) as client:
                 await asyncio.wait_for(client.initialize(), server["timeout"])
                 result = await asyncio.wait_for(client.list_tools(), server["timeout"])
             raw_tools = getattr(result, "tools", None)
@@ -119,7 +119,7 @@ class MCPManager:
             properties = schema.get("properties", {})
             if any(key not in properties for key in arguments) or any(key not in arguments for key in schema.get("required", [])):
                 return {"error": {"code": "invalid_arguments", "message": "Arguments do not match the MCP tool schema."}}
-            async with self.client_factory(server["endpoint"]) as client:
+            async with self.client_factory(server["endpoint"], self.repository.auth_token(server["id"])) as client:
                 await asyncio.wait_for(client.initialize(), server["timeout"])
                 result = await asyncio.wait_for(client.call_tool(tool["remote_name"], arguments), server["timeout"])
             if getattr(result, "is_error", False):
@@ -164,18 +164,19 @@ class MCPManager:
         return {"servers": self.repository.servers()}
 
     @staticmethod
-    def _sdk_client(endpoint: str) -> Any:
+    def _sdk_client(endpoint: str, bearer_token: str | None = None) -> Any:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
-        return _SDKClient(endpoint, ClientSession, streamablehttp_client)
+        headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else None
+        return _SDKClient(endpoint, ClientSession, streamablehttp_client, headers)
 
 
 class _SDKClient:
-    def __init__(self, url: str, session_type: Any, transport: Any) -> None:
-        self.url, self.session_type, self.transport = url, session_type, transport
+    def __init__(self, url: str, session_type: Any, transport: Any, headers: dict[str, str] | None = None) -> None:
+        self.url, self.session_type, self.transport, self.headers = url, session_type, transport, headers
 
     async def __aenter__(self):
-        self.transport_context = self.transport(self.url)
+        self.transport_context = self.transport(self.url, headers=self.headers)
         read, write, _ = await self.transport_context.__aenter__()
         self.session = self.session_type(read, write)
         await self.session.__aenter__()

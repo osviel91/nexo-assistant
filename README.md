@@ -81,32 +81,21 @@ Modules declare an id, version, kernel API version, capabilities and optional
 dependencies. Lifecycle and chat hooks are finite and failures are isolated
 and logged without exposing secrets or blocking the core.
 
-### MCP tools (Etapa 3A)
+### MCP tools
 
-MCP is optional and disabled unless `mcp` is included in `NEXO_MODULES`. Nexo
-uses the official Python SDK with Streamable HTTP; it does not launch MCP
-processes or deploy servers. Configure servers as a JSON array in
-`NEXO_MCP_SERVERS`:
+MCP is optional and enabled by including `mcp` in `NEXO_MODULES`. Configure
+servers in Settings → MCP. NEXO uses Streamable HTTP and does not launch local
+processes. Each discovered tool is disabled until explicitly enabled. Optional
+static Bearer authentication is stored server-side in SQLite; the token is
+write-only in the UI and never returned in server listings. OAuth and stdio are
+not supported. Endpoints must be reachable from the NEXO container and must not
+embed credentials in URL userinfo, query strings, or fragments.
 
-```text
-NEXO_MODULES=attachments,web-search-searxng,mcp
-NEXO_MCP_SERVERS=[{"id":"filesystem","url":"http://mcp-filesystem:8000/mcp","enabled":true,"allowed_tools":["read_file","list_directory"],"timeout":15}]
-```
-
-`allowed_tools` is mandatory in practice: an omitted or empty list exposes no
-tools. Exposed names are deterministic and namespaced as
-`mcp__<server_id>__<tool_name>`, so servers cannot overwrite native tools or
-each other. Each `tools/call` has the configured timeout, and connection,
-protocol, permission, execution and timeout failures are isolated from Nexo.
-`GET /api/modules` reports each configured server's enabled/connected state,
-discovered and exposed counts, and a safe error code. URLs must be absolute
-HTTP(S) URLs; do not put credentials in URLs or logs. MCP tools, like
-`web_search`, are sent only to models advertising `tool-calling`.
-
-Troubleshooting: confirm the module is listed in `NEXO_MODULES`, the JSON is
-valid, the URL is reachable from the Nexo container, and the server exposes
-the configured Streamable HTTP endpoint. A failed server is reported in
-`/api/modules` without preventing other modules or SearXNG from starting.
+Tool IDs are stable as `mcp.<server-slug>.<tool-name>`. MCP tool exposure is
+subject to the selected model's `tool-calling` capability and the chat's Tools
+toggle. See `docs/stage12b-mcp.md` for transport, auth, failure, and result-size
+boundaries. Settings → Tools controls the per-turn tool invocation ceiling
+(1–50, default 10), shared by native, module, and MCP tools.
 
 ### Agent runtime foundation (Etapa 2.5)
 
