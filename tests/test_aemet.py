@@ -5,7 +5,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.kernel import ModuleContext, ToolExecutionContext
-from app.modules.aemet import register_aemet_tool
+from app.modules.aemet import compact_data, filter_records, register_aemet_tool
 
 
 class AemetTests(unittest.TestCase):
@@ -39,6 +39,19 @@ class AemetTests(unittest.TestCase):
 
         no_key = self.make_tool(lambda request: self.fail("must not make a request"), lambda: None)
         self.assertEqual(self.call(no_key, {"path": "/api/test"})["error"]["code"], "not_configured")
+
+    def test_compacts_embedded_maps_and_stops_on_rate_limit(self):
+        forecast = {"prediccion": {"dia": [{"fecha": "2026-10-01", "temperatura": {"maxima": 20}}]}, "mapa": "A" * 100_000}
+        compacted = compact_data(forecast)
+        self.assertEqual(compacted["prediccion"], forecast["prediccion"])
+        self.assertNotIn("mapa", compacted)
+
+        tool = self.make_tool(lambda request: httpx.Response(429))
+        self.assertEqual(self.call(tool, {"path": "/api/test"})["error"]["code"], "rate_limited")
+
+    def test_filters_master_records_locally_by_municipality_name(self):
+        records = [{"id": "28161", "nombre": "Valdemoro"}, {"id": "28079", "nombre": "Madrid"}]
+        self.assertEqual(filter_records(records, "valdemoro"), [records[0]])
 
     def test_settings_store_token_without_returning_it_and_allow_clear(self):
         from app import main
