@@ -18,3 +18,10 @@ jobs:
           node-version: '20'
       - run: ./scripts/nexo bootstrap
       - run: ./scripts/nexo check
+
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
