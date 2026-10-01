@@ -104,6 +104,15 @@ class TextToolCallClient:
 
 
 class ChatToolTests(unittest.TestCase):
+    def test_chart_series_allow_missing_values_except_for_pie(self):
+        from app.artifacts import ArtifactError, validate_artifact
+
+        base = {"title": "Temperaturas", "data": {"labels": ["Jue", "Vie", "Sáb"], "series": [{"name": "Máxima", "values": [24, 22, None]}]}}
+        self.assertEqual(validate_artifact({**base, "type": "line"})["data"]["series"][0]["values"], [24, 22, None])
+        self.assertEqual(validate_artifact({**base, "type": "bar"})["data"]["series"][0]["values"], [24, 22, None])
+        with self.assertRaises(ArtifactError):
+            validate_artifact({**base, "type": "pie"})
+
     def test_tool_round_limit_is_persisted_and_used_by_agent_runtime(self):
         from app import main
 

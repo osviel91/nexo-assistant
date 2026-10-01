@@ -60,7 +60,7 @@ def validate_artifact(value: Any) -> dict[str, Any]:
                 raise ArtifactError("Serie inválida.")
             if kind == "pie" and (len(series) != 1 or len(series[0].get("values", [])) != len(labels)):
                 raise ArtifactError("El gráfico pie admite una serie compatible.")
-            if any(not isinstance(s.get("values"), list) or len(s["values"]) != len(labels) or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in s["values"]) for s in series):
+            if any(not isinstance(s.get("values"), list) or len(s["values"]) != len(labels) or any(v is not None and (not isinstance(v, (int, float)) or not math.isfinite(v)) for v in s["values"]) or kind == "pie" and any(v is None for v in s["values"]) for s in series):
                 raise ArtifactError("Serie numérica inválida.")
     raw = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
     if len(raw) > MAX_SERIALIZED:

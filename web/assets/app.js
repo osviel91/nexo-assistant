@@ -541,11 +541,20 @@ function renderArtifact(a) {
     const colors = ['var(--color-accent)', 'var(--color-warning)', 'var(--color-success)', '#9b8ad1', '#da8b75'];
     svg = `<svg viewBox="0 0 240 180" role="img" aria-label="${title}">${vals.map((v, i) => { const part = v / total, dash = part * 314, offset = -start * 314; start += part; return `<circle cx="90" cy="90" r="50" fill="none" stroke="${colors[i % colors.length]}" stroke-width="26" stroke-dasharray="${dash} ${314 - dash}" stroke-dashoffset="${offset}" transform="rotate(-90 90 90)"/>`; }).join('')}<text x="160" y="35" fill="var(--color-text-primary)">${labels.map((l, i) => `<tspan x="160" dy="${i ? 22 : 0}">${escapeHtml(l)}: ${escapeHtml(vals[i])}</tspan>`).join('')}</text></svg>`;
   } else {
-    const vals = a.type === 'scatter' ? (data.points || []).map((p) => p.y) : series.flatMap((s) => s.values || []);
+    const vals = a.type === 'scatter' ? (data.points || []).map((p) => p.y) : series.flatMap((s) => s.values || []).filter((v) => v != null);
     const max = Math.max(...vals, 1), n = a.type === 'scatter' ? (data.points || []).length : labels.length, step = 700 / Math.max(n, 1);
     const paths = a.type === 'scatter' ? `<g fill="var(--color-accent)">${data.points.map((p) => `<circle cx="${40 + (p.x / Math.max(...data.points.map((q) => q.x), 1)) * 680}" cy="${160 - p.y / max * 130}" r="4"/>`).join('')}</g>` : series.map((s, si) => {
-      const pts = s.values.map((v, i) => [40 + i * step + step / 2, 160 - v / max * 130]);
-      return a.type === 'line' ? `<polyline fill="none" stroke="${si ? 'var(--color-warning)' : 'var(--color-accent)'}" stroke-width="3" points="${pts.map((p) => p.join(',')).join(' ')}"/>` : pts.map(([x, y], i) => `<rect x="${x - step * .3 + si * step * .3}" y="${y}" width="${step * .28}" height="${160 - y}" fill="${si ? 'var(--color-warning)' : 'var(--color-accent)'}"/>`).join('');
+      const color = si ? 'var(--color-warning)' : 'var(--color-accent)';
+      return a.type === 'line' ? s.values.reduce((html, v, i) => {
+        if (v == null) return html;
+        const x = 40 + i * step + step / 2, y = 160 - v / max * 130;
+        return html + `<circle cx="${x}" cy="${y}" r="3" fill="${color}"/>`;
+      }, '') + s.values.reduce((html, v, i) => {
+        if (v == null || i === 0 || s.values[i - 1] == null) return html;
+        const x1 = 40 + (i - 1) * step + step / 2, y1 = 160 - s.values[i - 1] / max * 130;
+        const x2 = 40 + i * step + step / 2, y2 = 160 - v / max * 130;
+        return html + `<path d="M${x1},${y1} L${x2},${y2}" fill="none" stroke="${color}" stroke-width="3"/>`;
+      }, '') : s.values.map((v, i) => v == null ? '' : `<rect x="${40 + i * step + step / 2 - step * .3 + si * step * .3}" y="${160 - v / max * 130}" width="${step * .28}" height="${v / max * 130}" fill="${color}"/>`).join('');
     }).join('');
     svg = `<svg viewBox="0 0 760 210" role="img" aria-label="${title}"><path d="M40 20V160H750" fill="none" stroke="var(--color-border)"/>${paths}${labels.map((l, i) => `<text x="${40 + i * step + step / 2}" y="184" text-anchor="middle" fill="var(--color-text-muted)">${escapeHtml(l)}</text>`).join('')}</svg>`;
   }
