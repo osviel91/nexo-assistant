@@ -29,6 +29,13 @@ def validate_artifact(value: Any) -> dict[str, Any]:
         raise ArtifactError("El artefacto requiere versión 1 y título.")
     kind = spec["type"]
     data = spec.get("data")
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            pass
+        else:
+            spec["data"] = data
     if kind == "html":
         if not isinstance(data, dict) or not isinstance(data.get("html"), str) or len(data["html"]) > MAX_HTML:
             raise ArtifactError("HTML inválido o demasiado grande.")
@@ -48,7 +55,7 @@ def validate_artifact(value: Any) -> dict[str, Any]:
     else:
         if not isinstance(data, dict):
             shape = "labels y series" if kind in {"bar", "line", "pie"} else "points" if kind == "scatter" else "html"
-            raise ArtifactError(f"Los datos de {kind} deben ser un objeto JSON con {shape}; no envíes data como texto JSON.")
+            raise ArtifactError(f"Los datos de {kind} deben ser un objeto JSON con {shape}.")
         if kind == "scatter":
             points = data.get("points", [])
             if not isinstance(points, list) or len(points) > MAX_POINTS or any(not isinstance(p, dict) or not all(isinstance(p.get(k), (int, float)) and math.isfinite(p[k]) for k in ("x", "y")) for p in points):
