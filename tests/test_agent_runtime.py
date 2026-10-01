@@ -151,6 +151,26 @@ class AgentRuntimeTests(unittest.TestCase):
         tool_message = next(message for message in adapter.payloads[1]["messages"] if message.get("role") == "tool")
         self.assertLessEqual(len(tool_message["content"]), 100)
 
+    def test_artifact_errors_are_traced_and_rendering_stops_after_one_retry(self):
+        calls = []
+
+        async def render(_context, arguments):
+            calls.append(arguments)
+            return {"error": {"code": "invalid_artifact", "message": "El gráfico requiere labels y series."}}
+
+        registry = ModuleRegistry(FastAPI())
+        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render))
+        responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "native.render_artifact", "arguments": "{}"}}]}] for i in range(3)]
+        responses.append([{"content": "No se pudo crear el gráfico por datos inválidos; aquí están los datos."}])
+        adapter = Adapter(responses)
+        events = run(AgentRuntime(), adapter, registry)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([event["trace"]["status"] for event in events if event.get("trace", {}).get("type") == "ACT"], ["invalid_artifact", "invalid_artifact", "artifact_retry_limit"])
+        self.assertIn("artifact_retry_limit", adapter.payloads[3]["messages"][-1]["content"])
+        guidance = next(message["content"] for message in adapter.payloads[0]["messages"] if message["role"] == "system")
+        self.assertIn("at most once", guidance)
+
     def test_system_instruction_is_an_independent_message_and_metrics_are_normalized(self):
         adapter = Adapter([[{"content": "answer"}]])
         adapter.responses = iter([[{"content": "answer", "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}]])

@@ -81,7 +81,7 @@ class AgentRuntime:
             if "native.get_current_datetime" in effective_tools.names:
                 guidance.append("For relative dates such as today, the next few days, or the last N days, call native.get_current_datetime first.")
             if "native.render_artifact" in effective_tools.names:
-                guidance.append("When a chart or table is requested, use native.render_artifact with evidence-backed data after gathering it.")
+                guidance.append("When a chart or table is requested, use native.render_artifact with evidence-backed data after gathering it. If it returns a validation error, correct the exact reported issue and retry at most once; do not switch through alternate artifact types or claim the visualization service is unavailable. If the corrected attempt fails, explain the actual error and provide the data in text.")
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": " ".join(guidance)})
         if grounded_context is not None:
             grounding = f"{GROUNDING_INSTRUCTIONS}\n\n{grounded_context.serialize()}"
@@ -94,6 +94,7 @@ class AgentRuntime:
         artifacts: list[dict[str, Any]] = []
         tool_rounds = 0
         tool_call_count = 0
+        artifact_render_attempts = 0
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
@@ -194,26 +195,35 @@ class AgentRuntime:
                 event_id = request.event_sink.start_event("ACT", call["name"], {"tool": call["name"], "round": tool_rounds})
                 yield {"activity": {"type": "ACT", "status": "running", "tool": call["name"], "round": tool_rounds}}
                 status = "ok"
-                try:
-                    arguments = json.loads(call["arguments"] or "{}")
-                    if not isinstance(arguments, dict):
-                        raise ValueError
-                except (ValueError, TypeError, json.JSONDecodeError):
-                    result = {"error": {"code": "invalid_arguments", "message": "Argumentos de herramienta inválidos."}}
-                    status = "invalid_arguments"
-                else:
+                result = None
+                if call["name"] == "native.render_artifact":
+                    artifact_render_attempts += 1
+                    if artifact_render_attempts > 2:
+                        result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ya se intentó dos veces. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
+                        status = "artifact_retry_limit"
+                if result is None:
                     try:
-                        result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
-                    except ToolNotAvailableError:
-                        result = {"error": {"code": "tool_not_available", "message": "La herramienta no está disponible para esta ejecución."}}
-                        status = "tool_not_available"
-                    except Exception:
-                        result = {"error": {"code": "tool_execution_error", "message": "La herramienta no pudo completar la operación."}}
-                        status = "tool_execution_error"
-                        logger.exception("tool execution failed", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds})
+                        arguments = json.loads(call["arguments"] or "{}")
+                        if not isinstance(arguments, dict):
+                            raise ValueError
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        result = {"error": {"code": "invalid_arguments", "message": "Argumentos de herramienta inválidos."}}
+                        status = "invalid_arguments"
+                    else:
+                        try:
+                            result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                        except ToolNotAvailableError:
+                            result = {"error": {"code": "tool_not_available", "message": "La herramienta no está disponible para esta ejecución."}}
+                            status = "tool_not_available"
+                        except Exception:
+                            result = {"error": {"code": "tool_execution_error", "message": "La herramienta no pudo completar la operación."}}
+                            status = "tool_execution_error"
+                            logger.exception("tool execution failed", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.model.model_id, "tool": call["name"], "round": tool_rounds})
                 if not isinstance(result, dict):
                     result = {"error": {"code": "tool_execution_error", "message": "La herramienta devolvió un resultado inválido."}}
                     status = "tool_execution_error"
+                if result.get("error") and status == "ok":
+                    status = result["error"].get("code", "tool_error")
                 duration_ms = round(time.monotonic() - started, 4) * 1000
                 event_status = "success" if status == "ok" and not result.get("error") else status
                 request.event_sink.finish_event(event_id, event_status, {"tool": call["name"], "round": tool_rounds, **({"error_code": result.get("error", {}).get("code")} if result.get("error") else {})}, duration_ms)
