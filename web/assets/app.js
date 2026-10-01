@@ -578,6 +578,23 @@ function updateStreamingActivity(activity) {
   element.innerHTML = `<span class="activity-dot"></span>${escapeHtml(activityLabel(activity))}`;
 }
 
+function updateStreamingThinking(content) {
+  const body = $('#messages').querySelector('.message:last-child .message-body');
+  if (!body) return;
+  let block = body.querySelector('.thinking-block');
+  if (!block) {
+    block = document.createElement('details');
+    block.className = 'thinking-block';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Thinking';
+    block.append(summary);
+    body.insertBefore(block, body.querySelector('.message-content'));
+  }
+  let text = block.querySelector('p');
+  if (!text) { text = document.createElement('p'); block.append(text); }
+  text.textContent = content;
+}
+
 async function openChat(id) {
   try {
     const data = await api(`/conversations/${id}`);
@@ -663,7 +680,7 @@ async function send() {
         const data = JSON.parse(line.slice(6));
         if (data.error) throw Error(data.error);
          if (data.status) toast(data.message);
-         if (data.thinking_delta) { const message = state.messages.at(-1); message.runtime ||= {}; message.runtime.thinking ||= { available: true, content: '' }; message.runtime.thinking.available = true; message.runtime.thinking.content += data.thinking_delta; renderMessages(); }
+          if (data.thinking_delta) { const message = state.messages.at(-1); message.runtime ||= {}; message.runtime.thinking ||= { available: true, content: '' }; message.runtime.thinking.available = true; message.runtime.thinking.content += data.thinking_delta; updateStreamingThinking(message.runtime.thinking.content); }
           if (data.activity) { if (data.activity.type === 'REASON') state.streamTimestamps.reasoning_started ||= performance.now(); updateStreamingActivity(data.activity); }
          if (data.delta) { state.streamTimestamps.first_answer_delta ||= performance.now(); state.activity = { type: 'RESPOND', status: 'running' }; answer += data.delta; state.messages.at(-1).content = answer; updateStreamingActivity(state.activity); updateStreamingAnswer(answer); }
         if (data.artifact) { state.messages.at(-1).artifacts ||= []; state.messages.at(-1).artifacts.push(data.artifact); renderMessages(); }
