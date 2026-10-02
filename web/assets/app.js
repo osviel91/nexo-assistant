@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -266,12 +266,14 @@ function updateRetrievalControls() {
 }
 
 async function loadTools() {
-  state.tools = await api('/tools');
+  try { state.tools = await api('/tools'); state.catalogErrors.tools = ''; }
+  catch (error) { state.catalogErrors.tools = error.message; throw error; }
   renderLab();
 }
 
 async function loadMCP() {
   const servers = await api('/mcp/servers');
+  state.mcpServers = servers;
   $('#mcp-list').innerHTML = servers.map((server) => {
     const status = server.status === 'connected' ? '● Connected' : server.status === 'authentication_failed' ? '× Authentication failed' : server.status === 'unreachable' ? '× Unreachable' : server.enabled ? '○ Degraded' : '○ Disabled';
     const locked = server.status !== 'connected' || !server.enabled;
@@ -300,7 +302,7 @@ $('#mcp-auth-type').onchange = () => { $('#mcp-auth-token-field').hidden = $('#m
 
 async function loadAgents() { state.agents = await api('/agents'); if (!state.conversationId && !state.agentProfileId && state.preferences.last_agent_profile) state.agentProfileId = state.preferences.last_agent_profile; renderAgentPicker(); renderAgentList(); }
 
-async function loadNotebooks() { state.notebooks = await api('/notebooks'); renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) { benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); benchmarkNotebook.value = state.currentNotebookId || state.notebooks[0]?.id || ''; } }
+async function loadNotebooks() { try { state.notebooks = await api('/notebooks'); state.catalogErrors.notebooks = ''; } catch (error) { state.catalogErrors.notebooks = error.message; throw error; } renderNotebookPicker(); renderNotebooks(); const benchmarkNotebook = $('#benchmark-notebook'); if (benchmarkNotebook) { benchmarkNotebook.innerHTML = state.notebooks.map((notebook) => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.name)}</option>`).join(''); benchmarkNotebook.value = state.currentNotebookId || state.notebooks[0]?.id || ''; } }
 function renderNotebooks() {
   $('#notebook-list').innerHTML = state.notebooks.map((notebook) => `<article class="notebook-card" data-notebook-id="${escapeHtml(notebook.id)}"><button class="notebook-card-main"><strong>${escapeHtml(notebook.name)}</strong><span>${notebook.source_count} source${notebook.source_count === 1 ? '' : 's'}</span><small>${escapeHtml(notebook.description || 'Persistent knowledge space')}</small></button><div class="card-actions"><button data-notebook-edit="${escapeHtml(notebook.id)}">Edit</button><button data-notebook-delete="${escapeHtml(notebook.id)}">Delete</button></div></article>`).join('') || '<div class="empty-providers">No hay notebooks todavía. Crea uno para guardar fuentes.</div>';
   $('#notebook-list').querySelectorAll('.notebook-card-main').forEach((button) => { button.onclick = () => openNotebook(button.closest('[data-notebook-id]').dataset.notebookId); });
@@ -376,10 +378,11 @@ function renderAgentList() {
   const html = items.map((agent) => {
     const stored = Boolean(agent.id);
     const warning = stored && !agent.model_available ? '<span class="status status-degraded">Model unavailable</span>' : stored && agent.unavailable_tools?.length ? `<span class="status status-degraded">${agent.unavailable_tools.length} tool${agent.unavailable_tools.length > 1 ? 's' : ''} unavailable</span>` : '';
-    return `<div class="agent-option ${(!state.agentProfileId && !stored) || agent.id === state.agentProfileId ? 'selected' : ''}" data-agent-id="${escapeHtml(agent.id)}" role="button" tabindex="0"><span><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.description || '')}</small>${warning}</span>${stored ? `<span class="agent-actions"><span class="agent-tools-count">${agent.tool_names.length} tools</span><button type="button" data-edit-agent="${escapeHtml(agent.id)}">Edit</button><button type="button" data-delete-agent="${escapeHtml(agent.id)}">Delete</button></span>` : '<span class="agent-check">✓</span>'}</div>`;
+    return `<article class="agent-option ${agent.id === state.agentProfileId ? 'selected' : ''}"><span class="agent-option-copy"><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.description || '')}</small><small>${escapeHtml(agent.model_id || 'No model')} · ${agent.notebook_ids?.length || 0} Knowledge · ${agent.tool_names?.length || 0} tools</small>${warning}</span>${stored ? `<span class="agent-actions"><button type="button" data-select-agent="${escapeHtml(agent.id)}">Use in chat</button><button type="button" data-start-agent="${escapeHtml(agent.id)}">Start chat</button><button type="button" data-edit-agent="${escapeHtml(agent.id)}">Edit</button><button type="button" data-delete-agent="${escapeHtml(agent.id)}">Delete</button></span>` : '<span class="agent-check">✓</span>'}</article>`;
   }).join('') || '<div class="empty-providers">No Agent Profiles available.</div>';
   $('#agent-list').innerHTML = html;
-  $('#agent-list').querySelectorAll('[data-agent-id]').forEach((button) => { button.onclick = () => selectAgent(button.dataset.agentId || null); });
+  $('#agent-list').querySelectorAll('[data-select-agent]').forEach((button) => { button.onclick = () => selectAgent(button.dataset.selectAgent); });
+  $('#agent-list').querySelectorAll('[data-start-agent]').forEach((button) => { button.onclick = () => startAgentChat(button.dataset.startAgent); });
   $('#agent-list').querySelectorAll('[data-edit-agent]').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); editAgent(button.dataset.editAgent); }; });
   $('#agent-list').querySelectorAll('[data-delete-agent]').forEach((button) => { button.onclick = async (event) => { event.stopPropagation(); await deleteAgent(button.dataset.deleteAgent); }; });
 }
@@ -392,24 +395,83 @@ async function selectAgent(id) {
   if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: 'agent', agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
   closeSurface();
 }
-function renderAgentModels(selected = '') {
-  $('#agent-model').innerHTML = allModels().map(({ provider, model }) => `<option value="${escapeHtml(provider.id)}::${escapeHtml(model.id)}" ${`${provider.id}::${model.id}` === selected ? 'selected' : ''}>${escapeHtml(provider.name)} / ${escapeHtml(model.id)}</option>`).join('') || '<option value="">Configure a provider first</option>';
+function renderAgentModels(agent) {
+  const provider = $('#agent-provider');
+  const oldProvider = provider.value;
+  provider.innerHTML = state.providers.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
+  const providerId = agent?.provider_id || oldProvider || state.providers[0]?.id || '';
+  if (!state.providers.some((item) => item.id === providerId)) provider.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(providerId)}">${escapeHtml(providerId)} · unavailable</option>`);
+  provider.value = providerId;
+  const fillModels = () => {
+    const selected = agent ? `${agent.provider_id}::${agent.model_id}` : '';
+    const owner = state.providers.find((item) => item.id === provider.value);
+    const models = owner?.models || [];
+    $('#agent-model').innerHTML = models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+    if (agent && provider.value === agent.provider_id && !models.some((model) => model.id === agent.model_id)) $('#agent-model').insertAdjacentHTML('beforeend', `<option value="${escapeHtml(agent.model_id)}">${escapeHtml(agent.model_id)} · unavailable</option>`);
+    if (agent && provider.value === agent.provider_id) $('#agent-model').value = agent.model_id;
+    $('#agent-model-warning').hidden = !agent || agent.model_available || provider.value !== agent.provider_id;
+    $('#agent-model-warning').textContent = '⚠ This saved model is currently unavailable. Choose another model to change it.';
+    $('#agent-model').required = true;
+    $('#agent-model').disabled = !models.length && !(agent && provider.value === agent.provider_id);
+  };
+  provider.onchange = fillModels;
+  fillModels();
 }
+function readableToolName(tool) { const remote = tool.source === 'mcp' ? state.mcpServers.flatMap((server) => server.tools.map((item) => item.id === tool.name ? item.remote_name : null)).find(Boolean) : null; return tool.display_name || remote || tool.name.split(/[.__]/).at(-1).replaceAll('_', ' '); }
+function toolActionLabel(action) { return action === 'read_only' ? 'Read only' : 'Approval required'; }
 function renderAgentTools(selected = []) {
-  const groups = [['Native', state.tools.filter((tool) => tool.source !== 'mcp')], ['MCP', state.tools.filter((tool) => tool.source === 'mcp')]];
+  const requested = new Set(selected);
   const known = new Set(state.tools.map((tool) => tool.name));
+  const groups = new Map();
+  for (const tool of state.tools) {
+    if (tool.name.startsWith('native.')) continue;
+    const server = tool.source === 'mcp' ? state.mcpServers.find((item) => tool.name.startsWith(`mcp.${item.slug}.`)) : null;
+    const title = tool.source === 'mcp' ? `MCP · ${server?.name || tool.module_id || 'Server'}` : 'Modules';
+    groups.set(title, [...(groups.get(title) || []), { ...tool, server }]);
+  }
+  const rows = (tools) => tools.map((tool) => `<label class="agent-tool-row"><input type="checkbox" value="${escapeHtml(tool.name)}" ${requested.has(tool.name) ? 'checked' : ''}><span>${escapeHtml(readableToolName(tool))}<small>${escapeHtml(tool.name)}</small></span><span class="agent-tool-meta">${escapeHtml(tool.server?.status === 'authentication_failed' ? 'Authentication required' : tool.server?.status === 'unreachable' ? 'Unavailable' : tool.server && !tool.server.enabled ? 'Disabled' : toolActionLabel(tool.action))}</span></label>`).join('');
+  const html = `<div class="agent-tool-group"><strong>Built-in</strong><div class="agent-tool-row intrinsic"><span>Date &amp; time</span><span class="agent-tool-meta">Built-in</span></div><div class="agent-tool-row intrinsic"><span>Artifacts</span><span class="agent-tool-meta">Built-in</span></div></div>${[...groups].map(([title, tools]) => `<details class="agent-tool-group agent-mcp-group" open><summary><strong>${escapeHtml(title)}</strong><span>${tools.filter((tool) => requested.has(tool.name)).length} selected</span></summary>${tools.length > 6 ? '<label class="agent-tool-filter">Filter tools<input type="search" data-agent-tool-filter placeholder="Search tools"></label>' : ''}<div class="agent-tool-list">${rows(tools)}</div>${tools.length > 6 ? '<button type="button" class="text-button" data-agent-show-more>Show more</button>' : ''}</details>`).join('')}`;
   const missing = selected.filter((name) => !known.has(name));
-  $('#agent-tool-options').innerHTML = groups.map(([title, tools]) => tools.length ? `<div class="agent-tool-group"><strong>${title}</strong>${tools.map((tool) => `<label><input type="checkbox" value="${escapeHtml(tool.name)}" ${selected.includes(tool.name) ? 'checked' : ''}>${escapeHtml(tool.name)}</label>`).join('')}</div>` : '').join('') + (missing.length ? `<div class="agent-tool-group"><strong>Unavailable</strong>${missing.map((name) => `<label class="unavailable-tool"><input type="checkbox" value="${escapeHtml(name)}" checked disabled>⚠ ${escapeHtml(name)} — unavailable</label>`).join('')}</div>` : '') || '<span class="optional">No tools available</span>';
+  const missingRows = missing.map((name) => { const server = state.mcpServers.find((item) => item.tools.some((tool) => tool.id === name)); const tool = server?.tools.find((item) => item.id === name); const availability = server?.status === 'authentication_failed' ? 'Authentication required' : server?.status === 'unreachable' ? 'Unavailable' : server && !server.enabled ? 'Disabled' : 'Unavailable'; return `<label class="agent-tool-row"><input type="checkbox" value="${escapeHtml(name)}" checked><span>⚠ ${escapeHtml(tool?.remote_name || name)}<small>${escapeHtml(name)} · capability unavailable</small></span><span class="agent-tool-meta">${availability}${tool?.action ? ` · ${toolActionLabel(tool.action)}` : ''}</span></label>`; }).join('');
+  $('#agent-tool-options').innerHTML = (state.catalogErrors.tools ? `<p class="agent-warning">Tool catalog unavailable: ${escapeHtml(state.catalogErrors.tools)}. Saved selections are preserved.</p>` : '') + html + (missing.length ? `<div class="agent-tool-group"><strong>Unavailable</strong>${missingRows}</div>` : '');
+  $('#agent-tool-options').querySelectorAll('[data-agent-tool-filter]').forEach((input) => { input.oninput = () => { const query = input.value.toLowerCase(); input.closest('details').querySelectorAll('.agent-tool-row').forEach((row) => { row.hidden = !row.textContent.toLowerCase().includes(query); }); }; });
+  $('#agent-tool-options').querySelectorAll('[data-agent-show-more]').forEach((button) => { button.onclick = () => { button.closest('details').classList.toggle('show-all'); button.textContent = button.closest('details').classList.contains('show-all') ? 'Show less' : 'Show more'; }; });
+}
+function renderAgentNotebooks(selected = []) {
+  const known = new Set(state.notebooks.map((notebook) => notebook.id));
+  const rows = state.notebooks.map((notebook) => `<label class="agent-tool-row"><input type="checkbox" value="${escapeHtml(notebook.id)}" ${selected.includes(notebook.id) ? 'checked' : ''}><span>${escapeHtml(notebook.name)}<small>${notebook.source_count} sources</small></span></label>`);
+  rows.push(...selected.filter((id) => !known.has(id)).map((id) => `<label class="agent-tool-row"><input type="checkbox" value="${escapeHtml(id)}" checked><span>⚠ ${escapeHtml(id)}<small>Notebook unavailable</small></span></label>`));
+  $('#agent-notebook-options').innerHTML = (state.catalogErrors.notebooks ? `<p class="agent-warning">Knowledge catalog unavailable: ${escapeHtml(state.catalogErrors.notebooks)}. Saved bindings are preserved.</p>` : '') + (rows.join('') || '<p class="agent-help">No Notebooks available.</p>');
+  const warning = $('#agent-notebook-warning');
+  const update = () => { warning.hidden = $('#agent-notebook-options').querySelectorAll('input:checked').length < 2; };
+  $('#agent-notebook-options').querySelectorAll('input').forEach((input) => { input.onchange = update; });
+  update();
 }
 function editAgent(id = '') {
   const agent = state.agents.find((item) => item.id === id);
-  $('#agent-form').hidden = false; $('#new-agent').hidden = true;
+  state.agentBuilder = { id: agent?.id || null, agent };
+  $('#agent-form').hidden = false; $('#agent-list').hidden = true; $('#agent-start-choice').hidden = true; $('#new-agent').hidden = true;
+  $('#agent-form-error').hidden = true;
   $('#agent-id').value = agent?.id || ''; $('#agent-name').value = agent?.name || ''; $('#agent-description').value = agent?.description || '';
-  renderAgentModels(agent ? `${agent.provider_id}::${agent.model_id}` : ''); $('#agent-instructions').value = agent?.system_instructions || '';
-  $('#agent-temperature').value = agent?.model_parameters?.temperature ?? ''; renderAgentTools(agent?.tool_names || []);
-  $('#agent-form-title').textContent = agent ? 'Edit agent' : 'New agent';
+  renderAgentModels(agent); $('#agent-instructions').value = agent?.system_instructions || '';
+  $('#agent-temperature').value = agent?.model_parameters?.temperature ?? ''; renderAgentTools(agent?.tool_names || []); renderAgentNotebooks(agent?.notebook_ids || []);
+  $('#agent-max-tool-calls').value = agent?.max_tool_calls ?? 10;
+  $('#agent-form-title').textContent = agent ? 'Edit Agent' : 'New Agent';
 }
-function resetAgentForm() { $('#agent-form').hidden = true; $('#new-agent').hidden = false; }
+function resetAgentForm() { state.agentBuilder = null; $('#agent-form').reset(); $('#agent-form').hidden = true; $('#agent-list').hidden = false; $('#new-agent').hidden = false; }
+function startAgentChat(id, notebookId = null) {
+  const agent = state.agents.find((item) => item.id === id);
+  if (!agent) return;
+  if (agent.notebook_ids.length > 1 && !notebookId) {
+    const choice = $('#agent-start-choice');
+    choice.hidden = false;
+    choice.innerHTML = `<h3>Choose Knowledge for ${escapeHtml(agent.name)}</h3><p>This conversation uses one Notebook from this Agent.</p><label>Notebook<select id="agent-start-notebook" required>${agent.notebook_ids.map((item) => { const notebook = state.notebooks.find((value) => value.id === item); return `<option value="${escapeHtml(item)}">${escapeHtml(notebook?.name || item)}</option>`; }).join('')}</select></label><button type="button" class="primary-button" id="confirm-agent-start">Start chat</button>`;
+    $('#confirm-agent-start').onclick = () => startAgentChat(id, $('#agent-start-notebook').value);
+    return;
+  }
+  state.agentProfileId = id; state.executionMode = 'agent'; state.conversationId = null; state.currentNotebookId = notebookId || agent.notebook_ids[0] || null;
+  state.messages = []; state.lastRuntime = null; state.attachments = []; $('#messages').innerHTML = ''; $('#welcome').hidden = false; renderNotebookPicker(); renderAgentPicker(); renderExecutionMode(); renderChats(); closeSurface(); $('#prompt').focus();
+}
 async function deleteAgent(id) { const agent = state.agents.find((item) => item.id === id); if (!agent || !confirm(`Delete ${agent.name}?`)) return; try { await api(`/agents/${id}`, { method: 'DELETE' }); if (state.agentProfileId === id) state.agentProfileId = null; await loadAgents(); renderAgentPicker(); if (state.conversationId) await openChat(state.conversationId); toast('Agent deleted'); } catch (error) { toast(error.message); } }
 
 async function loadShadow() {
@@ -913,11 +975,16 @@ $('#test-embedding').onclick = async () => { try { const result = await api('/se
 $('#agent-form').onsubmit = async (event) => {
   event.preventDefault();
   const id = $('#agent-id').value;
-  const [provider_id, model_id] = $('#agent-model').value.split('::');
+  if (!$('#agent-form').reportValidity()) return;
+  if (state.catalogErrors.notebooks) { $('#agent-form-error').textContent = `Knowledge catalog unavailable: ${state.catalogErrors.notebooks}`; $('#agent-form-error').hidden = false; return; }
+  const provider_id = $('#agent-provider').value;
+  const model_id = $('#agent-model').value;
   const temperature = $('#agent-temperature').value;
   const current = state.agents.find((agent) => agent.id === $('#agent-id').value);
-  const body = { name: $('#agent-name').value, description: $('#agent-description').value, provider_id, model_id, system_instructions: $('#agent-instructions').value, model_parameters: temperature === '' ? {} : { temperature: Number(temperature) }, tool_names: [...$('#agent-tool-options').querySelectorAll('input:checked')].map((input) => input.value), notebook_ids: current?.notebook_ids || [], max_tool_calls: current?.max_tool_calls || 10 };
-  try { await api(`/agents${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); resetAgentForm(); await loadAgents(); toast(id ? 'Agent updated' : 'Agent created'); } catch (error) { toast(error.message); }
+  const body = { name: $('#agent-name').value.trim(), description: $('#agent-description').value, system_instructions: $('#agent-instructions').value, model_parameters: temperature === '' ? {} : { temperature: Number(temperature) }, tool_names: [...$('#agent-tool-options').querySelectorAll('input:checked')].map((input) => input.value), notebook_ids: [...$('#agent-notebook-options').querySelectorAll('input:checked')].map((input) => input.value), max_tool_calls: Number($('#agent-max-tool-calls').value) };
+  const modelChanged = !current || provider_id !== current.provider_id || model_id !== current.model_id;
+  if (modelChanged) { body.provider_id = provider_id; body.model_id = model_id; }
+  try { await api(`/agents${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); resetAgentForm(); await loadAgents(); toast(id ? 'Agent updated' : 'Agent created'); } catch (error) { $('#agent-form-error').textContent = error.message; $('#agent-form-error').hidden = false; }
 };
 
 $('#notebook-form').onsubmit = async (event) => {

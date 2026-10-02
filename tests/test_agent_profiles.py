@@ -67,6 +67,9 @@ class AgentProfileTests(unittest.TestCase):
         with self.connection() as db:
             db.execute("DELETE FROM models WHERE provider_id='provider' AND id='model'")
         self.assertFalse(self.service.get(created["id"])["model_available"])
+        self.assertEqual(self.service.update(created["id"], {"description": "Still editable"})["description"], "Still editable")
+        with self.assertRaises(ProfileValidationError):
+            self.service.update(created["id"], {"model_id": "missing"})
 
     def test_unavailable_tool_is_preserved(self):
         created = self.service.create(self.profile(tool_names=("web_search", "mcp__missing__tool")))

@@ -166,13 +166,13 @@ class AgentProfileService:
                                  item.system_instructions, parameters, item.enabled, tools,
                                  tuple(sorted(set(item.notebook_ids))), item.max_tool_calls)
 
-    def _validate_references(self, item: AgentProfileInput) -> None:
+    def _validate_references(self, item: AgentProfileInput, *, model: bool = True, notebooks: bool = True) -> None:
         with self.repository.connection_factory() as connection:
-            if connection.execute("SELECT 1 FROM providers WHERE id=?", (item.provider_id,)).fetchone() is None:
+            if model and connection.execute("SELECT 1 FROM providers WHERE id=?", (item.provider_id,)).fetchone() is None:
                 raise ProfileValidationError("provider_id is invalid")
-            if connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (item.provider_id, item.model_id)).fetchone() is None:
+            if model and connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (item.provider_id, item.model_id)).fetchone() is None:
                 raise ProfileValidationError("model_id is invalid for provider_id")
-            if item.notebook_ids:
+            if notebooks and item.notebook_ids:
                 placeholders = ",".join("?" for _ in item.notebook_ids)
                 found = connection.execute(f"SELECT COUNT(*) FROM notebooks WHERE id IN ({placeholders})", item.notebook_ids).fetchone()[0]
                 if found != len(item.notebook_ids):
@@ -229,7 +229,9 @@ class AgentProfileService:
             values.get("max_tool_calls", row["max_tool_calls"]),
         )
         merged = self.validate(merged)
-        self._validate_references(merged)
+        if "provider_id" in values or "model_id" in values or "notebook_ids" in values:
+            self._validate_references(merged, model="provider_id" in values or "model_id" in values,
+                                      notebooks="notebook_ids" in values)
         update_values = {"name": merged.name, "description": merged.description, "provider_id": merged.provider_id,
                          "model_id": merged.model_id, "system_instructions": merged.system_instructions,
                          "model_parameters": merged.model_parameters, "enabled": int(merged.enabled), "tool_names": merged.tool_names,

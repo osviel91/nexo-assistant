@@ -32,3 +32,10 @@ assert.match(app, /candidate_limit: experiment\.candidate_limit/);
 assert.match(app, /id: 'benchmark', label: 'Retrieval benchmark'/);
 assert.match(app, /benchmark-progress/);
 assert.match(app, /createObjectURL/);
+assert.match(html, /id="agent-start-choice"/);
+for (const field of ['agent-name', 'agent-description', 'agent-instructions', 'agent-provider', 'agent-model', 'agent-notebook-options', 'agent-tool-options', 'agent-max-tool-calls']) {
+  assert.match(html, new RegExp(`id="${field}"`));
+}
+assert.match(app, /Saved bindings are preserved/);
+assert.match(app, /agent\.notebook_ids\.length > 1/);
+assert.match(app, /tool\.name\.startsWith\('native\.'\)/);

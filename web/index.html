@@ -205,18 +205,27 @@
        <section id="notebook-detail" class="notebook-detail" hidden></section>
       </div>
       <div class="surface agents-surface" id="agents-surface" hidden role="dialog" aria-modal="true" aria-labelledby="agents-title">
-       <div class="surface-header"><div><span class="eyebrow">AGENTS</span><h2 id="agents-title">Choose an agent</h2><p>Profiles change how future messages run. Nexo keeps the default assistant behavior.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
-       <div id="agent-list" class="agent-list"></div>
-       <form id="agent-form" class="agent-form" hidden>
-         <h3 id="agent-form-title">New agent</h3><input id="agent-id" type="hidden">
-         <label>Name<input id="agent-name" required maxlength="120"></label>
-         <label>Description<input id="agent-description" maxlength="2000"></label>
-         <label>Model<select id="agent-model" required></select></label>
-         <label>System instructions <span class="optional">Advanced configuration, not a runtime trace</span><textarea id="agent-instructions" rows="5" maxlength="20000"></textarea></label>
-         <label>Temperature<input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Default"></label>
-         <fieldset class="agent-tools"><legend>Tools</legend><div id="agent-tool-options"></div></fieldset>
-         <div class="form-actions"><button type="button" class="text-button" id="cancel-agent-edit">Cancel</button><button type="submit" class="primary-button">Save agent</button></div>
-       </form>
+        <div class="surface-header"><div><span class="eyebrow">AGENTS</span><h2 id="agents-title">Agents</h2><p>Build an Agent profile and choose it for a conversation.</p></div><button class="icon-button" data-close-surface aria-label="Cerrar">×</button></div>
+        <div id="agent-list" class="agent-list"></div>
+        <section id="agent-start-choice" class="agent-start-choice" aria-live="polite" hidden></section>
+        <form id="agent-form" class="agent-form" hidden>
+          <h3 id="agent-form-title">New agent</h3><input id="agent-id" type="hidden">
+          <section class="agent-builder-section" aria-labelledby="agent-identity-title"><h4 id="agent-identity-title">Identity</h4>
+            <label>Name<input id="agent-name" required maxlength="120"></label>
+            <label>Short description<input id="agent-description" maxlength="2000"></label>
+            <label>Instructions<textarea id="agent-instructions" rows="7" maxlength="20000"></textarea></label>
+          </section>
+          <section class="agent-builder-section" aria-labelledby="agent-model-title"><h4 id="agent-model-title">Model</h4>
+            <label>Provider<select id="agent-provider" required></select></label>
+            <label>Model<select id="agent-model" required></select><span id="agent-model-warning" class="agent-warning" role="status" hidden></span></label>
+            <label>Temperature<input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Default"></label>
+          </section>
+          <section class="agent-builder-section" aria-labelledby="agent-knowledge-title"><h4 id="agent-knowledge-title">Knowledge</h4><fieldset class="agent-tools"><legend class="sr-only">Agent Notebooks</legend><div id="agent-notebook-options"></div></fieldset><p id="agent-notebook-warning" class="agent-warning" role="status" hidden>Multiple Notebooks are saved to this Agent. NEXO uses one per conversation; choose one when starting a conversation.</p></section>
+          <section class="agent-builder-section" aria-labelledby="agent-tools-title"><h4 id="agent-tools-title">Tools</h4><div id="agent-tool-options"></div><p class="agent-help">Actions requiring approval are blocked by the current runtime.</p></section>
+          <section class="agent-builder-section" aria-labelledby="agent-runtime-title"><h4 id="agent-runtime-title">Runtime</h4><label>Maximum tool calls<input id="agent-max-tool-calls" type="number" min="1" max="50" step="1" required></label><p class="agent-help">Maximum tool calls the Agent may make during one run.</p></section>
+          <p id="agent-form-error" class="agent-warning" role="alert" hidden></p>
+          <div class="form-actions agent-form-actions"><button type="button" class="text-button" id="cancel-agent-edit">Cancel</button><button type="submit" class="primary-button">Save Agent</button></div>
+        </form>
        <div class="form-actions"><button type="button" class="primary-button" id="new-agent">New agent</button></div>
       </div>
       <div class="surface config-surface" id="config-surface" hidden role="dialog" aria-modal="true" aria-labelledby="config-title">
