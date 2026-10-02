@@ -28,7 +28,11 @@ class Response:
 
     async def aiter_lines(self):
         material = "\n".join(str(message.get("content", "")) for message in self.payload["messages"])
-        answer = "Protocol ZAFIRO-731 defines the operational color of Nexo as amethyst [S1]." if "amethyst" in material else "The Notebook-specific fact is not available."
+        question = next((str(message.get("content", "")) for message in self.payload["messages"] if message.get("role") == "user"), "")
+        answer = ("La ley de perversidad de la naturaleza dice que no se puede determinar a priori en qué lado de la tostada hay que poner la mantequilla [S1]."
+                  if "perversidad" in question and "perversidad" in material else
+                  "Protocol ZAFIRO-731 defines the operational color of Nexo as amethyst [S1]." if "amethyst" in material else
+                  "The Notebook-specific fact is not available.")
         yield "data: " + json.dumps({"choices": [{"delta": {"content": answer}}]})
         yield "data: [DONE]"
 
@@ -82,7 +86,7 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 main.ingestion = NotebookIngestionService(repository, root / "sources", main.now, main.MAX_UPLOAD)
                 notebook = main.notebooks.create(NotebookInput("Sabiduría de Murphy"))
                 source = main.notebooks.add_file(notebook["id"], "Protocol", "protocol.md", "text/markdown",
-                                                 b"Protocol ZAFIRO-731 defines the operational color of Nexo as amethyst.")
+                                                 b"Protocol ZAFIRO-731 defines the operational color of Nexo as amethyst. LEY DE LA PERVERSIDAD DE LA NATURALEZA. No se puede determinar a priori en que lado de la tostada hay que poner la mantequilla.")
                 main.ingestion.ingest(notebook["id"], source["id"])
                 indexed = RetrievalService(repository, SQLiteVectorIndex(main.db, main.now), Embeddings(),
                                             ChunkingConfig(target_tokens=100, max_tokens=120))
@@ -92,6 +96,9 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 main.agent_profile_resolver = main.AgentProfileResolver(main.agent_profiles.repository)
                 profile = main.agent_profiles.create(AgentProfileInput(
                     name="Tiel", provider_id="p", model_id="Cyber-Tiel", system_instructions="You are Tiel. Preserve this Soul."))
+                research = main.agent_profiles.create(AgentProfileInput(
+                    name="Research", provider_id="p", model_id="Cyber-Tiel", system_instructions="Research from its Notebook.",
+                    notebook_ids=(notebook["id"],), max_tool_calls=12))
 
                 no_agent_no_notebook = self.run_chat(main, "one", "chat", None, None)
                 tiel_no_notebook = self.run_chat(main, "two", "agent", profile["id"], None)
@@ -140,6 +147,14 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 self.assertEqual(payload["messages"][1]["role"], "system")
                 self.assertIn("amethyst", payload["messages"][1]["content"])
                 self.assertNotIn("amethyst", tiel_no_notebook["payload"]["messages"][0]["content"])
+
+                bound_research = self.run_chat(main, "¿Cuál es la ley de perversidad de la naturaleza?", "agent", research["id"], self.UNSET)
+                self.assertIn("perversidad de la naturaleza", bound_research["answer"])
+                self.assertEqual(bound_research["runtime"]["notebook_resolution_source"], "agent")
+                self.assertEqual(bound_research["runtime"]["notebook_id"], notebook["id"])
+                self.assertTrue(bound_research["runtime"]["grounding_applied"])
+                self.assertEqual(bound_research["citations"][0]["source_id"], source["id"])
+                self.assertIn("LEY DE LA PERVERSIDAD DE LA NATURALEZA", bound_research["payload"]["messages"][1]["content"])
 
                 bound_chat = self.run_chat(main, "five", "chat", None, notebook["id"])
                 inherited_chat = self.run_chat(main, "six", "chat", None, self.UNSET, bound_chat["conversation_id"])

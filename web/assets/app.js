@@ -915,7 +915,8 @@ $('#agent-form').onsubmit = async (event) => {
   const id = $('#agent-id').value;
   const [provider_id, model_id] = $('#agent-model').value.split('::');
   const temperature = $('#agent-temperature').value;
-  const body = { name: $('#agent-name').value, description: $('#agent-description').value, provider_id, model_id, system_instructions: $('#agent-instructions').value, model_parameters: temperature === '' ? {} : { temperature: Number(temperature) }, tool_names: [...$('#agent-tool-options').querySelectorAll('input:checked')].map((input) => input.value) };
+  const current = state.agents.find((agent) => agent.id === $('#agent-id').value);
+  const body = { name: $('#agent-name').value, description: $('#agent-description').value, provider_id, model_id, system_instructions: $('#agent-instructions').value, model_parameters: temperature === '' ? {} : { temperature: Number(temperature) }, tool_names: [...$('#agent-tool-options').querySelectorAll('input:checked')].map((input) => input.value), notebook_ids: current?.notebook_ids || [], max_tool_calls: current?.max_tool_calls || 10 };
   try { await api(`/agents${id ? `/${id}` : ''}`, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); resetAgentForm(); await loadAgents(); toast(id ? 'Agent updated' : 'Agent created'); } catch (error) { toast(error.message); }
 };
 

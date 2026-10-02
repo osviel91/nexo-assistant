@@ -79,6 +79,21 @@ class AgentProfileTests(unittest.TestCase):
         resolved = AgentProfileResolver(self.service.repository).resolve(created["id"])
         self.assertEqual(set(resolved.requested_tool_names), {"native.get_current_datetime", "mcp.demo.query"})
 
+    def test_notebook_bindings_and_runtime_budget_persist_and_resolve(self):
+        with self.connection() as db:
+            db.executemany("INSERT INTO notebooks VALUES(?,?,?,?,?)", [("n1", "One", "", "now", "now"), ("n2", "Two", "", "now", "now")])
+        created = self.service.create(self.profile(notebook_ids=("n2", "n1"), max_tool_calls=12))
+        self.assertEqual(created["notebook_ids"], ["n1", "n2"])
+        resolved = AgentProfileResolver(self.service.repository).resolve(created["id"])
+        self.assertEqual(resolved.requested_notebook_ids, ("n1", "n2"))
+        self.assertEqual(resolved.max_tool_calls, 12)
+        updated = self.service.update(created["id"], {"notebook_ids": ("n2",), "max_tool_calls": 7})
+        self.assertEqual(updated["notebook_ids"], ["n2"])
+        self.assertEqual(updated["max_tool_calls"], 7)
+        with self.connection() as db:
+            db.execute("DELETE FROM notebooks WHERE id='n2'")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM agent_profile_notebooks WHERE agent_profile_id=?", (created["id"],)).fetchone()[0], 0)
+
     def test_api_contract_does_not_expose_provider_secret_or_tool_schema(self):
         import app.main as main
         old_path, old_service = main.DB_PATH, main.agent_profiles

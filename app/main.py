@@ -95,11 +95,11 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def configured_agent_runtime() -> AgentRuntime:
+def configured_agent_runtime(max_tool_calls: int | None = None) -> AgentRuntime:
     with db() as c:
         row = c.execute("SELECT max_tool_calls FROM agent_runtime_settings WHERE id=1").fetchone()
     return AgentRuntime(AgentRuntimeLimits(
-        max_tool_calls=row["max_tool_calls"] if row else 10,
+        max_tool_calls=max_tool_calls if max_tool_calls is not None else (row["max_tool_calls"] if row else 10),
         max_tool_output_chars=int(os.getenv("NEXO_MAX_TOOL_OUTPUT_CHARS", "12000")),
     ))
 
@@ -461,6 +461,8 @@ class AgentProfileIn(BaseModel):
     model_parameters: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     tool_names: list[str] = Field(default_factory=list)
+    notebook_ids: list[str] = Field(default_factory=list)
+    max_tool_calls: int = Field(default=10, ge=1, le=50)
 
 
 class AgentProfilePatch(BaseModel):
@@ -472,6 +474,8 @@ class AgentProfilePatch(BaseModel):
     model_parameters: dict[str, Any] | None = None
     enabled: bool | None = None
     tool_names: list[str] | None = None
+    notebook_ids: list[str] | None = None
+    max_tool_calls: int | None = Field(default=None, ge=1, le=50)
 
 
 class NotebookIn(BaseModel):
@@ -552,7 +556,8 @@ def knowledge_health() -> dict[str, int]:
 
 def profile_input(item: AgentProfileIn) -> AgentProfileInput:
     return AgentProfileInput(item.name, item.description, item.provider_id, item.model_id, item.system_instructions,
-                             item.model_parameters, item.enabled, tuple(item.tool_names))
+                             item.model_parameters, item.enabled, tuple(item.tool_names),
+                             tuple(item.notebook_ids), item.max_tool_calls)
 
 
 def profile_error(error: Exception) -> HTTPException:
@@ -1292,12 +1297,26 @@ async def chat(req: ChatIn):
             raise HTTPException(400, "agent_profile_required")
         if mode == "chat":
             profile_id = None
-        notebook_id = resolve_notebook_id(req, conv)
-        request_state = notebook_request_state(req)
-        resolution_source = "request" if request_state == "value" else "cleared" if request_state == "null" else "conversation"
-        conversation_notebook_bound = bool(conv and conv["notebook_id"])
         if profile_id is not None and c.execute("SELECT 1 FROM agent_profiles WHERE id=?", (profile_id,)).fetchone() is None:
             raise HTTPException(404, "agent_profile_not_found")
+        if profile_id:
+            try:
+                profile_config = agent_profile_resolver.resolve(profile_id, req.temperature)
+            except ProfileNotFoundError:
+                raise HTTPException(404, "agent_profile_not_found")
+            except ProfileResolutionError as error:
+                raise HTTPException(400, error.code)
+        if "notebook_id" in req.model_fields_set:
+            notebook_id = req.notebook_id
+        elif conv and conv["notebook_id"]:
+            notebook_id = conv["notebook_id"]
+        elif profile_config and len(profile_config.requested_notebook_ids) > 1:
+            raise HTTPException(409, "agent_multiple_notebooks_unsupported")
+        else:
+            notebook_id = profile_config.requested_notebook_ids[0] if profile_config and profile_config.requested_notebook_ids else None
+        request_state = notebook_request_state(req)
+        resolution_source = "request" if request_state == "value" else "cleared" if request_state == "null" else "conversation" if conv and conv["notebook_id"] else "agent" if notebook_id else "none"
+        conversation_notebook_bound = bool(conv and conv["notebook_id"])
         if notebook_id is not None and c.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
             raise HTTPException(404, "notebook_not_found")
         notebook = c.execute("SELECT name FROM notebooks WHERE id=?", (notebook_id,)).fetchone() if notebook_id else None
@@ -1320,13 +1339,6 @@ async def chat(req: ChatIn):
             fields = [key for key in values if key in req.model_fields_set]
             if "execution_mode" in req.model_fields_set and mode == "chat": fields = ["execution_mode", "agent_profile_id"] + (["notebook_id"] if "notebook_id" in req.model_fields_set else [])
             c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?", (*(values[key] for key in fields), now(), cid))
-        if profile_id:
-            try:
-                profile_config = agent_profile_resolver.resolve(profile_id, req.temperature)
-            except ProfileNotFoundError:
-                raise HTTPException(404, "agent_profile_not_found")
-            except ProfileResolutionError as error:
-                raise HTTPException(400, error.code)
         selected_provider_id = profile_config.provider_id if profile_config else req.provider_id
         selected_model_id = profile_config.model_id if profile_config else req.model_id
         provider = c.execute("SELECT * FROM providers WHERE id=?", (selected_provider_id,)).fetchone()
@@ -1353,6 +1365,12 @@ async def chat(req: ChatIn):
             "agent_profile_id": profile_config.profile_id if profile_config else None,
             "execution_mode": mode,
             "agent_profile_name": profile_config.profile_name if profile_config else None,
+            "requested_provider": profile_config.provider_id if profile_config else selected_provider_id,
+            "requested_model": profile_config.model_id if profile_config else selected_model_id,
+            "inference_resolution_status": "resolved",
+            "requested_notebook_count": len(profile_config.requested_notebook_ids) if profile_config else 0,
+            "knowledge_resolution_status": "resolved" if notebook_id else "not_bound",
+            "requested_tool_names": list(profile_config.requested_tool_names) if profile_config else [],
             "resolved_provider": selected_provider_id,
             "resolved_provider_name": provider["name"],
             "resolved_model": selected_model_id,
@@ -1513,6 +1531,7 @@ async def chat(req: ChatIn):
                     requested_tools = set(requested_tools or ()) | {
                         entry.name for entry in catalog.entries() if entry.source == "native"
                     }
+                available_tool_names = sorted(set(requested_tools or ()) & set(registered_tool_names)) if profile_config else registered_tool_names
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), requested_tools, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
                 runtime_snapshot.update({
@@ -1521,7 +1540,15 @@ async def chat(req: ChatIn):
                     "web_tools_enabled": web_enabled,
                     "tools_enabled": tools_enabled,
                     "registered_tool_names": registered_tool_names,
+                    "registered_tool_count": len(registered_tool_names),
+                    "requested_tool_count": len(profile_config.requested_tool_names) if profile_config else len(registered_tool_names),
+                    "available_tool_names": available_tool_names,
+                    "available_tool_count": len(available_tool_names),
                     "effective_tool_names": effective_tool_names,
+                    "effective_tool_count": len(effective_tool_names),
+                    "excluded_tool_reasons": {name: ("not_registered_or_unavailable" if name not in registered_tool_names else
+                        "tool_toggle_disabled" if name not in allowed_tools else "model_tool_calling_unsupported")
+                        for name in (set(profile_config.requested_tool_names) - set(effective_tool_names))} if profile_config else {},
                     "tool_availability_reason": "model_capability_not_enabled" if not supports_tools else
                         "chat_tool_toggles_disabled" if not allowed_tools else
                         "no_tools_registered" if not registered_tool_names else
@@ -1536,6 +1563,7 @@ async def chat(req: ChatIn):
                 elif req.temperature is not None:
                     runtime_snapshot["temperature"] = req.temperature
                 _update_runtime_metadata(run_id, runtime_snapshot)
+                run_agent = configured_agent_runtime(profile_config.max_tool_calls if profile_config else None)
                 effective_configuration = EffectiveRunConfiguration(
                     profile_config,
                     notebook_id,
@@ -1543,9 +1571,11 @@ async def chat(req: ChatIn):
                     grounded_context,
                     profile_config.temperature if profile_config else req.temperature,
                     knowledge_outcome,
+                    tuple(profile_config.requested_tool_names) if profile_config else tuple(registered_tool_names),
+                    tuple(available_tool_names),
+                    run_agent.limits.max_tool_calls,
                 )
                 runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + (["system"] if knowledge_outcome and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED else []) + [message["role"] for message in messages]
-                run_agent = configured_agent_runtime()
                 runtime_snapshot["max_tool_calls"] = run_agent.limits.max_tool_calls
                 _update_runtime_metadata(run_id, runtime_snapshot)
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,

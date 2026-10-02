@@ -57,6 +57,30 @@ class FakeClient:
         return FakeStream(json)
 
 
+class AgentBoundaryResponse:
+    status_code = 200
+
+    async def aiter_lines(self):
+        yield 'data: ' + json.dumps({"choices": [{"delta": {"content": "ok"}}]})
+        yield "data: [DONE]"
+
+
+class AgentBoundaryStream:
+    def __init__(self): self.response = AgentBoundaryResponse()
+    async def __aenter__(self): return self.response
+    async def __aexit__(self, *args): return None
+
+
+class AgentBoundaryClient:
+    payloads = []
+    def __init__(self, **kwargs): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): return None
+    def stream(self, method, url, headers, json):
+        self.payloads.append(json)
+        return AgentBoundaryStream()
+
+
 class TextToolCallResponse:
     status_code = 200
 
@@ -104,6 +128,80 @@ class TextToolCallClient:
 
 
 class ChatToolTests(unittest.TestCase):
+    def test_agent_provider_boundary_intrinsic_tools_selection_budget_and_snapshot(self):
+        from app import main
+        from app.agent_profiles import AgentProfileInput
+        from app.kernel import ToolDefinition
+        from app.native_tools import register_native_tools
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
+            old_tools = main.module_registry.context.tools._tools.copy()
+            main.DB_PATH = Path(directory) / "agent-boundary.sqlite3"
+            main.startup()
+            main.module_registry.context.tools._tools.clear()
+            register_native_tools(main.module_registry.context)
+            async def search(_context, _arguments): return {"results": []}
+            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search, "module", "web_search", action="read_only"))
+            with main.db() as connection:
+                connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))
+                connection.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("m", "p", "Model", '["tool-calling"]'))
+                connection.executemany("INSERT INTO notebooks VALUES(?,?,?,?,?)", [("n1", "One", "", main.now(), main.now()), ("n2", "Two", "", main.now(), main.now())])
+            profile = main.agent_profiles.create(AgentProfileInput("Research", provider_id="p", model_id="m", tool_names=("web_search",), max_tool_calls=12))
+            restricted = main.agent_profiles.create(AgentProfileInput("Restricted", provider_id="p", model_id="m", max_tool_calls=4))
+            multi = main.agent_profiles.create(AgentProfileInput("Multi", provider_id="p", model_id="m", notebook_ids=("n1", "n2")))
+            main.httpx.AsyncClient = AgentBoundaryClient
+            try:
+                for selected in (profile, restricted):
+                    response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="test", execution_mode="agent", agent_profile_id=selected["id"])))
+                    asyncio.run(self.collect(response.body_iterator))
+                research_tools = [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[0]["tools"]]
+                restricted_tools = [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[1]["tools"]]
+                with main.db() as connection:
+                    message = connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid LIMIT 1").fetchone()
+                    snapshot = json.loads(message[0])
+                main.module_registry.context.tools.unregister("web_search")
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="offline", execution_mode="agent", agent_profile_id=profile["id"])))
+                offline_body = asyncio.run(self.collect(response.body_iterator))
+                offline_done = next(json.loads(line[6:]) for line in offline_body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done"))
+                self.assertIn("web_search", main.agent_profiles.get(profile["id"])["tool_names"])
+                self.assertIn("web_search", offline_done["runtime"]["requested_tool_names"])
+                self.assertNotIn("web_search", offline_done["runtime"]["available_tool_names"])
+                self.assertEqual(offline_done["runtime"]["excluded_tool_reasons"]["web_search"], "not_registered_or_unavailable")
+                main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search, "module", "web_search", action="read_only"))
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="online", execution_mode="agent", agent_profile_id=profile["id"])))
+                asyncio.run(self.collect(response.body_iterator))
+                with self.assertRaises(main.HTTPException) as conflict:
+                    asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="ambiguous", execution_mode="agent", agent_profile_id=multi["id"])))
+                self.assertEqual(conflict.exception.status_code, 409)
+                updated = main.agent_profiles.update(profile["id"], {"name": "Edited", "tool_names": (), "max_tool_calls": 2})
+                self.assertEqual(updated["max_tool_calls"], 2)
+                with main.db() as connection:
+                    historical = json.loads(connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid LIMIT 1").fetchone()[0])
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="explicit", execution_mode="agent", agent_profile_id=multi["id"], notebook_id="n2")))
+                explicit_body = asyncio.run(self.collect(response.body_iterator))
+                explicit_done = next(json.loads(line[6:]) for line in explicit_body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done"))
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="inherited", conversation_id=explicit_done["conversation_id"])))
+                inherited_body = asyncio.run(self.collect(response.body_iterator))
+                inherited_done = next(json.loads(line[6:]) for line in inherited_body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done"))
+            finally:
+                main.httpx.AsyncClient = old_client
+                main.DB_PATH = old_db
+                main.module_registry.context.tools._tools.clear()
+                main.module_registry.context.tools._tools.update(old_tools)
+
+        self.assertCountEqual(research_tools, ["web_search", "native.get_current_datetime", "native.render_artifact"])
+        self.assertCountEqual(restricted_tools, ["native.get_current_datetime", "native.render_artifact"])
+        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[2]["tools"]], ["native.get_current_datetime", "native.render_artifact"])
+        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[3]["tools"]], ["web_search", "native.get_current_datetime", "native.render_artifact"])
+        self.assertEqual(snapshot["max_tool_calls"], 12)
+        self.assertEqual(snapshot["agent_profile_name"], "Research")
+        self.assertEqual(snapshot["effective_tool_names"], historical["effective_tool_names"])
+        self.assertEqual(historical["max_tool_calls"], 12)
+        self.assertEqual(historical["resolved_model"], "m")
+        self.assertEqual(explicit_done["runtime"]["notebook_id"], "n2")
+        self.assertEqual(inherited_done["runtime"]["notebook_id"], "n2")
+
     def test_chart_series_allow_missing_values_except_for_pie(self):
         from app.artifacts import ArtifactError, validate_artifact
 
@@ -150,10 +248,12 @@ class ChatToolTests(unittest.TestCase):
                 return {"results": [{"title": "Pronóstico AEMET", "url": "https://weather.test/madrid", "snippet": "1 Oct 20 C; 2 Oct 22 C; 3 Oct 21 C"}]}
 
             main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search, action="read_only"))
+            from app.agent_profiles import AgentProfileInput
+            profile = main.agent_profiles.create(AgentProfileInput("Research", provider_id="p", model_id="m", tool_names=("web_search",), max_tool_calls=12))
             TextToolCallClient.payloads = []
             main.httpx.AsyncClient = TextToolCallClient
             try:
-                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="grafica la temperatura promedio para madrid para los próximos días", web_enabled=True, tools_enabled=True)))
+                response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="grafica la temperatura promedio para madrid para los próximos días", execution_mode="agent", agent_profile_id=profile["id"], web_enabled=True, tools_enabled=True)))
                 body = asyncio.run(self.collect(response.body_iterator))
                 with main.db() as connection:
                     run = connection.execute("SELECT status FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()

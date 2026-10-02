@@ -390,6 +390,21 @@ def _migration_21(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((21, _migration_21),)
 
 
+def _migration_22(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "agent_profiles", "max_tool_calls", "INTEGER NOT NULL DEFAULT 10 CHECK(max_tool_calls BETWEEN 1 AND 50)")
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS agent_profile_notebooks (
+      agent_profile_id TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+      notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+      PRIMARY KEY(agent_profile_id, notebook_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_profile_notebooks_notebook ON agent_profile_notebooks(notebook_id);
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((22, _migration_22),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

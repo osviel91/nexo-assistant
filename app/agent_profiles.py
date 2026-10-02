@@ -48,6 +48,8 @@ class AgentProfileInput:
     model_parameters: dict[str, Any] | None = None
     enabled: bool = True
     tool_names: tuple[str, ...] = ()
+    notebook_ids: tuple[str, ...] = ()
+    max_tool_calls: int = 10
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,8 @@ class AgentRunConfiguration:
     system_instructions: str
     temperature: float | None
     requested_tool_names: tuple[str, ...]
+    requested_notebook_ids: tuple[str, ...] = ()
+    max_tool_calls: int = 10
 
 
 class AgentProfileRepository:
@@ -69,6 +73,11 @@ class AgentProfileRepository:
     def _tools(self, connection: sqlite3.Connection, profile_id: str) -> tuple[str, ...]:
         return tuple(row[0] for row in connection.execute(
             "SELECT tool_name FROM agent_profile_tools WHERE agent_profile_id=? ORDER BY tool_name", (profile_id,)
+        ))
+
+    def _notebooks(self, connection: sqlite3.Connection, profile_id: str) -> tuple[str, ...]:
+        return tuple(row[0] for row in connection.execute(
+            "SELECT notebook_id FROM agent_profile_notebooks WHERE agent_profile_id=? ORDER BY notebook_id", (profile_id,)
         ))
 
     def _row(self, connection: sqlite3.Connection, profile_id: str) -> sqlite3.Row | None:
@@ -95,7 +104,10 @@ class AgentProfileRepository:
                  item.system_instructions, json.dumps(item.model_parameters or {}), int(item.enabled), timestamp, timestamp),
             )
             connection.executemany("INSERT INTO agent_profile_tools(agent_profile_id,tool_name) VALUES(?,?)",
-                                   [(profile_id, name) for name in item.tool_names])
+                                    [(profile_id, name) for name in item.tool_names])
+            connection.execute("UPDATE agent_profiles SET max_tool_calls=? WHERE id=?", (item.max_tool_calls, profile_id))
+            connection.executemany("INSERT INTO agent_profile_notebooks(agent_profile_id,notebook_id) VALUES(?,?)",
+                                   [(profile_id, notebook_id) for notebook_id in item.notebook_ids])
             return self._row(connection, profile_id), item.tool_names
 
     def update(self, profile_id: str, values: dict[str, Any]) -> tuple[sqlite3.Row, tuple[str, ...]]:
@@ -103,7 +115,7 @@ class AgentProfileRepository:
             if self._row(connection, profile_id) is None:
                 raise ProfileNotFoundError(profile_id)
             if values:
-                columns = [key for key in values if key != "tool_names"]
+                columns = [key for key in values if key not in {"tool_names", "notebook_ids"}]
                 if columns:
                     assignments = ", ".join(f"{column}=?" for column in columns)
                     params = [json.dumps(values[column]) if column == "model_parameters" else values[column] for column in columns]
@@ -111,7 +123,11 @@ class AgentProfileRepository:
                 if "tool_names" in values:
                     connection.execute("DELETE FROM agent_profile_tools WHERE agent_profile_id=?", (profile_id,))
                     connection.executemany("INSERT INTO agent_profile_tools(agent_profile_id,tool_name) VALUES(?,?)",
-                                           [(profile_id, name) for name in values["tool_names"]])
+                                            [(profile_id, name) for name in values["tool_names"]])
+                if "notebook_ids" in values:
+                    connection.execute("DELETE FROM agent_profile_notebooks WHERE agent_profile_id=?", (profile_id,))
+                    connection.executemany("INSERT INTO agent_profile_notebooks(agent_profile_id,notebook_id) VALUES(?,?)",
+                                           [(profile_id, notebook_id) for notebook_id in values["notebook_ids"]])
             row = self._row(connection, profile_id)
             return row, self._tools(connection, profile_id)
 
@@ -134,6 +150,8 @@ class AgentProfileService:
             raise ProfileValidationError("name must be 1-120 characters")
         if len(item.description) > 2000 or len(item.system_instructions) > 20000:
             raise ProfileValidationError("description or system_instructions is too long")
+        if isinstance(item.max_tool_calls, bool) or not isinstance(item.max_tool_calls, int) or not 1 <= item.max_tool_calls <= 50:
+            raise ProfileValidationError("max_tool_calls must be between 1 and 50")
         if require_references and (not item.provider_id.strip() or not item.model_id.strip()):
             raise ProfileValidationError("provider_id and model_id are required")
         parameters = item.model_parameters or {}
@@ -145,7 +163,8 @@ class AgentProfileService:
         if any(not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*(?:__[A-Za-z0-9_-]+)*", tool) or len(tool) > 200 for tool in tools):
             raise ProfileValidationError("tool names are invalid")
         return AgentProfileInput(name, item.description, item.provider_id.strip(), item.model_id.strip(),
-                                 item.system_instructions, parameters, item.enabled, tools)
+                                 item.system_instructions, parameters, item.enabled, tools,
+                                 tuple(sorted(set(item.notebook_ids))), item.max_tool_calls)
 
     def _validate_references(self, item: AgentProfileInput) -> None:
         with self.repository.connection_factory() as connection:
@@ -153,6 +172,11 @@ class AgentProfileService:
                 raise ProfileValidationError("provider_id is invalid")
             if connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (item.provider_id, item.model_id)).fetchone() is None:
                 raise ProfileValidationError("model_id is invalid for provider_id")
+            if item.notebook_ids:
+                placeholders = ",".join("?" for _ in item.notebook_ids)
+                found = connection.execute(f"SELECT COUNT(*) FROM notebooks WHERE id IN ({placeholders})", item.notebook_ids).fetchone()[0]
+                if found != len(item.notebook_ids):
+                    raise ProfileValidationError("notebook_ids contain an invalid notebook")
 
     def _output(self, stored: tuple[sqlite3.Row, tuple[str, ...]]) -> dict[str, Any]:
         row, tool_names = stored
@@ -162,12 +186,15 @@ class AgentProfileService:
                    WHERE p.id=? AND m.id=?""", (row["provider_id"], row["model_id"])
             ).fetchone() is not None
         available = {entry.get("name") for entry in self.tool_catalog() if isinstance(entry, dict)}
+        with self.repository.connection_factory() as connection:
+            notebook_ids = self.repository._notebooks(connection, row["id"])
         return {
             "id": row["id"], "name": row["name"], "description": row["description"],
             "provider_id": row["provider_id"], "model_id": row["model_id"],
             "system_instructions": row["system_instructions"],
             "model_parameters": json.loads(row["model_parameters"]), "enabled": bool(row["enabled"]),
             "tool_names": list(tool_names), "model_available": model_available,
+            "notebook_ids": list(notebook_ids), "max_tool_calls": row["max_tool_calls"],
             "unavailable_tools": sorted(set(tool_names) - available),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
         }
@@ -191,17 +218,22 @@ class AgentProfileService:
         if current is None:
             raise ProfileNotFoundError(profile_id)
         row, tools = current
+        with self.repository.connection_factory() as connection:
+            current_notebooks = self.repository._notebooks(connection, profile_id)
         merged = AgentProfileInput(
             values.get("name", row["name"]), values.get("description", row["description"]),
             values.get("provider_id", row["provider_id"]), values.get("model_id", row["model_id"]),
             values.get("system_instructions", row["system_instructions"]), values.get("model_parameters", json.loads(row["model_parameters"])),
             values.get("enabled", bool(row["enabled"])), tuple(values.get("tool_names", tools)),
+            tuple(values.get("notebook_ids", current_notebooks)),
+            values.get("max_tool_calls", row["max_tool_calls"]),
         )
         merged = self.validate(merged)
         self._validate_references(merged)
         update_values = {"name": merged.name, "description": merged.description, "provider_id": merged.provider_id,
                          "model_id": merged.model_id, "system_instructions": merged.system_instructions,
-                         "model_parameters": merged.model_parameters, "enabled": int(merged.enabled), "tool_names": merged.tool_names}
+                         "model_parameters": merged.model_parameters, "enabled": int(merged.enabled), "tool_names": merged.tool_names,
+                         "notebook_ids": merged.notebook_ids, "max_tool_calls": merged.max_tool_calls}
         return self._output(self.repository.update(profile_id, update_values))
 
     def delete(self, profile_id: str) -> None:
@@ -239,4 +271,7 @@ class AgentProfileResolver:
                 raise ProfileResolutionError("agent_model_unavailable")
             if connection.execute("SELECT 1 FROM models WHERE provider_id=? AND id=?", (provider_id, model_id)).fetchone() is None:
                 raise ProfileResolutionError("agent_model_unavailable")
-        return AgentRunConfiguration(profile_id, row["name"], provider_id, model_id, row["system_instructions"], temperature, tool_names)
+        with self.repository.connection_factory() as connection:
+            notebook_ids = self.repository._notebooks(connection, profile_id)
+        return AgentRunConfiguration(profile_id, row["name"], provider_id, model_id, row["system_instructions"], temperature,
+                                     tool_names, notebook_ids, row["max_tool_calls"])

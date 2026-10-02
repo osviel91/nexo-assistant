@@ -65,6 +65,9 @@ class EffectiveRunConfiguration:
     grounded_context: GroundedContext | None
     temperature: float | None
     knowledge_outcome: KnowledgeOutcome | None = None
+    requested_tool_names: tuple[str, ...] = ()
+    available_tool_names: tuple[str, ...] = ()
+    max_tool_calls: int = 10
 
 
 class AgentRuntime:
@@ -76,6 +79,7 @@ class AgentRuntime:
         request: AgentRunRequest,
     ) -> AsyncIterator[dict[str, Any]]:
         configuration = request.effective_configuration
+        max_tool_calls = configuration.max_tool_calls if configuration and configuration.agent else self.limits.max_tool_calls
         system_instructions = configuration.agent.system_instructions if configuration and configuration.agent else request.system_instructions
         grounded_context = configuration.grounded_context if configuration else request.grounded_context
         knowledge_outcome = configuration.knowledge_outcome if configuration else request.knowledge_outcome
@@ -114,7 +118,7 @@ class AgentRuntime:
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
         usage: dict[str, int] = {}
-        for _ in range(self.limits.max_tool_calls + 1):
+        for _ in range(max_tool_calls + 1):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
                                "grounding_applied": grounded_context is not None and bool(grounded_context.retrieval_results),
@@ -138,7 +142,7 @@ class AgentRuntime:
             round_content = ""
             finish_reason = None
             try:
-                async for chunk in request.model.stream(messages, definitions if tool_call_count < self.limits.max_tool_calls else [], temperature):
+                async for chunk in request.model.stream(messages, definitions if tool_call_count < max_tool_calls else [], temperature):
                     finish_reason = chunk.finish_reason or finish_reason
                     if chunk.usage:
                         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -200,7 +204,7 @@ class AgentRuntime:
             })
             tool_rounds += 1
             for call in tool_calls.values():
-                if tool_call_count >= self.limits.max_tool_calls:
+                if tool_call_count >= max_tool_calls:
                     yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
                     return
                 tool_call_count += 1
