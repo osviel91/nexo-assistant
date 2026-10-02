@@ -93,7 +93,10 @@ class MCPManager:
                     continue
                 schema = normalized_schema(get("inputSchema", get("input_schema")))
                 identity = f"mcp.{server['slug']}.{name}"
-                tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema)})
+                annotations = get("annotations", {})
+                annotation = annotations.get if isinstance(annotations, dict) else lambda key, default=None: getattr(annotations, key, default)
+                action = "read_only" if annotation("readOnlyHint", annotation("read_only_hint")) is True else "unknown"
+                tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema), "action": action})
             self.repository.replace_tools(server["id"], tools)
             self.repository.status(server["id"], "connected", None)
             self._sync_tools()

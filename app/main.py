@@ -140,7 +140,8 @@ class MCPRepository:
             c.execute("DELETE FROM mcp_tools WHERE server_id=?", (server_id,))
             for tool in tools:
                 old = existing.get(tool["remote_name"])
-                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at,action) VALUES(?,?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now(), old["action"] if old else "unknown"))
+                action = old["action"] if old and old["action"] != "unknown" else tool.get("action", "unknown")
+                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at,action) VALUES(?,?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now(), action))
 
     def status(self, server_id, status, error):
         with db() as c:

@@ -94,13 +94,14 @@ class MCPTests(unittest.TestCase):
             old_path, old_factory = main.DB_PATH, main.mcp_manager.client_factory
             main.DB_PATH = Path(directory) / "mcp-bulk.sqlite3"
             main.startup()
-            client = FakeClient([{"name": "one", "inputSchema": {"type": "object"}}, {"name": "two", "inputSchema": {"type": "object"}}])
+            client = FakeClient([{"name": "one", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}}, {"name": "two", "inputSchema": {"type": "object"}}])
             main.mcp_manager.client_factory = lambda *_: client
             try:
                 with TestClient(main.app) as http:
                     server = http.post("/api/mcp/servers", json={"name": "Bulk", "slug": "bulk", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "none"}).json()
                     http.post(f"/api/mcp/servers/{server['id']}/connect")
-                    self.assertEqual(http.get("/api/mcp/servers").json()[0]["tools"][0]["action"], "unknown")
+                    actions = {tool["remote_name"]: tool["action"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]}
+                    self.assertEqual(actions, {"one": "read_only", "two": "unknown"})
                     self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={"enabled": True}).status_code, 200)
                     self.assertTrue(all(tool["enabled"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]))
                     tool = http.get("/api/mcp/servers").json()[0]["tools"][0]
@@ -135,6 +136,16 @@ class MCPTests(unittest.TestCase):
         result = asyncio.run(registry.invoke("mcp.demo.query", ToolExecutionContext("c", "p", "m", 1), {"q": "x"}))
         self.assertEqual(result["structured_data"], {"rows": [[1]]})
         self.assertEqual(result["content"], "ok")
+
+    def test_refresh_uses_explicit_mcp_read_only_hint(self):
+        repo, registry = Repo(), ToolRegistry()
+        client = FakeClient([{"name": "search", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}}])
+        manager = MCPManager(repo, lambda *_: client)
+        manager.register(ModuleContext(None, {}, registry))
+
+        asyncio.run(manager.refresh(repo.server_value))
+
+        self.assertEqual(repo.items[0]["action"], "read_only")
 
     def test_refresh_failure_keeps_stale_snapshot_but_unexposes_tools(self):
         repo = Repo()
