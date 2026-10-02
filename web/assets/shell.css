@@ -39,8 +39,8 @@
   .sidebar { width: min(290px, calc(100vw - 36px)); }
   .workspace-header { padding-inline: var(--space-4); }
   .topbar-center { width: min(100%, calc(100vw - 108px)); min-width: 0; justify-content: center; }
-  .model-picker { min-width: 0; }
-  .model-picker select { width: min(140px, 28vw); min-width: 0; }
+  .model-picker { flex: 0 1 min(140px, 28vw); min-width: 0; overflow: hidden; }
+  .model-picker select { flex: 1 1 0; width: 0; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .messages, .composer-wrap { padding-inline: var(--space-3); }
   .messages { gap: var(--space-6); }
   .composer-tools { gap: var(--space-2); }
@@ -52,6 +52,6 @@
   .messages, .composer-wrap { padding-inline: var(--space-2); }
   .workspace-header { padding-inline: var(--space-2); }
   .topbar-center { width: calc(100vw - 96px); gap: 3px; }
-  .model-picker select { width: 22vw; }
+  .model-picker { flex-basis: 22vw; }
   .composer-left { max-width: 72%; }
 }
