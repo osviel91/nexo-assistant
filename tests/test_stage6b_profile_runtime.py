@@ -80,16 +80,21 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
 
         main.module_registry.context.tools._tools.clear()
         main.module_registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, visible, action="read_only"))
-        main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible, action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible, "module", "hidden", action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("native.get_current_datetime", "Clock", {"type": "object"}, visible, "native", "native", action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("native.render_artifact", "Renderer", {"type": "object"}, visible, "native", "native", action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("aemet.opendata", "Weather", {"type": "object"}, visible, "module", "aemet", action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("mcp.demo.query", "MCP", {"type": "object"}, visible, "mcp", "mcp", action="read_only"))
         main.agent_profiles = AgentProfileService(AgentProfileRepository(main.db, main.now), main.module_registry.tool_catalog)
         main.agent_profile_resolver = AgentProfileResolver(main.agent_profiles.repository)
-        profile = main.agent_profiles.create(self.profile(tool_names=("visible", "missing__tool")))
+        profile = main.agent_profiles.create(self.profile(tool_names=("visible", "aemet.opendata", "mcp.demo.query", "missing__tool")))
+        self.assertEqual(main.agent_profile_resolver.resolve(profile["id"]).requested_tool_names, ("aemet.opendata", "mcp.demo.query", "missing__tool", "visible"))
 
         class Response:
             status_code = 200
 
             async def aiter_lines(self):
-                if not any(message.get("role") == "tool" for message in self.payload["messages"]):
+                if self.payload.get("tools") and not any(message.get("role") == "tool" for message in self.payload["messages"]):
                     chunks = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call", "function": {"name": "visible", "arguments": "{}"}}]}}]}]
                 else:
                     chunks = [{"choices": [{"delta": {"content": "continued"}}]}]
@@ -136,7 +141,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["model"], "m")
             self.assertEqual(payload["temperature"], 0.7)
             self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})
-            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible"])
+            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible", "native.get_current_datetime", "native.render_artifact", "aemet.opendata", "mcp.demo.query"])
             done = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done")][0]
             self.assertEqual(done["model_id"], "m")
             self.assertEqual(done["runtime"]["agent_profile_name"], "Research")
@@ -145,6 +150,16 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertTrue(done["runtime"]["system_instructions_applied"])
             self.assertEqual(seen, [{}])
             self.assertIn("continued", body)
+            Client.payloads.clear()
+            response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="wrong", content="tools disabled", agent_profile_id=profile["id"], tools_enabled=False)))
+            asyncio.run(self.collect(response.body_iterator))
+            self.assertNotIn("tools", Client.payloads[0])
+            with main.db() as db:
+                db.execute("UPDATE models SET capabilities='[]' WHERE provider_id='p' AND id='m'")
+            Client.payloads.clear()
+            response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="wrong", content="no model support", agent_profile_id=profile["id"], tools_enabled=True)))
+            asyncio.run(self.collect(response.body_iterator))
+            self.assertNotIn("tools", Client.payloads[0])
             with main.db() as db:
                 run = db.execute("SELECT * FROM runtime_runs ORDER BY started_at DESC LIMIT 1").fetchone()
                 assistant = db.execute("SELECT * FROM messages WHERE role='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()

@@ -1506,7 +1506,14 @@ async def chat(req: ChatIn):
                 tools_enabled = req.tools_enabled if "tools_enabled" in req.model_fields_set else True
                 registered_tool_names = [entry.name for entry in catalog.entries()]
                 allowed_tools = {entry.name for entry in catalog.entries() if (entry.name == "web_search" and web_enabled) or (entry.name != "web_search" and tools_enabled)}
-                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), profile_config.requested_tool_names if profile_config else None, allowed_tools)
+                # Legacy Agent tool selections predate native tools; keep them
+                # authoritative for module/MCP tools without hiding core tools.
+                requested_tools = profile_config.requested_tool_names if profile_config else None
+                if profile_config:
+                    requested_tools = set(requested_tools or ()) | {
+                        entry.name for entry in catalog.entries() if entry.source == "native"
+                    }
+                effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), requested_tools, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
                 runtime_snapshot.update({
                     "model_capabilities": model_capability_list,
