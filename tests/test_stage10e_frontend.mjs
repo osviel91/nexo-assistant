@@ -39,3 +39,5 @@ for (const field of ['agent-name', 'agent-description', 'agent-instructions', 'a
 assert.match(app, /Saved bindings are preserved/);
 assert.match(app, /agent\.notebook_ids\.length > 1/);
 assert.match(app, /tool\.name\.startsWith\('native\.'\)/);
+assert.match(app, /state\.toolsEnabled = mode === 'agent'/);
+assert.match(app, /state\.toolsEnabled = state\.executionMode === 'agent'/);

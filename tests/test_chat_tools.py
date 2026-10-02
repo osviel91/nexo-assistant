@@ -128,12 +128,47 @@ class TextToolCallClient:
 
 
 class ChatToolTests(unittest.TestCase):
+    def test_agent_mcp_tool_reaches_model_when_chat_toggle_is_enabled(self):
+        from app import main
+        from app.agent_profiles import AgentProfileInput
+        from app.kernel import ToolDefinition
+        from app.native_tools import register_native_tools
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
+            old_tools = main.module_registry.context.tools._tools.copy()
+            main.DB_PATH = Path(directory) / "agent-mcp.sqlite3"
+            main.startup()
+            main.module_registry.context.tools._tools.clear()
+            register_native_tools(main.module_registry.context)
+            async def query(_context, _arguments): return {"content": "vault result"}
+            main.module_registry.context.tools.register(ToolDefinition("mcp.obsidian.search", "Search vault", {"type": "object"}, query, "mcp", "mcp"))
+            with main.db() as connection:
+                connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))
+                connection.execute("INSERT INTO models(id,provider_id,label,capabilities) VALUES(?,?,?,?)", ("m", "p", "Model", '["tool-calling"]'))
+            profile = main.agent_profiles.create(AgentProfileInput("Vault", provider_id="p", model_id="m", tool_names=("mcp.obsidian.search",)))
+            AgentBoundaryClient.payloads.clear()
+            main.httpx.AsyncClient = AgentBoundaryClient
+            try:
+                for enabled in (False, True):
+                    response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="query", execution_mode="agent", agent_profile_id=profile["id"], tools_enabled=enabled)))
+                    asyncio.run(self.collect(response.body_iterator))
+            finally:
+                main.httpx.AsyncClient = old_client
+                main.DB_PATH = old_db
+                main.module_registry.context.tools._tools.clear()
+                main.module_registry.context.tools._tools.update(old_tools)
+
+        self.assertNotIn("mcp.obsidian.search", [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[0].get("tools", [])])
+        self.assertIn("mcp.obsidian.search", [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[1]["tools"]])
+
     def test_agent_provider_boundary_intrinsic_tools_selection_budget_and_snapshot(self):
         from app import main
         from app.agent_profiles import AgentProfileInput
         from app.kernel import ToolDefinition
         from app.native_tools import register_native_tools
 
+        AgentBoundaryClient.payloads.clear()
         with tempfile.TemporaryDirectory() as directory:
             old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
             old_tools = main.module_registry.context.tools._tools.copy()

@@ -360,10 +360,12 @@ function renderExecutionMode() {
   document.querySelectorAll('[data-mode]').forEach((button) => { button.classList.toggle('active', button.dataset.mode === state.executionMode); });
   $('#model-picker').hidden = state.executionMode === 'agent';
   $('#agent-picker').hidden = state.executionMode !== 'agent';
+  renderToolToggles();
 }
 async function setExecutionMode(mode) {
   if (mode === state.executionMode) return;
   if (mode === 'agent' && !state.agentProfileId) { openSurface('agents'); toast('Selecciona un Agent Profile'); return; }
+  state.toolsEnabled = mode === 'agent';
   state.executionMode = mode;
   if (mode === 'chat' && $('#model-select').value) await savePreference('last_chat_model', $('#model-select').value);
   if (mode === 'agent' && state.agentProfileId) await savePreference('last_agent_profile', state.agentProfileId);
@@ -389,7 +391,7 @@ function renderAgentList() {
 async function selectAgent(id) {
   state.agentProfileId = id || null;
   if (id) await savePreference('last_agent_profile', id);
-  if (id) state.executionMode = 'agent';
+  if (id) { state.executionMode = 'agent'; state.toolsEnabled = true; }
   renderAgentPicker(); renderAgentList();
   renderExecutionMode();
   if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: 'agent', agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
@@ -469,7 +471,7 @@ function startAgentChat(id, notebookId = null) {
     $('#confirm-agent-start').onclick = () => startAgentChat(id, $('#agent-start-notebook').value);
     return;
   }
-  state.agentProfileId = id; state.executionMode = 'agent'; state.conversationId = null; state.currentNotebookId = notebookId || agent.notebook_ids[0] || null;
+  state.agentProfileId = id; state.executionMode = 'agent'; state.toolsEnabled = true; state.conversationId = null; state.currentNotebookId = notebookId || agent.notebook_ids[0] || null;
   state.messages = []; state.lastRuntime = null; state.attachments = []; $('#messages').innerHTML = ''; $('#welcome').hidden = false; renderNotebookPicker(); renderAgentPicker(); renderExecutionMode(); renderChats(); closeSurface(); $('#prompt').focus();
 }
 async function deleteAgent(id) { const agent = state.agents.find((item) => item.id === id); if (!agent || !confirm(`Delete ${agent.name}?`)) return; try { await api(`/agents/${id}`, { method: 'DELETE' }); if (state.agentProfileId === id) state.agentProfileId = null; await loadAgents(); renderAgentPicker(); if (state.conversationId) await openChat(state.conversationId); toast('Agent deleted'); } catch (error) { toast(error.message); } }
@@ -680,6 +682,7 @@ async function openChat(id) {
     const data = await api(`/conversations/${id}`);
     state.conversationId = id;
     state.executionMode = data.conversation.execution_mode || (data.conversation.agent_profile_id ? 'agent' : 'chat');
+    state.toolsEnabled = state.executionMode === 'agent';
     state.agentProfileId = data.conversation.agent_profile_id || null;
     state.currentNotebookId = data.conversation.notebook_id || null;
     state.followingBottom = true;
