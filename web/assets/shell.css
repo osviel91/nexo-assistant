@@ -37,10 +37,13 @@
 
 @media (max-width: 700px) {
   .sidebar { width: min(290px, calc(100vw - 36px)); }
-  .workspace-header { padding-inline: var(--space-4); }
-  .topbar-center { width: min(100%, calc(100vw - 108px)); min-width: 0; justify-content: center; }
+  .workspace-header { display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; column-gap: 4px; padding-inline: 8px; }
+  .menu-button, .new-chat-top { position: static; }
+  .topbar-center { width: 100%; min-width: 0; justify-content: center; gap: 5px; }
   .model-picker { flex: 0 1 min(140px, 28vw); min-width: 0; overflow: hidden; }
   .model-picker select { flex: 1 1 0; width: 0; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-picker { min-width: 0; }
+  .agent-picker strong { max-width: min(90px, 20vw); }
   .messages, .composer-wrap { padding-inline: var(--space-3); }
   .messages { gap: var(--space-6); }
   .composer-tools { gap: var(--space-2); }
@@ -50,8 +53,7 @@
 
 @media (max-width: 420px) {
   .messages, .composer-wrap { padding-inline: var(--space-2); }
-  .workspace-header { padding-inline: var(--space-2); }
-  .topbar-center { width: calc(100vw - 96px); gap: 3px; }
+  .topbar-center { gap: 3px; }
   .model-picker { flex-basis: 22vw; }
   .composer-left { max-width: 72%; }
 }
