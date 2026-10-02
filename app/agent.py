@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, AsyncIterator
 
 from app.agent_model import ModelAdapter, ModelAdapterError
@@ -13,6 +14,7 @@ from app.kernel import ToolExecutionContext
 from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
 from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext, KnowledgeOutcome, knowledge_outcome_instruction
+from app.tool_results import ToolResultPipeline
 
 logger = logging.getLogger("nexo.agent")
 
@@ -21,6 +23,17 @@ logger = logging.getLogger("nexo.agent")
 class AgentRuntimeLimits:
     max_tool_calls: int = 10
     max_tool_output_chars: int = 12000
+
+
+class PolicyDecision(str, Enum):
+    ALLOW = "allow"
+    APPROVAL_REQUIRED = "approval_required"
+    DENY = "deny"
+
+
+class PolicyEvaluator:
+    def evaluate(self, tool: Any) -> PolicyDecision:
+        return PolicyDecision.ALLOW if tool and tool.action == "read_only" else PolicyDecision.APPROVAL_REQUIRED
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,8 @@ class AgentRuntime:
         tool_rounds = 0
         tool_call_count = 0
         artifact_render_failures = 0
+        blocked_calls: set[tuple[str, str]] = set()
+        result_pipeline = ToolResultPipeline(self.limits.max_tool_output_chars)
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
@@ -196,6 +211,17 @@ class AgentRuntime:
                 yield {"activity": {"type": "ACT", "status": "running", "tool": call["name"], "round": tool_rounds}}
                 status = "ok"
                 result = None
+                definition = effective_tools.definition(call["name"])
+                decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
+                if decision != PolicyDecision.ALLOW:
+                    signature = (call["name"], call["arguments"])
+                    result = {"approval_required": {"tool_id": call["name"], "tool_name": call["name"], "action": definition.action if definition else None,
+                              "reason": "Tool action is not classified as read-only; operator approval is required.", "run_id": request.context.run_id}}
+                    status = "approval_required"
+                    if signature in blocked_calls:
+                        result = {"error": {"code": "repeated_approval_required", "message": "The same approval-blocked tool call was requested again; execution stopped."}}
+                        status = "repeated_approval_required"
+                    blocked_calls.add(signature)
                 if call["name"] == "native.render_artifact":
                     if artifact_render_failures >= 2:
                         result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ha fallado dos veces seguidas. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
@@ -246,23 +272,18 @@ class AgentRuntime:
                         artifacts.append(artifact)
                         yield {"artifact": artifact}
                     result = {key: value for key, value in result.items() if key != "artifacts"}
-                result_text = self._serialize_tool_result(result)
+                canonical, pipeline_metadata = result_pipeline.process(result)
+                projection = pipeline_metadata.pop("projection", canonical)
+                result_text = json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
+                diagnostic(logger, "tool_result_pipeline", tool=call["name"], original_size=pipeline_metadata["original_size"], projected_size=pipeline_metadata["projected_size"], compacted=pipeline_metadata["compacted"], truncated=pipeline_metadata["truncated"], structured_result=isinstance(canonical.get("structured_data"), (dict, list)))
+                diagnostic(logger, "tool_policy", tool=call["name"], source=definition.source if definition else "unknown", action=definition.action if definition else "unknown", policy_decision=decision.value, execution_attempted=status not in {"approval_required", "repeated_approval_required"}, execution_status=status, duration_ms=duration_ms)
+                request.event_sink.finish_event(event_id, event_status, {"tool": call["name"], "round": tool_rounds, "source": definition.source if definition else "unknown", "action": definition.action if definition else "unknown", "policy_decision": decision.value, "execution_attempted": status not in {"approval_required", "repeated_approval_required"}, "execution_status": status, "original_size": pipeline_metadata["original_size"], "projected_size": pipeline_metadata["projected_size"], "compacted": pipeline_metadata["compacted"], "truncated": pipeline_metadata["truncated"], "structured_result": isinstance(canonical.get("structured_data"), (dict, list))}, duration_ms)
                 if result.get("error"):
                     yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
+                if status == "repeated_approval_required":
+                    yield {"error": "The same tool call requires approval and was already blocked; execution stopped."}
+                    return
             diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
         yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
-
-    def _serialize_tool_result(self, result: dict[str, Any]) -> str:
-        raw = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        if len(raw) <= self.limits.max_tool_output_chars:
-            return raw
-        marker = {"error": {"code": "tool_output_truncated", "message": "Tool output truncated."}, "truncated": True, "output": ""}
-        if len(json.dumps(marker, ensure_ascii=False, separators=(",", ":"))) > self.limits.max_tool_output_chars:
-            return json.dumps({"error": {"code": "tool_output_truncated"}, "truncated": True}, separators=(",", ":"))
-        while True:
-            marker["output"] = raw[: max(0, self.limits.max_tool_output_chars - len(json.dumps(marker, ensure_ascii=False, separators=(",", ":"))))]
-            serialized = json.dumps(marker, ensure_ascii=False, separators=(",", ":"))
-            if len(serialized) <= self.limits.max_tool_output_chars or not marker["output"]:
-                return serialized

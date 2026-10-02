@@ -100,8 +100,13 @@ class MCPTests(unittest.TestCase):
                 with TestClient(main.app) as http:
                     server = http.post("/api/mcp/servers", json={"name": "Bulk", "slug": "bulk", "endpoint": "https://mcp.example/mcp", "transport": "streamable-http", "enabled": True, "auth_type": "none"}).json()
                     http.post(f"/api/mcp/servers/{server['id']}/connect")
+                    self.assertEqual(http.get("/api/mcp/servers").json()[0]["tools"][0]["action"], "unknown")
                     self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={"enabled": True}).status_code, 200)
                     self.assertTrue(all(tool["enabled"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]))
+                    tool = http.get("/api/mcp/servers").json()[0]["tools"][0]
+                    classified = http.patch(f"/api/mcp/servers/{server['id']}/tools/{tool['id']}", json={"action": "read_only"})
+                    self.assertEqual(classified.status_code, 200)
+                    self.assertEqual(http.get("/api/mcp/servers").json()[0]["tools"][0]["action"], "read_only")
                     self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={"enabled": False}).status_code, 200)
                     self.assertFalse(any(tool["enabled"] for tool in http.get("/api/mcp/servers").json()[0]["tools"]))
                     self.assertEqual(http.patch(f"/api/mcp/servers/{server['id']}/tools", json={}).status_code, 422)
@@ -125,6 +130,7 @@ class MCPTests(unittest.TestCase):
         self.assertEqual(repo.items[0]["id"], "mcp.demo.query")
         self.assertFalse(registry.has("mcp.demo.query"))
         repo.items[0]["enabled"] = True
+        repo.items[0]["action"] = "read_only"
         manager._sync_tools()
         result = asyncio.run(registry.invoke("mcp.demo.query", ToolExecutionContext("c", "p", "m", 1), {"q": "x"}))
         self.assertEqual(result["structured_data"], {"rows": [[1]]})
@@ -154,7 +160,7 @@ class MCPTests(unittest.TestCase):
         result = SimpleNamespace(content=[SimpleNamespace(type="text", text="x" * 16000)], structured_content=None, is_error=False)
         manager = MCPManager(repo, lambda *_: FakeClient(result=result))
         response = asyncio.run(manager.call(repo.server_value, {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object","properties":{"password":{"type":"string"}}}'}, {"password": "never-log"}))
-        self.assertTrue(response["truncated"])
+        self.assertEqual(len(response["content"]), 16000)
         self.assertNotIn("never-log", json.dumps(repo.diagnostics))
 
     def test_structured_mcp_result_can_feed_native_artifact_and_datetime_tools_coexist(self):
@@ -166,6 +172,7 @@ class MCPTests(unittest.TestCase):
         manager.register(context)
         asyncio.run(manager.refresh(repo.server_value))
         repo.items[0]["enabled"] = True
+        repo.items[0]["action"] = "read_only"
         manager._sync_tools()
         execution = ToolExecutionContext("c", "p", "m", 1)
         result = asyncio.run(registry.invoke("mcp.demo.query", execution, {}))
@@ -181,6 +188,7 @@ class MCPTests(unittest.TestCase):
         manager.register(ModuleContext(None, {}, registry))
         asyncio.run(manager.refresh(repo.server_value))
         repo.items[0]["enabled"] = True
+        repo.items[0]["action"] = "read_only"
         manager._sync_tools()
 
         class Adapter:

@@ -149,7 +149,7 @@ class ChatToolTests(unittest.TestCase):
             async def search(_context, _arguments):
                 return {"results": [{"title": "Pronóstico AEMET", "url": "https://weather.test/madrid", "snippet": "1 Oct 20 C; 2 Oct 22 C; 3 Oct 21 C"}]}
 
-            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search))
+            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search, action="read_only"))
             TextToolCallClient.payloads = []
             main.httpx.AsyncClient = TextToolCallClient
             try:
@@ -190,7 +190,7 @@ class ChatToolTests(unittest.TestCase):
             async def search(_context, arguments):
                 return {"results": [{"title": "Nexo", "url": "https://nexo.test", "snippet": "Nexo"}]}
             main.module_registry.context.tools._tools.clear()
-            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search))
+            main.module_registry.context.tools.register(ToolDefinition("web_search", "search", {"type": "object"}, search, action="read_only"))
             FakeClient.payloads = []
             old_client = main.httpx.AsyncClient
             main.httpx.AsyncClient = FakeClient

@@ -383,6 +383,13 @@ def _migration_20(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((20, _migration_20),)
 
 
+def _migration_21(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "mcp_tools", "action", "TEXT NOT NULL DEFAULT 'unknown'")
+
+
+MIGRATIONS = MIGRATIONS + ((21, _migration_21),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

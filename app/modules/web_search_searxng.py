@@ -86,6 +86,7 @@ class WebSearchSearxngModule:
             description="Busca en la web. Usa los resultados relevantes y cita las fuentes como [1], [2], etc.",
             parameters={"type": "object", "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 500}}, "required": ["query"], "additionalProperties": False},
             handler=safe_search,
+            action="read_only",
         ))
 
     def startup(self, context: ModuleContext) -> None:

@@ -37,7 +37,7 @@ def run(runtime, adapter, registry, capabilities={"tool-calling"}, request_start
 class AgentRuntimeTests(unittest.TestCase):
     def registry(self, handler):
         registry = ModuleRegistry(FastAPI())
-        registry.context.tools.register(ToolDefinition("test_tool", "test", {"type": "object"}, handler))
+        registry.context.tools.register(ToolDefinition("test_tool", "test", {"type": "object"}, handler, action="read_only"))
         return registry
 
     def test_context_and_successful_execution(self):
@@ -159,7 +159,7 @@ class AgentRuntimeTests(unittest.TestCase):
             return {"error": {"code": "invalid_artifact", "message": "El gráfico requiere labels y series."}}
 
         registry = ModuleRegistry(FastAPI())
-        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render))
+        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render, action="read_only"))
         responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "native.render_artifact", "arguments": "{}"}}]}] for i in range(3)]
         responses.append([{"content": "No se pudo crear el gráfico por datos inválidos; aquí están los datos."}])
         adapter = Adapter(responses)
@@ -179,7 +179,7 @@ class AgentRuntimeTests(unittest.TestCase):
             return {"artifacts": [{"type": "bar", "title": arguments["title"], "data": {}}]}
 
         registry = ModuleRegistry(FastAPI())
-        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render))
+        registry.context.tools.register(ToolDefinition("native.render_artifact", "render", {"type": "object"}, render, action="read_only"))
         responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "native.render_artifact", "arguments": json.dumps({"title": str(i)})}}]}] for i in range(3)]
         responses.append([{"content": "Generated three charts."}])
         adapter = Adapter(responses)

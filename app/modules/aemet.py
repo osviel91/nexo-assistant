@@ -13,10 +13,9 @@ from app.kernel import ModuleContext, ToolDefinition, ToolExecutionContext
 
 BASE_URL = "https://opendata.aemet.es/opendata"
 MAX_RESPONSE_BYTES = 2_000_000
-MAX_TOOL_RESULT_CHARS = 9_000
 
 
-def compact_data(value: Any, budget: int = MAX_TOOL_RESULT_CHARS) -> Any:
+def compact_data(value: Any, budget: int = MAX_RESPONSE_BYTES) -> Any:
     """Keep useful structured values while excluding maps/base64 that exhaust tool context."""
     if isinstance(value, dict):
         result = {}
@@ -126,11 +125,7 @@ def register_aemet_tool(context: ModuleContext, api_key: Callable[[], str | None
                     data = data_response.text
                 if filter_text:
                     data = filter_records(data, filter_text)
-                result = {"data": compact_data(data), "metadata": {key: value for key, value in payload.items() if key != "datos"}}
-                if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > MAX_TOOL_RESULT_CHARS:
-                    result["metadata"] = {}
-                    result["data"] = compact_data(result["data"], MAX_TOOL_RESULT_CHARS - 40)
-                return result
+                return {"data": compact_data(data), "metadata": {key: value for key, value in payload.items() if key != "datos"}}
         except httpx.TimeoutException:
             return {"error": {"code": "timeout", "message": "AEMET agotó el tiempo de espera."}}
         except httpx.RequestError:
@@ -143,4 +138,5 @@ def register_aemet_tool(context: ModuleContext, api_key: Callable[[], str | None
         consult,
         "native",
         "aemet",
+        action="read_only",
     ))

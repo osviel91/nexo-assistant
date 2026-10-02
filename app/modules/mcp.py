@@ -10,9 +10,6 @@ from urllib.parse import urlparse
 
 from app.kernel import ModuleContext, ModuleManifest, ToolDefinition, ToolExecutionContext
 
-MAX_RESULT_CHARS = 12000
-
-
 class MCPProtocolError(Exception):
     pass
 
@@ -75,7 +72,7 @@ class MCPManager:
                 continue
             async def invoke(execution: ToolExecutionContext, arguments: dict[str, Any], tool=tool, server=server):
                 return await self.call(server, tool, arguments)
-            self.context.tools.register(ToolDefinition(tool["id"], tool["description"], json.loads(tool["input_schema"]), invoke, "mcp", "mcp"))
+            self.context.tools.register(ToolDefinition(tool["id"], tool["description"], json.loads(tool["input_schema"]), invoke, "mcp", "mcp", action=tool.get("action")))
 
     async def refresh(self, server: dict[str, Any]) -> dict[str, Any]:
         self.repository.status(server["id"], "connecting", None)
@@ -136,11 +133,6 @@ class MCPManager:
             payload = {"content": "\n".join(content)}
             if structured is not None:
                 payload["structured_data"] = json.loads(json.dumps(structured, ensure_ascii=False))
-            raw = json.dumps(payload, ensure_ascii=False)
-            truncated = len(raw) > MAX_RESULT_CHARS
-            if truncated:
-                status = "truncated"
-                payload = {"content": raw[:MAX_RESULT_CHARS - 100], "truncated": True, "truncation_notice": "MCP result exceeded the safe context limit."}
             return payload
         except asyncio.TimeoutError:
             status = "invocation_timeout"

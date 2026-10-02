@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 
-from app.agent import AgentRunRequest, AgentRuntime
+from app.agent import AgentRunRequest, AgentRuntime, PolicyDecision, PolicyEvaluator
 from app.agent_model import ModelStreamChunk
 from app.kernel import ModuleContext, ModuleRegistry, ToolDefinition, ToolExecutionContext, ToolRegistry
 from app.tools import ExposurePolicy, ToolExecutor
@@ -34,6 +34,12 @@ def execute(registry, adapter, capabilities={"tool-calling"}, requested=None):
 
 
 class ToolPolicyTests(unittest.TestCase):
+    def test_action_policy_allows_reads_and_requires_approval_for_other_actions(self):
+        evaluator = PolicyEvaluator()
+        for action, decision in (("read_only", PolicyDecision.ALLOW), ("mutating", PolicyDecision.APPROVAL_REQUIRED), ("destructive", PolicyDecision.APPROVAL_REQUIRED), (None, PolicyDecision.APPROVAL_REQUIRED)):
+            tool = SimpleNamespace(action=action)
+            self.assertEqual(evaluator.evaluate(tool), decision)
+
     def native_registry(self, seen):
         registry = ModuleRegistry(FastAPI())
 
@@ -41,8 +47,8 @@ class ToolPolicyTests(unittest.TestCase):
             seen.append(arguments)
             return {"ok": True}
 
-        registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, handler))
-        registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, handler))
+        registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, handler, action="read_only"))
+        registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, handler, action="read_only"))
         return registry
 
     def test_catalog_is_safe_and_policy_resolves_requested_tools(self):
@@ -84,6 +90,20 @@ class ToolPolicyTests(unittest.TestCase):
         adapter = Adapter([[{"content": "plain"}]])
         execute(registry, adapter, set())
         self.assertEqual(adapter.payloads[0]["tools"], [])
+
+    def test_unknown_action_is_blocked_before_handler_and_reported_for_approval(self):
+        seen = []
+        registry = self.native_registry(seen)
+        tool = registry.context.tools._tools["visible"]
+        registry.context.tools._tools["visible"] = ToolDefinition(tool.name, tool.description, tool.parameters, tool.handler)
+        adapter = Adapter([
+            [{"tool_calls": [{"id": "call", "function": {"name": "visible", "arguments": "{}"}}]}],
+            [{"content": "approval needed"}],
+        ])
+        events = execute(registry, adapter, requested={"visible"})
+        self.assertEqual(seen, [])
+        self.assertIn("approval_required", adapter.payloads[1]["messages"][-1]["content"])
+        self.assertEqual(events[-1]["answer"], "approval needed")
 
 
 if __name__ == "__main__":

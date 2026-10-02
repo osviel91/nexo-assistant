@@ -140,7 +140,7 @@ class MCPRepository:
             c.execute("DELETE FROM mcp_tools WHERE server_id=?", (server_id,))
             for tool in tools:
                 old = existing.get(tool["remote_name"])
-                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at) VALUES(?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now()))
+                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at,action) VALUES(?,?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now(), old["action"] if old else "unknown"))
 
     def status(self, server_id, status, error):
         with db() as c:
@@ -387,12 +387,17 @@ def mcp_set_all_tools(server_id: str, item: dict[str, bool]):
 
 
 @app.patch("/api/mcp/servers/{server_id}/tools/{tool_id:path}")
-def mcp_set_tool(server_id: str, tool_id: str, item: dict[str, bool]):
+def mcp_set_tool(server_id: str, tool_id: str, item: dict[str, Any]):
     enabled = item.get("enabled")
-    if not isinstance(enabled, bool):
+    action = item.get("action")
+    if enabled is not None and not isinstance(enabled, bool):
         raise HTTPException(422, "enabled must be boolean")
+    if action is not None and action not in {"read_only", "mutating", "destructive", "unknown"}:
+        raise HTTPException(422, "invalid action classification")
+    if enabled is None and action is None:
+        raise HTTPException(422, "enabled or action is required")
     with db() as c:
-        cursor = c.execute("UPDATE mcp_tools SET enabled=? WHERE server_id=? AND id=?", (int(enabled), server_id, tool_id))
+        cursor = c.execute("UPDATE mcp_tools SET enabled=COALESCE(?,enabled),action=COALESCE(?,action) WHERE server_id=? AND id=?", (int(enabled) if enabled is not None else None, action, server_id, tool_id))
         if not cursor.rowcount:
             raise HTTPException(404, "MCP tool not found")
     mcp_manager._sync_tools()

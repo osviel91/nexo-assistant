@@ -50,6 +50,7 @@ class ToolDefinition:
     source: str = "native"
     module_id: str = ""
     capabilities: tuple[str, ...] = ("tool-calling",)
+    action: Literal["read_only", "mutating", "destructive", "unknown"] | None = None
 
 
 class ToolRegistry:

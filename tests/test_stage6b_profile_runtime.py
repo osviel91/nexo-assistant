@@ -79,8 +79,8 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             return {"ok": True}
 
         main.module_registry.context.tools._tools.clear()
-        main.module_registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, visible))
-        main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible))
+        main.module_registry.context.tools.register(ToolDefinition("visible", "Visible", {"type": "object"}, visible, action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible, action="read_only"))
         main.agent_profiles = AgentProfileService(AgentProfileRepository(main.db, main.now), main.module_registry.tool_catalog)
         main.agent_profile_resolver = AgentProfileResolver(main.agent_profiles.repository)
         profile = main.agent_profiles.create(self.profile(tool_names=("visible", "missing__tool")))
