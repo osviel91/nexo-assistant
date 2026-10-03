@@ -1513,9 +1513,12 @@ async def chat(req: ChatIn):
     grounded_context: GroundedContext | None = None
     knowledge_outcome: KnowledgeOutcome | None = None
     with db() as c:
+        c.execute("BEGIN IMMEDIATE")
         cid = req.conversation_id or str(uuid.uuid4())
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if req.conversation_id and not conv: raise HTTPException(404, "Conversation not found")
+        if c.execute("SELECT 1 FROM runtime_runs WHERE conversation_id=? AND status IN ('started','running') LIMIT 1", (cid,)).fetchone():
+            raise HTTPException(409, "conversation_run_in_progress")
         # Omitted means inherit; explicit null is the normal Nexo selection.
         # Existing conversations own their execution mode; the request can only choose it for a new conversation.
         mode = conv["execution_mode"] if conv else (req.execution_mode if "execution_mode" in req.model_fields_set else ("agent" if req.agent_profile_id else "chat"))
@@ -1900,6 +1903,12 @@ async def chat(req: ChatIn):
         except httpx.RequestError as e:
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
+        except Exception:
+            run_status = "failed"
+            logger.exception("chat runtime failed", extra={"run_id": run_id})
+            failure_event = event_sink.start_event("RUNTIME_FAILURE", "AgentRuntime", {"error_code": "runtime_failed"})
+            event_sink.finish_event(failure_event, "failed", {"error_code": "runtime_failed"})
+            yield "data: " + json.dumps({"error": "runtime_failed"}) + "\n\n"
         finally:
             if locals().get("run_status") != "waiting_approval":
                 _finish_runtime_run(run_id, locals().get("run_status", "failed"))

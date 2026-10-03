@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits
 from app.agent_model import ModelAdapterError, ModelStreamChunk
@@ -62,6 +63,45 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in trace_events], ["REASON", "ACT", "REASON"])
         self.assertNotIn("arguments", json.dumps(trace_events))
         self.assertIn("tools", adapter.payloads[0])
+
+    def test_progress_guard_failures_fail_open_before_and_after_tool_call(self):
+        from app.progress_guard import ProgressGuard
+
+        original_pre = ProgressGuard.observe_call
+        original_post = ProgressGuard.observe_result
+        for failing_method, original in (("observe_call", original_pre), ("observe_result", original_post)):
+            async def handler(_context, _arguments):
+                return {"structured_data": {"rows": [[1]]}}
+
+            adapter = Adapter([
+                [{"tool_calls": [{"index": 0, "id": "mcp-call", "function": {"name": "test_tool", "arguments": "{}"}}]}],
+                [{"content": "continued"}],
+            ])
+            with patch.object(ProgressGuard, failing_method, side_effect=RuntimeError("guard failure")):
+                events = run(AgentRuntime(), adapter, self.registry(handler))
+            self.assertEqual(events[-1]["answer"], "continued")
+            self.assertEqual(adapter.payloads[1]["messages"][-1]["tool_call_id"], "mcp-call")
+            setattr(ProgressGuard, failing_method, original)
+
+    def test_recovery_keeps_tool_result_and_hard_stop_requests_final_turn_without_tools(self):
+        calls = []
+
+        async def handler(_context, _arguments):
+            calls.append(True)
+            return {"content": "vault evidence"}
+
+        tool_call = {"tool_calls": [{"index": 0, "id": "vault-call", "function": {"name": "test_tool", "arguments": "{}"}}]}
+        adapter = Adapter([[tool_call], [tool_call], [tool_call], [{"content": "final from evidence"}]])
+        events = run(AgentRuntime(), adapter, self.registry(handler))
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(events[-1]["answer"], "final from evidence")
+        final_payload = adapter.payloads[-1]
+        self.assertNotIn("tools", final_payload)
+        self.assertTrue(any(message.get("role") == "tool" and message["tool_call_id"] == "vault-call"
+                            for message in final_payload["messages"]))
+        self.assertTrue(any(message.get("role") == "system" and "stopped" in message["content"]
+                            for message in final_payload["messages"]))
 
     def test_tool_enabled_turn_tells_model_to_use_and_interpret_available_tools(self):
         adapter = Adapter([[{"content": "answer"}]])

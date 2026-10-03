@@ -166,6 +166,16 @@ class MCPTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "invocation_timeout")
         with self.assertRaises(MCPProtocolError): normalized_schema({"type": "array"})
 
+    def test_timeout_covers_client_context_setup(self):
+        class StalledClient(FakeClient):
+            async def __aenter__(self):
+                await asyncio.sleep(1)
+
+        repo = Repo()
+        manager = MCPManager(repo, lambda *_: StalledClient())
+        result = asyncio.run(manager.call(repo.server_value, {"id": "mcp.demo.q", "remote_name": "q", "input_schema": '{"type":"object"}'}, {}))
+        self.assertEqual(result["error"]["code"], "invocation_timeout")
+
     def test_large_response_reports_truncation_without_leaking_sensitive_inputs(self):
         repo = Repo()
         result = SimpleNamespace(content=[SimpleNamespace(type="text", text="x" * 16000)], structured_content=None, is_error=False)
@@ -218,6 +228,8 @@ class MCPTests(unittest.TestCase):
         events = asyncio.run(self.collect(AgentRuntime(), request))
         self.assertEqual(events[-1]["answer"], "done")
         self.assertIn('"structured_data":{"rows":[[2]]}', adapter.messages[-1]["content"])
+        self.assertEqual(adapter.messages[-1]["tool_call_id"], "call")
+        self.assertEqual(adapter.messages[-2]["tool_calls"][0]["id"], "call")
 
     @staticmethod
     async def collect(runtime, request):

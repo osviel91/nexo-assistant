@@ -340,7 +340,7 @@ class ChatToolTests(unittest.TestCase):
                     runtime_events = connection.execute("SELECT kind FROM runtime_events WHERE run_id=? ORDER BY sequence", (run["id"],)).fetchall()
                     saved_runtime = json.loads(connection.execute("SELECT runtime_metadata FROM messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
                 self.assertEqual(run["status"], "completed")
-                self.assertEqual([event["kind"] for event in runtime_events], ["REASON", "ACT", "REASON"])
+                self.assertEqual([event["kind"] for event in runtime_events], ["REASON", "TOOL_REQUESTED", "ACT", "TOOL_POLICY", "TOOL_EXECUTION_STARTED", "TOOL_EXECUTION_COMPLETED", "TOOL_RESULT_PROJECTED", "PROGRESS_EVALUATED", "REASON", "PROVIDER_CONTINUATION_STARTED"])
                 self.assertEqual(saved_runtime["tools_used"], ["web_search"])
                 FakeClient.payloads = []
                 response = asyncio.run(main.chat(main.ChatIn(provider_id="p", model_id="m", content="sin web", web_enabled=False, tools_enabled=False)))

@@ -119,9 +119,12 @@ class MCPManager:
             properties = schema.get("properties", {})
             if any(key not in properties for key in arguments) or any(key not in arguments for key in schema.get("required", [])):
                 return {"error": {"code": "invalid_arguments", "message": "Arguments do not match the MCP tool schema."}}
-            async with self.client_factory(server["endpoint"], self.repository.auth_token(server["id"])) as client:
-                await asyncio.wait_for(client.initialize(), server["timeout"])
-                result = await asyncio.wait_for(client.call_tool(tool["remote_name"], arguments), server["timeout"])
+            async def invoke():
+                async with self.client_factory(server["endpoint"], self.repository.auth_token(server["id"])) as client:
+                    await client.initialize()
+                    return await client.call_tool(tool["remote_name"], arguments)
+
+            result = await asyncio.wait_for(invoke(), server["timeout"])
             if getattr(result, "is_error", False):
                 status = "mcp_protocol_error"
                 return {"error": {"code": "mcp_protocol_error", "message": "MCP tool returned an error."}}

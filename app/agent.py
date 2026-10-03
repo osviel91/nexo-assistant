@@ -132,6 +132,11 @@ class AgentRuntime:
         usage: dict[str, int] = {}
         guard = ProgressGuard.restore(request.progress_state)
         force_final = False
+
+        def runtime_event(kind: str, name: str, metadata: dict[str, Any] | None = None, duration_ms: float = 0) -> None:
+            event_id = request.event_sink.start_event(kind, name, metadata or {})
+            request.event_sink.finish_event(event_id, "completed", metadata or {}, duration_ms)
+
         for _ in range(max_tool_calls + 1):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
@@ -141,6 +146,8 @@ class AgentRuntime:
                                **(request.runtime_snapshot or {}),
                                **({"agent_profile_id": request.profile_id} if request.profile_id else {})}
             reason_event_id = request.event_sink.start_event("REASON", request.model.model_id, reason_metadata)
+            if tool_rounds:
+                runtime_event("PROVIDER_CONTINUATION_STARTED", request.model.model_id, {"round": tool_rounds + 1})
             yield {"activity": {"type": "REASON", "status": "running", "round": tool_rounds + 1}}
             definitions = effective_tools.definitions()
             diagnostic(logger, "agent_runtime", **{
@@ -213,6 +220,7 @@ class AgentRuntime:
                 yield {"complete": True, "answer": answer, "sources": sources, "artifacts": artifacts, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry,
                        "native_tool_calls": sum(name.startswith("native.") for name in tools_used)}
                 return
+            runtime_event("TOOL_REQUESTED", "tool calls", {"count": len(tool_calls), "round": tool_rounds + 1})
             if guard.enabled and not force_final:
                 blocked = False
                 for proposed in tool_calls.values():
@@ -255,6 +263,7 @@ class AgentRuntime:
                 result = None
                 definition = effective_tools.definition(call["name"])
                 decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
+                runtime_event("TOOL_POLICY", call["name"], {"decision": decision.value, "round": tool_rounds})
                 call_identity = None
                 guard_started = time.perf_counter()
                 if guard.enabled and call["name"] != "native.render_artifact":
@@ -283,7 +292,11 @@ class AgentRuntime:
                         result = {"error": {"code": "invalid_arguments", "message": "Argumentos de herramienta inválidos."}}
                         status = "invalid_arguments"
                     else:
+                        execution_started = None
+                        execution_event_id = None
                         try:
+                            execution_started = time.perf_counter()
+                            execution_event_id = request.event_sink.start_event("TOOL_EXECUTION_STARTED", call["name"], {"round": tool_rounds})
                             if call["name"] == "native.request_user_input":
                                 dialog = normalize_dialog(arguments.get("dialog"))
                                 if not request.interaction_handler:
@@ -340,6 +353,11 @@ class AgentRuntime:
                             result = {"error": {"code": "tool_execution_error", "message": "La herramienta no pudo completar la operación."}}
                             status = "tool_execution_error"
                             logger.exception("tool execution failed", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.model.model_id, "tool": call["name"], "round": tool_rounds})
+                        finally:
+                            if execution_started is not None:
+                                execution_duration = (time.perf_counter() - execution_started) * 1000
+                                request.event_sink.finish_event(execution_event_id, "completed", {"round": tool_rounds}, execution_duration)
+                                runtime_event("TOOL_EXECUTION_COMPLETED", call["name"], {"round": tool_rounds}, execution_duration)
                 if not isinstance(result, dict):
                     result = {"error": {"code": "tool_execution_error", "message": "La herramienta devolvió un resultado inválido."}}
                     status = "tool_execution_error"
@@ -370,6 +388,7 @@ class AgentRuntime:
                     result = {key: value for key, value in result.items() if key != "artifacts"}
                 canonical, pipeline_metadata = result_pipeline.process(result)
                 projection = pipeline_metadata.pop("projection", canonical)
+                runtime_event("TOOL_RESULT_PROJECTED", call["name"], {"projected_size": pipeline_metadata["projected_size"], "truncated": pipeline_metadata["truncated"]})
                 progress_action = "allow"
                 if guard.enabled and call_identity:
                     prior_score = guard.score
@@ -382,6 +401,7 @@ class AgentRuntime:
                         progress = {"action": "allow", "delta": 0}
                     guard.counters["guard_overhead_ms"] += round((time.perf_counter() - guard_started) * 1000, 4)
                     progress_action = progress["action"]
+                    runtime_event("PROGRESS_EVALUATED", "Progress Guard", {"action": progress_action, "stagnation_score": guard.score})
                     trace_metadata = {"tool_calls": guard.counters.get("tool_calls", 0), "unique_calls": guard.counters.get("unique_calls", 0),
                                       "unique_results": guard.counters.get("unique_results", 0), "exact_repeats": guard.counters.get("exact_repeats", 0),
                                       "repeated_results": guard.counters.get("repeated_results", 0), "cycles_detected": guard.counters.get("cycles_detected", 0),
