@@ -41,3 +41,5 @@ assert.match(app, /agent\.notebook_ids\.length > 1/);
 assert.match(app, /tool\.name\.startsWith\('native\.'\)/);
 assert.match(app, /state\.toolsEnabled = mode === 'agent'/);
 assert.match(app, /state\.toolsEnabled = state\.executionMode === 'agent'/);
+assert.match(app, /Unclassified \(blocked\)/);
+assert.match(app, /Blocked until classified/);

@@ -91,7 +91,7 @@ class ToolPolicyTests(unittest.TestCase):
         execute(registry, adapter, set())
         self.assertEqual(adapter.payloads[0]["tools"], [])
 
-    def test_unknown_action_is_blocked_before_handler_and_reported_for_approval(self):
+    def test_unknown_action_is_blocked_with_real_settings_path(self):
         seen = []
         registry = self.native_registry(seen)
         tool = registry.context.tools._tools["visible"]
@@ -102,7 +102,11 @@ class ToolPolicyTests(unittest.TestCase):
         ])
         events = execute(registry, adapter, requested={"visible"})
         self.assertEqual(seen, [])
-        self.assertIn("approval_required", adapter.payloads[1]["messages"][-1]["content"])
+        response = adapter.payloads[1]["messages"][-1]["content"]
+        self.assertIn("tool_policy_blocked", response)
+        self.assertIn("Settings > Tools", response)
+        self.assertNotIn("run_id", response)
+        self.assertIn("no interactive approval flow", response)
         self.assertEqual(events[-1]["answer"], "approval needed")
 
 

@@ -219,11 +219,11 @@ class AgentRuntime:
                 decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
                 if decision != PolicyDecision.ALLOW:
                     signature = (call["name"], call["arguments"])
-                    result = {"approval_required": {"tool_id": call["name"], "tool_name": call["name"], "action": definition.action if definition else None,
-                              "reason": "Tool action is not classified as read-only; operator approval is required.", "run_id": request.context.run_id}}
+                    result = {"error": {"code": "tool_policy_blocked", "tool": call["name"], "action": definition.action if definition else None,
+                              "message": "This tool is blocked because it is not classified as read-only. NEXO has no interactive approval flow. To enable a read-only tool, set its action to Read only in Settings > Tools; do not do this for tools that can modify data."}}
                     status = "approval_required"
                     if signature in blocked_calls:
-                        result = {"error": {"code": "repeated_approval_required", "message": "The same approval-blocked tool call was requested again; execution stopped."}}
+                        result = {"error": {"code": "repeated_approval_required", "message": "The same policy-blocked tool call was requested again; execution stopped."}}
                         status = "repeated_approval_required"
                     blocked_calls.add(signature)
                 if call["name"] == "native.render_artifact":
@@ -287,7 +287,7 @@ class AgentRuntime:
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
                 logger.info("tool call", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
                 if status == "repeated_approval_required":
-                    yield {"error": "The same tool call requires approval and was already blocked; execution stopped."}
+                    yield {"error": "The same tool call was blocked by its action policy and was already stopped."}
                     return
             diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
         yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
