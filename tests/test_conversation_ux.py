@@ -43,7 +43,7 @@ class ConversationUXTests(unittest.TestCase):
         self.assertEqual(data["messages"][0]["content"], "answer")
         self.assertNotEqual(data["messages"][0]["id"], message_id)
 
-    def test_tools_toggle_persists_per_conversation_and_is_copied_to_branches(self):
+    def test_conversation_tool_settings_persist_and_are_copied_to_branches(self):
         main = self.main
         conversation_id, message_id = "tools-chat", "tools-message"
         with main.db() as connection:
@@ -51,11 +51,15 @@ class ConversationUXTests(unittest.TestCase):
             connection.execute("INSERT INTO messages(id,conversation_id,role,content,created_at) VALUES(?,?,?,?,?)", (message_id, conversation_id, "user", "hello", "2"))
 
         self.assertTrue(main.get_conversation(conversation_id)["conversation"]["tools_enabled"])
-        main.update_conversation(conversation_id, main.ConversationPatch(tools_enabled=False))
-        self.assertFalse(main.get_conversation(conversation_id)["conversation"]["tools_enabled"])
+        main.update_conversation(conversation_id, main.ConversationPatch(tools_enabled=False, web_enabled=True))
+        saved = main.get_conversation(conversation_id)["conversation"]
+        self.assertFalse(saved["tools_enabled"])
+        self.assertTrue(saved["web_enabled"])
 
         branch = main.branch_conversation(conversation_id, message_id)
-        self.assertFalse(main.get_conversation(branch["id"])["conversation"]["tools_enabled"])
+        branched = main.get_conversation(branch["id"])["conversation"]
+        self.assertFalse(branched["tools_enabled"])
+        self.assertTrue(branched["web_enabled"])
 
     def test_thinking_contract_does_not_expose_hidden_content(self):
         main = self.main

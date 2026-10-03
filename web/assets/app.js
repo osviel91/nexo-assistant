@@ -580,10 +580,12 @@ function renderMessages() {
      const metrics = runtime.metrics || runtime;
      const summary = message.role === 'assistant' && (metrics.tokens_per_second != null || metrics.output_tokens != null || metrics.total_duration_ms != null)
        ? `<div class="message-metrics">${metrics.output_tokens != null ? `${escapeHtml(metrics.output_tokens)} tokens` : ''}${metrics.tokens_per_second != null ? ` · ${escapeHtml(metrics.tokens_per_second)} tok/s` : ''}${metrics.total_duration_ms != null ? ` · ${(Number(metrics.total_duration_ms) / 1000).toFixed(2)} s` : ''}</div>` : '';
-      const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
+       const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
+       const trace = document.documentElement.dataset.ui === 'developer' && message.role === 'assistant' && (runtime.diagnostic_error || message.trace?.length)
+         ? `<details class="runtime-diagnostic"><summary>Diagnóstico · ${escapeHtml(runtime.diagnostic_error?.code || `${message.trace.length} eventos`)}</summary>${runtime.diagnostic_error ? `<p>${escapeHtml(runtime.diagnostic_error.stage)} · ${escapeHtml(runtime.diagnostic_error.code)}</p>` : ''}<ol>${(message.trace || []).map((item) => `<li><strong>${escapeHtml(item.type || 'EVENT')}</strong> · ${escapeHtml(item.name || item.metadata?.tool || item.metadata?.model || item.type || 'runtime')} · ${escapeHtml(item.status || 'unknown')}${item.duration_ms != null ? ` · ${escapeHtml(item.duration_ms)} ms` : ''}${item.metadata?.error_code ? ` · ${escapeHtml(item.metadata.error_code)}` : ''}</li>`).join('')}</ol></details>` : '';
       const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button class="icon-button" data-copy-message="${escapeHtml(message.id)}" type="button" aria-label="Copy answer" title="Copy answer"><span aria-hidden="true">⧉</span></button><button class="icon-button" data-branch-message="${escapeHtml(message.id)}" type="button" aria-label="Branch from message" title="Branch from message"><span aria-hidden="true">⑂</span></button><button class="icon-button" data-details-message="${escapeHtml(message.id)}" type="button" aria-label="Show run details" title="Show run details"><span aria-hidden="true">ⓘ</span></button></div>` : '';
      const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
-       return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}<div class="message-content">${content}</div>${artifacts}${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
+        return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}${trace}<div class="message-content">${content}</div>${artifacts}${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
    }).join('');
     box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (!message) return; const copied = await copyText(message.content || ''); if (copied) { button.querySelector('span').textContent = '✓'; toast('Copied'); setTimeout(() => { if (button.isConnected) button.querySelector('span').textContent = '⧉'; }, 1200); } else toast('Copy failed'); }; });
     box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
@@ -684,9 +686,11 @@ async function openChat(id) {
     state.conversationId = id;
     state.executionMode = data.conversation.execution_mode || (data.conversation.agent_profile_id ? 'agent' : 'chat');
     state.toolsEnabled = Boolean(data.conversation.tools_enabled);
+    state.webEnabled = Boolean(data.conversation.web_enabled);
     state.agentProfileId = data.conversation.agent_profile_id || null;
     state.currentNotebookId = data.conversation.notebook_id || null;
     state.followingBottom = true;
+    renderToolToggles();
     renderNotebookPicker();
     renderExecutionMode();
     state.messages = data.messages;
@@ -831,6 +835,8 @@ async function send() {
   state.messages.push({ role: 'assistant', content: '', model_id: effectiveChoice.model, sources: [] });
   renderMessages();
   let answer = '';
+  let streamStage = 'connecting';
+  let failureCode = 'connection_failed';
   try {
      const chatPayload = { conversation_id: state.conversationId, provider_id: effectiveChoice.provider?.id || '', model_id: effectiveChoice.model || '', content: text, attachments };
       chatPayload.execution_mode = state.executionMode;
@@ -840,7 +846,9 @@ async function send() {
       if (state.executionMode === 'agent') chatPayload.agent_profile_id = state.agentProfileId;
       if (state.currentNotebookId !== null) chatPayload.notebook_id = state.currentNotebookId;
      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chatPayload) });
-    if (!response.ok) throw Error((await response.text()).slice(0, 300));
+     if (!response.ok) { failureCode = `http_${response.status}`; throw Error((await response.text()).slice(0, 300)); }
+     streamStage = 'streaming';
+     failureCode = 'stream_interrupted';
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -853,8 +861,9 @@ async function send() {
       for (const event of events) {
         const line = event.split('\n').find((item) => item.startsWith('data: '));
         if (!line) continue;
-         const data = JSON.parse(line.slice(6));
-         if (data.error) throw Error(data.error);
+          const data = JSON.parse(line.slice(6));
+          if (data.trace) { const message = state.messages.at(-1); message.trace ||= []; message.trace.push({ type: data.trace.type, name: data.trace.name, status: data.trace.status, duration_ms: data.trace.duration_ms, metadata: Object.fromEntries(Object.entries(data.trace.metadata || {}).filter(([key]) => ['tool', 'model', 'error_code'].includes(key))) }); }
+          if (data.error) { failureCode = 'runtime_error'; throw Error(data.error); }
          if (data.interaction) await presentInteraction(data.interaction);
          if (data.status) toast(data.message);
           if (data.thinking_delta) { const message = state.messages.at(-1); message.runtime ||= {}; message.runtime.thinking ||= { available: true, content: '' }; message.runtime.thinking.available = true; message.runtime.thinking.content += data.thinking_delta; updateStreamingThinking(message.runtime.thinking.content); }
@@ -868,9 +877,12 @@ async function send() {
     if (!answer) state.messages.pop();
     await loadChats();
   } catch (error) {
-    const reason = error.message || 'Error desconocido';
-    state.activity = null;
-    state.messages.at(-1).content = `No se pudo completar la respuesta: ${reason}`;
+     const reason = error.message || 'Error desconocido';
+     state.activity = null;
+    const message = state.messages.at(-1);
+    message.content = `No se pudo completar la respuesta: ${reason}`;
+    message.runtime ||= {};
+    message.runtime.diagnostic_error = { stage: streamStage, code: failureCode };
     renderMessages();
     toast(reason);
   } finally {
@@ -1093,7 +1105,7 @@ $('#notebook-form').onsubmit = async (event) => {
 $('#model-select').onchange = () => { updateComposerModel(); if ($('#model-select').value) savePreference('last_chat_model', $('#model-select').value); };
 document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
 document.querySelectorAll('[data-settings-tab]').forEach((button) => { button.onclick = () => { state.settingsTab = button.dataset.settingsTab; renderSettingsTabs(); }; });
-['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; renderToolToggles(); if (key === 'toolsEnabled' && state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ tools_enabled: state.toolsEnabled }) }); } catch (error) { state.toolsEnabled = !state.toolsEnabled; renderToolToggles(); toast(error.message); } }; });
+['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; const field = key === 'webEnabled' ? 'web_enabled' : 'tools_enabled'; state[key] = !state[key]; renderToolToggles(); if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ [field]: state[key] }) }); } catch (error) { state[key] = !state[key]; renderToolToggles(); toast(error.message); } }; });
 $('#notebook-picker').onchange = async (event) => {
   state.currentNotebookId = event.target.value || null;
   if (!state.conversationId) return;

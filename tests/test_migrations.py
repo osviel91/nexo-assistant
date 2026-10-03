@@ -20,13 +20,14 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("runtime_trace_events", tables)
             self.assertIn("runtime_runs", tables)
             self.assertIn("runtime_events", tables)
-            self.assertEqual(version_count, 24)
+            self.assertEqual(version_count, 25)
             self.assertIn("agent_profiles", tables)
             self.assertIn("agent_profile_tools", tables)
             self.assertIn("agent_profile_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
             self.assertIn("notebook_id", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
             self.assertIn("execution_mode", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
             self.assertIn("tools_enabled", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
+            self.assertIn("web_enabled", {row[1] for row in connection.execute("PRAGMA table_info(conversations)")})
             self.assertIn("message_citations", tables)
             self.assertIn("mcp_server_credentials", tables)
             self.assertIn("agent_runtime_settings", tables)
@@ -86,7 +87,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(rows["agent"][1], "agent")
             self.assertEqual(rows["chat"][1], "chat")
             self.assertEqual(rows["agent"][2], "Agent chat")
-            self.assertEqual(version_count, 24)
+            self.assertEqual(version_count, 25)
 
     def test_stage9a_migration_backfills_existing_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -140,6 +141,6 @@ class MigrationTests(unittest.TestCase):
                 version = connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]
                 source = connection.execute("SELECT indexing_status,chunk_count,vector_count FROM notebook_sources WHERE id='s'").fetchone()
                 identity = connection.execute("SELECT COUNT(*) FROM vector_index_identities WHERE document_id='d'").fetchone()[0]
-            self.assertEqual(version, 24)
+            self.assertEqual(version, 25)
             self.assertEqual(tuple(source), ("not_indexed", None, None))
             self.assertEqual(identity, 0)

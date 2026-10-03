@@ -524,6 +524,7 @@ class ConversationPatch(BaseModel):
     notebook_id: str | None = None
     execution_mode: Literal["chat", "agent"] | None = None
     tools_enabled: bool | None = None
+    web_enabled: bool | None = None
 
 
 class AgentProfileIn(BaseModel):
@@ -1262,7 +1263,7 @@ def delete_model(pid: str, model_id: str):
 
 @app.get("/api/conversations")
 def conversations():
-    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled FROM conversations ORDER BY updated_at DESC, id DESC").fetchall()
+    with db() as c: rows = c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled,web_enabled FROM conversations ORDER BY updated_at DESC, id DESC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -1323,9 +1324,10 @@ def update_conversation(cid: str, item: ConversationPatch):
         values.update({"agent_profile_id": profile_id} if "agent_profile_id" in item.model_fields_set or mode == "chat" else {})
         values.update({"notebook_id": item.notebook_id} if "notebook_id" in item.model_fields_set else {})
         values.update({"tools_enabled": int(item.tools_enabled)} if "tools_enabled" in item.model_fields_set and item.tools_enabled is not None else {})
+        values.update({"web_enabled": int(item.web_enabled)} if "web_enabled" in item.model_fields_set and item.web_enabled is not None else {})
         if values:
             c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in values)},updated_at=? WHERE id=?", (*values.values(), now(), cid))
-        return dict(c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled FROM conversations WHERE id=?", (cid,)).fetchone())
+        return dict(c.execute("SELECT id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled,web_enabled FROM conversations WHERE id=?", (cid,)).fetchone())
 
 
 @app.post("/api/conversations/{cid}/branch/{message_id}")
@@ -1339,8 +1341,8 @@ def branch_conversation(cid: str, message_id: str):
             raise HTTPException(404, "Message not found")
         branch_id = str(uuid.uuid4())
         timestamp = now()
-        connection.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled) VALUES(?,?,?,?,?,?,?,?)",
-                           (branch_id, f"Branch · {conversation['title']}", timestamp, timestamp, conversation["execution_mode"], conversation["agent_profile_id"], conversation["notebook_id"], conversation["tools_enabled"]))
+        connection.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled,web_enabled) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (branch_id, f"Branch · {conversation['title']}", timestamp, timestamp, conversation["execution_mode"], conversation["agent_profile_id"], conversation["notebook_id"], conversation["tools_enabled"], conversation["web_enabled"]))
         messages = connection.execute("SELECT * FROM messages WHERE conversation_id=? AND created_at<=? ORDER BY created_at, id", (cid, selected["created_at"])).fetchall()
         for message in messages:
             new_id = str(uuid.uuid4())
@@ -1368,6 +1370,7 @@ async def chat(req: ChatIn):
         # Existing conversations own their execution mode; the request can only choose it for a new conversation.
         mode = conv["execution_mode"] if conv else (req.execution_mode if "execution_mode" in req.model_fields_set else ("agent" if req.agent_profile_id else "chat"))
         tools_enabled = bool(req.tools_enabled) if "tools_enabled" in req.model_fields_set and req.tools_enabled is not None else bool(conv["tools_enabled"]) if conv else True
+        web_enabled = bool(req.web_enabled) if "web_enabled" in req.model_fields_set and req.web_enabled is not None else bool(conv["web_enabled"]) if conv else True
         profile_id = req.agent_profile_id if "agent_profile_id" in req.model_fields_set else (conv["agent_profile_id"] if conv else None)
         if mode == "agent" and not profile_id:
             raise HTTPException(400, "agent_profile_required")
@@ -1409,11 +1412,11 @@ async def chat(req: ChatIn):
                              KnowledgeOutcome.KNOWLEDGE_UNAVAILABLE if not knowledge_available else None)
         if not conv:
             title = req.content.strip().replace("\n", " ")[:60] or "New chat"
-            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled) VALUES(?,?,?,?,?,?,?,?)", (cid, title, now(), now(), mode, profile_id, notebook_id, int(tools_enabled)))
-        elif "agent_profile_id" in req.model_fields_set or "notebook_id" in req.model_fields_set or "execution_mode" in req.model_fields_set or "tools_enabled" in req.model_fields_set:
-            values = {"execution_mode": mode, "agent_profile_id": profile_id, "notebook_id": notebook_id, "tools_enabled": int(tools_enabled)}
+            c.execute("INSERT INTO conversations(id,title,created_at,updated_at,execution_mode,agent_profile_id,notebook_id,tools_enabled,web_enabled) VALUES(?,?,?,?,?,?,?,?,?)", (cid, title, now(), now(), mode, profile_id, notebook_id, int(tools_enabled), int(web_enabled)))
+        elif "agent_profile_id" in req.model_fields_set or "notebook_id" in req.model_fields_set or "execution_mode" in req.model_fields_set or "tools_enabled" in req.model_fields_set or "web_enabled" in req.model_fields_set:
+            values = {"execution_mode": mode, "agent_profile_id": profile_id, "notebook_id": notebook_id, "tools_enabled": int(tools_enabled), "web_enabled": int(web_enabled)}
             fields = [key for key in values if key in req.model_fields_set]
-            if "execution_mode" in req.model_fields_set and mode == "chat": fields = ["execution_mode", "agent_profile_id"] + (["notebook_id"] if "notebook_id" in req.model_fields_set else []) + (["tools_enabled"] if "tools_enabled" in req.model_fields_set else [])
+            if "execution_mode" in req.model_fields_set and mode == "chat": fields = ["execution_mode", "agent_profile_id"] + (["notebook_id"] if "notebook_id" in req.model_fields_set else []) + (["tools_enabled"] if "tools_enabled" in req.model_fields_set else []) + (["web_enabled"] if "web_enabled" in req.model_fields_set else [])
             c.execute(f"UPDATE conversations SET {', '.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?", (*(values[key] for key in fields), now(), cid))
         selected_provider_id = profile_config.provider_id if profile_config else req.provider_id
         selected_model_id = profile_config.model_id if profile_config else req.model_id
@@ -1596,7 +1599,6 @@ async def chat(req: ChatIn):
                     runtime_snapshot.update(retrieval_metadata)
                     _update_runtime_metadata(run_id, runtime_snapshot)
                 catalog = module_registry.tool_catalog_view()
-                web_enabled = req.web_enabled if "web_enabled" in req.model_fields_set else True
                 registered_tool_names = [entry.name for entry in catalog.entries()]
                 allowed_tools = {entry.name for entry in catalog.entries() if (entry.name == "web_search" and web_enabled) or (entry.name != "web_search" and tools_enabled)}
                 # Legacy Agent tool selections predate native tools; keep them
