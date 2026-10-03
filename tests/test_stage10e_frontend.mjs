@@ -43,4 +43,7 @@ assert.match(app, /state\.toolsEnabled = Boolean\(data\.conversation\.tools_enab
 assert.doesNotMatch(app, /state\.toolsEnabled = mode === 'agent'/);
 assert.match(app, /Unclassified \(blocked\)/);
 assert.match(app, /Blocked until classified/);
-assert.equal((app.match(/state\.busy = false;\s*\$\('#send-button'\)\.disabled = false;\s*renderMessages\(\);/g) || []).length, 2);
+assert.equal((app.match(/state\.busy = false;\s*\$\('#send-button'\)\.disabled = false;\s*renderMessages\(\);/g) || []).length, 1);
+assert.match(app, /approvalBusy: false/);
+assert.match(app, /approval\.status === 'pending'.*state\.approvalBusy/);
+assert.match(app, /state\.approvalBusy = false;\s*\$\('#send-button'\)\.disabled = state\.busy;\s*renderMessages\(\);/);

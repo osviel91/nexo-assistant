@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: true, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], approvals: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: true, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], approvals: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, approvalBusy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -687,13 +687,13 @@ function renderApproval(approval) {
   const details = Object.entries(summary.details || {}).map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(value)}</div>`).join('');
   const warning = summary.action === 'destructive' ? '<p class="approval-warning">This action may be destructive.</p>' : summary.action === 'unknown' ? '<p class="approval-warning">Tool behavior has not been classified.</p>' : '';
   const status = approval.status === 'pending' ? 'Waiting for approval' : approval.status === 'executing' ? 'Executing approved action' : approval.status === 'executed' ? 'Executed' : approval.status === 'rejected' ? 'Rejected' : approval.status === 'failed' ? 'Not executed' : approval.status;
-  const actions = approval.status === 'pending' ? `<div class="approval-actions"><button type="button" class="text-button" ${state.busy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="reject">${state.busy ? 'Processing…' : 'Reject'}</button><button type="button" class="primary-button" ${state.busy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="approve">${state.busy ? 'Processing…' : 'Approve exact call'}</button></div>` : '';
+  const actions = approval.status === 'pending' ? `<div class="approval-actions"><button type="button" class="text-button" ${state.approvalBusy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="reject">${state.approvalBusy ? 'Processing…' : 'Reject'}</button><button type="button" class="primary-button" ${state.approvalBusy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="approve">${state.approvalBusy ? 'Processing…' : 'Approve exact call'}</button></div>` : '';
   return `<section class="approval-card" aria-label="Tool approval"><strong>${escapeHtml(summary.tool_id || approval.tool_id)}</strong><span class="approval-status" role="status">${escapeHtml(status)}</span>${warning}${details ? `<div class="approval-details">${details}</div>` : ''}${approval.safe_error_category ? `<small>${escapeHtml(approval.safe_error_category)}</small>` : ''}${actions}</section>`;
 }
 
 async function resolveApproval(id, decision) {
-  if (state.busy) return;
-  state.busy = true;
+  if (state.approvalBusy) return;
+  state.approvalBusy = true;
   $('#send-button').disabled = true;
   renderMessages();
   let answer = '';
@@ -744,8 +744,8 @@ async function resolveApproval(id, decision) {
     }
     toast(error.message || 'The approval status could not be confirmed. Refresh the conversation to check.');
   } finally {
-    state.busy = false;
-    $('#send-button').disabled = false;
+    state.approvalBusy = false;
+    $('#send-button').disabled = state.busy;
     renderMessages();
   }
 }
@@ -874,7 +874,7 @@ async function presentInteraction(interaction) {
 }
 
 async function send() {
-  if (state.busy) return;
+  if (state.busy || state.approvalBusy) return;
   const text = $('#prompt').value.trim();
   const choice = selected();
   const visibleNotebookId = $('#notebook-picker')?.value || null;

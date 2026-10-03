@@ -36,6 +36,13 @@ def normalized_schema(schema: Any) -> dict[str, Any]:
     return safe
 
 
+def inferred_action(name: str) -> str:
+    words = re.split(r"[_\-\s]+", re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name).lower())
+    if set(words) & {"create", "write", "update", "delete", "remove", "set", "patch", "insert", "upsert", "execute", "run", "send", "move", "rename"}:
+        return "unknown"
+    return "read_only" if words and words[0] in {"search", "query", "get", "list", "read", "fetch", "find", "lookup", "describe", "status", "count", "exists"} else "unknown"
+
+
 class MCPManager:
     """MCP transport and discovery boundary; persisted metadata is supplied by callbacks."""
 
@@ -95,7 +102,12 @@ class MCPManager:
                 identity = f"mcp.{server['slug']}.{name}"
                 annotations = get("annotations", {})
                 annotation = annotations.get if isinstance(annotations, dict) else lambda key, default=None: getattr(annotations, key, default)
-                action = "read_only" if annotation("readOnlyHint", annotation("read_only_hint")) is True else "unknown"
+                if isinstance(annotations, dict):
+                    has_read_hint = "readOnlyHint" in annotations or "read_only_hint" in annotations
+                else:
+                    has_read_hint = hasattr(annotations, "readOnlyHint") or hasattr(annotations, "read_only_hint")
+                read_hint = annotation("readOnlyHint", annotation("read_only_hint"))
+                action = "read_only" if read_hint is True else "unknown" if has_read_hint else inferred_action(name)
                 tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema), "action": action})
             self.repository.replace_tools(server["id"], tools)
             self.repository.status(server["id"], "connected", None)

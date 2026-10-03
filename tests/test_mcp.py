@@ -137,15 +137,24 @@ class MCPTests(unittest.TestCase):
         self.assertEqual(result["structured_data"], {"rows": [[1]]})
         self.assertEqual(result["content"], "ok")
 
-    def test_refresh_uses_explicit_mcp_read_only_hint(self):
+    def test_refresh_allows_obvious_queries_but_not_mutations_or_explicit_false_hint(self):
         repo, registry = Repo(), ToolRegistry()
-        client = FakeClient([{"name": "search", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}}])
+        client = FakeClient([
+            {"name": "search", "inputSchema": {"type": "object"}},
+            {"name": "query_database", "inputSchema": {"type": "object"}},
+            {"name": "update_status", "inputSchema": {"type": "object"}},
+            {"name": "search_and_delete", "inputSchema": {"type": "object"}},
+            {"name": "search_with_false_hint", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": False}},
+            {"name": "other", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}},
+        ])
         manager = MCPManager(repo, lambda *_: client)
         manager.register(ModuleContext(None, {}, registry))
 
         asyncio.run(manager.refresh(repo.server_value))
 
-        self.assertEqual(repo.items[0]["action"], "read_only")
+        actions = {tool["remote_name"]: tool["action"] for tool in repo.items}
+        self.assertEqual(actions, {"search": "read_only", "query_database": "read_only", "update_status": "unknown",
+                                   "search_and_delete": "unknown", "search_with_false_hint": "unknown", "other": "read_only"})
 
     def test_refresh_failure_keeps_stale_snapshot_but_unexposes_tools(self):
         repo = Repo()
