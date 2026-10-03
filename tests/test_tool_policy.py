@@ -91,7 +91,7 @@ class ToolPolicyTests(unittest.TestCase):
         execute(registry, adapter, set())
         self.assertEqual(adapter.payloads[0]["tools"], [])
 
-    def test_unknown_action_is_blocked_with_real_settings_path(self):
+    def test_unknown_action_fails_closed_without_interaction_support(self):
         seen = []
         registry = self.native_registry(seen)
         tool = registry.context.tools._tools["visible"]
@@ -103,11 +103,79 @@ class ToolPolicyTests(unittest.TestCase):
         events = execute(registry, adapter, requested={"visible"})
         self.assertEqual(seen, [])
         response = adapter.payloads[1]["messages"][-1]["content"]
-        self.assertIn("tool_policy_blocked", response)
-        self.assertIn("Settings > Tools", response)
-        self.assertNotIn("run_id", response)
-        self.assertIn("no interactive approval flow", response)
+        self.assertIn("approval_unavailable", response)
         self.assertEqual(events[-1]["answer"], "approval needed")
+
+    def test_approval_pauses_edits_arguments_and_runs_only_after_consent(self):
+        seen = []
+        registry = ModuleRegistry(FastAPI())
+
+        async def handler(_context, arguments):
+            seen.append(arguments)
+            return {"ok": True}
+
+        registry.context.tools.register(ToolDefinition("vault.write", "Write a note", {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False,
+        }, handler, source="mcp", module_id="mcp", action="mutating"))
+        adapter = Adapter([
+            [{"tool_calls": [{"id": "call", "function": {"name": "vault.write", "arguments": '{"path":"initial.md"}'}}]}],
+            [{"content": "finished"}],
+        ])
+
+        async def collect():
+            effective = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
+            request = AgentRunRequest(adapter, [{"role": "user", "content": "write"}], effective, ToolExecutor(), ToolExecutionContext("conversation", "provider", "model", 0), interaction_handler=True)
+            stream = AgentRuntime().stream(request)
+            events = []
+            event = await stream.__anext__()
+            while True:
+                if "interaction" in event:
+                    events.append(event)
+                    self.assertEqual(event["interaction"]["kind"], "tool_approval")
+                    self.assertEqual(event["interaction"]["payload"]["fields"][0]["default"], {"path": "initial.md"})
+                    self.assertEqual(seen, [])
+                    event = await stream.asend({"approved": True, "values": {"path": "edited.md"}})
+                else:
+                    events.append(event)
+                    try:
+                        event = await stream.__anext__()
+                    except StopAsyncIteration:
+                        return events
+
+        events = asyncio.run(collect())
+        self.assertEqual(seen, [{"path": "edited.md"}])
+        self.assertEqual(events[-1]["answer"], "finished")
+
+    def test_agent_can_request_structured_user_input(self):
+        registry = ModuleRegistry(FastAPI())
+        from app.native_tools import register_native_tools
+        register_native_tools(registry.context)
+        adapter = Adapter([
+            [{"tool_calls": [{"id": "ask", "function": {"name": "native.request_user_input", "arguments": '{"dialog":{"title":"Choose","fields":[{"id":"choice","label":"Choose","type":"select","required":true,"options":["A","B"]}]}}'}}]}],
+            [{"content": "selected"}],
+        ])
+
+        async def collect():
+            effective = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
+            request = AgentRunRequest(adapter, [{"role": "user", "content": "choose"}], effective, ToolExecutor(), ToolExecutionContext("conversation", "provider", "model", 0), interaction_handler=True)
+            stream = AgentRuntime().stream(request)
+            events = []
+            event = await stream.__anext__()
+            while True:
+                if "interaction" in event:
+                    events.append(event)
+                    self.assertEqual(event["interaction"]["kind"], "user_input")
+                    event = await stream.asend({"approved": True, "values": {"choice": "B"}})
+                else:
+                    events.append(event)
+                    try:
+                        event = await stream.__anext__()
+                    except StopAsyncIteration:
+                        return events
+
+        events = asyncio.run(collect())
+        self.assertIn('"choice":"B"', adapter.payloads[1]["messages"][-1]["content"])
+        self.assertEqual(events[-1]["answer"], "selected")
 
 
 if __name__ == "__main__":

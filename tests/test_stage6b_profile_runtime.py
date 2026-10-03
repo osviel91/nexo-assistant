@@ -83,6 +83,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
         main.module_registry.context.tools.register(ToolDefinition("hidden", "Hidden", {"type": "object"}, visible, "module", "hidden", action="read_only"))
         main.module_registry.context.tools.register(ToolDefinition("native.get_current_datetime", "Clock", {"type": "object"}, visible, "native", "native", action="read_only"))
         main.module_registry.context.tools.register(ToolDefinition("native.render_artifact", "Renderer", {"type": "object"}, visible, "native", "native", action="read_only"))
+        main.module_registry.context.tools.register(ToolDefinition("native.request_user_input", "User input", {"type": "object"}, visible, "native", "native", action="read_only"))
         main.module_registry.context.tools.register(ToolDefinition("aemet.opendata", "Weather", {"type": "object"}, visible, "module", "aemet", action="read_only"))
         main.module_registry.context.tools.register(ToolDefinition("mcp.demo.query", "MCP", {"type": "object"}, visible, "mcp", "mcp", action="read_only"))
         main.agent_profiles = AgentProfileService(AgentProfileRepository(main.db, main.now), main.module_registry.tool_catalog)
@@ -141,7 +142,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["model"], "m")
             self.assertEqual(payload["temperature"], 0.7)
             self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})
-            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible", "native.get_current_datetime", "native.render_artifact", "aemet.opendata", "mcp.demo.query"])
+            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible", "native.get_current_datetime", "native.render_artifact", "native.request_user_input", "aemet.opendata", "mcp.demo.query"])
             done = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done")][0]
             self.assertEqual(done["model_id"], "m")
             self.assertEqual(done["runtime"]["agent_profile_name"], "Research")

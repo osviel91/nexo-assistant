@@ -15,6 +15,7 @@ from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
 from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext, KnowledgeOutcome, knowledge_outcome_instruction
 from app.tool_results import ToolResultPipeline
+from app.interactions import approval_dialog, normalize_dialog, validate_schema, validate_values
 
 logger = logging.getLogger("nexo.agent")
 
@@ -53,6 +54,7 @@ class AgentRunRequest:
     effective_configuration: "EffectiveRunConfiguration | None" = None
     knowledge_outcome: KnowledgeOutcome | None = None
     request_started_at: float | None = None
+    interaction_handler: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,8 @@ class AgentRuntime:
                 guidance.append("For relative dates such as today, the next few days, or the last N days, call native.get_current_datetime first.")
             if "native.render_artifact" in effective_tools.names:
                 guidance.append("When a chart or table is requested, use native.render_artifact with evidence-backed data after gathering it. If it returns a validation error, correct the exact reported issue and retry at most once; do not switch through alternate artifact types or claim the visualization service is unavailable. If the corrected attempt fails, explain the actual error and provide the data in text.")
+            if "native.request_user_input" in effective_tools.names:
+                guidance.append("When you need a choice, preference, or clarification before proceeding, call native.request_user_input with a concise structured dialog instead of asking in prose. The user can edit supplied values. Tool calls that are not read-only may also pause for explicit approval.")
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": " ".join(guidance)})
         if grounded_context is not None:
             grounding = f"{GROUNDING_INSTRUCTIONS}\n\n{grounded_context.serialize()}"
@@ -217,15 +221,6 @@ class AgentRuntime:
                 result = None
                 definition = effective_tools.definition(call["name"])
                 decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
-                if decision != PolicyDecision.ALLOW:
-                    signature = (call["name"], call["arguments"])
-                    result = {"error": {"code": "tool_policy_blocked", "tool": call["name"], "action": definition.action if definition else None,
-                              "message": "This tool is blocked because it is not classified as read-only. NEXO has no interactive approval flow. To enable a read-only tool, set its action to Read only in Settings > Tools; do not do this for tools that can modify data."}}
-                    status = "approval_required"
-                    if signature in blocked_calls:
-                        result = {"error": {"code": "repeated_approval_required", "message": "The same policy-blocked tool call was requested again; execution stopped."}}
-                        status = "repeated_approval_required"
-                    blocked_calls.add(signature)
                 if call["name"] == "native.render_artifact":
                     if artifact_render_failures >= 2:
                         result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ha fallado dos veces seguidas. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
@@ -240,7 +235,50 @@ class AgentRuntime:
                         status = "invalid_arguments"
                     else:
                         try:
-                            result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                            if call["name"] == "native.request_user_input":
+                                dialog = normalize_dialog(arguments.get("dialog"))
+                                if not request.interaction_handler:
+                                    result = {"error": {"code": "interaction_unavailable", "message": "User interaction is unavailable in this run."}}
+                                else:
+                                    response = yield {"interaction": {"kind": "user_input", "payload": dialog, "validation_schema": {"fields": dialog["fields"]}}}
+                                    if not response or not response.get("approved"):
+                                        if response and response.get("error"):
+                                            result = {"error": {"code": "interaction_expired", "message": "The user interaction expired before a response was received."}}
+                                        else:
+                                            result = {"cancelled": True, "content": "The user cancelled this question."}
+                                    else:
+                                        values = validate_values(dialog["fields"], response.get("values"))
+                                        result = {"content": "User response received.", "structured_data": values}
+                            elif decision != PolicyDecision.ALLOW:
+                                signature = (call["name"], call["arguments"])
+                                if signature in blocked_calls:
+                                    result = {"error": {"code": "repeated_approval_required", "message": "The same tool call was denied or blocked again; execution stopped."}}
+                                    status = "repeated_approval_required"
+                                elif not request.interaction_handler:
+                                    blocked_calls.add(signature)
+                                    result = {"error": {"code": "approval_unavailable", "message": "This action requires explicit user approval, but interaction is unavailable in this run."}}
+                                    status = "approval_required"
+                                else:
+                                    dialog = approval_dialog(call["name"], definition.description, arguments)
+                                    response = yield {"interaction": {"kind": "tool_approval", "tool": call["name"], "payload": dialog, "validation_schema": definition.parameters}}
+                                    if not response or not response.get("approved"):
+                                        if response and response.get("error"):
+                                            blocked_calls.add(signature)
+                                            result = {"error": {"code": "interaction_expired", "message": "The approval request expired before a response was received."}}
+                                            status = "approval_expired"
+                                        else:
+                                            blocked_calls.add(signature)
+                                            result = {"error": {"code": "tool_denied", "message": "The user denied this tool call."}}
+                                            status = "tool_denied"
+                                    else:
+                                        arguments = response.get("values", {})
+                                        validate_schema(arguments, definition.parameters)
+                                        result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                            else:
+                                result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                            result = {"error": {"code": "invalid_arguments", "message": str(exc)[:300]}}
+                            status = "invalid_arguments"
                         except ToolNotAvailableError:
                             result = {"error": {"code": "tool_not_available", "message": "La herramienta no está disponible para esta ejecución."}}
                             status = "tool_not_available"

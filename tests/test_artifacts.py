@@ -19,7 +19,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_native_tools_register_and_datetime_timezone(self):
         tools = self.context.tools.registered_tools()
-        self.assertEqual({tool.name for tool in tools}, {"native.get_current_datetime", "native.render_artifact"})
+        self.assertEqual({tool.name for tool in tools}, {"native.get_current_datetime", "native.render_artifact", "native.request_user_input"})
         result = asyncio.run(self.context.tools.invoke("native.get_current_datetime", self.execution, {"timezone": "Europe/Madrid"}))
         self.assertEqual(result["iso"], "2026-09-29T23:42:18+02:00")
         self.assertEqual(result["weekday"], "Tuesday")

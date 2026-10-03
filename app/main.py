@@ -10,7 +10,7 @@ import sqlite3
 import time
 import uuid
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,7 +18,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from app.agent import AgentRunRequest, AgentRuntime, AgentRuntimeLimits, EffectiveRunConfiguration
 from app.agent_model import OpenAICompatibleModelAdapter
@@ -47,6 +47,7 @@ from app.grounding import GroundedContext, KnowledgeOutcome, cited_results
 from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, bootstrap_values, validate_configuration
 from app.chunking import ChunkingConfig
 from app.benchmark import RetrievalBenchmarkService
+from app.interactions import validate_schema, validate_values
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -426,6 +427,77 @@ class ChatIn(BaseModel):
     web_enabled: bool | None = None
     tools_enabled: bool | None = None
     thinking: dict[str, Any] | None = None
+
+
+class RuntimeInteractionInput(BaseModel):
+    approved: StrictBool
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+def create_runtime_interaction(run_id: str, conversation_id: str, event: dict[str, Any]) -> str:
+    interaction_id = str(uuid.uuid4())
+    created = datetime.now(timezone.utc)
+    payload = event["payload"]
+    schema = event.get("validation_schema", {})
+    with db() as c:
+        c.execute("""INSERT INTO runtime_interactions
+            (id,run_id,conversation_id,kind,payload,validation_schema,status,created_at,expires_at)
+            VALUES(?,?,?,?,?,?, 'pending', ?, ?)""",
+            (interaction_id, run_id, conversation_id, event["kind"], json.dumps(payload), json.dumps(schema),
+             created.isoformat(), (created + timedelta(minutes=5)).isoformat()))
+    return interaction_id
+
+
+async def wait_runtime_interaction(interaction_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        with db() as c:
+            row = c.execute("SELECT status,response,expires_at FROM runtime_interactions WHERE id=?", (interaction_id,)).fetchone()
+            if not row:
+                return {"approved": False}
+            if row["status"] != "pending":
+                if row["status"] == "expired":
+                    return {"approved": False, "error": "expired"}
+                return json.loads(row["response"] or '{"approved":false}')
+            if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+                c.execute("UPDATE runtime_interactions SET status='expired',completed_at=? WHERE id=? AND status='pending'", (now(), interaction_id))
+                return {"approved": False, "error": "expired"}
+        await asyncio.sleep(0.25)
+    with db() as c:
+        c.execute("UPDATE runtime_interactions SET status='expired',completed_at=? WHERE id=? AND status='pending'", (now(), interaction_id))
+    return {"approved": False, "error": "expired"}
+
+
+@app.post("/api/interactions/{interaction_id}")
+def respond_to_runtime_interaction(interaction_id: str, response: RuntimeInteractionInput):
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT * FROM runtime_interactions WHERE id=?", (interaction_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "interaction_not_found")
+        if row["status"] != "pending":
+            raise HTTPException(409, "interaction_already_resolved")
+        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+            c.execute("UPDATE runtime_interactions SET status='expired',completed_at=? WHERE id=? AND status='pending'", (now(), interaction_id))
+            c.commit()
+            raise HTTPException(410, "interaction_expired")
+        schema = json.loads(row["validation_schema"] or "{}")
+        try:
+            if response.approved:
+                if row["kind"] == "tool_approval":
+                    values = validate_values([{"id": "arguments", "label": "Tool arguments", "type": "json", "required": True}], response.values)
+                    values = values["arguments"]
+                    validate_schema(values, schema)
+                else:
+                    values = validate_values(schema.get("fields", []), response.values)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(422, str(error)) from error
+        status = "approved" if response.approved else "denied"
+        payload = json.dumps({"approved": response.approved, "values": values if response.approved else {}})
+        cursor = c.execute("UPDATE runtime_interactions SET status=?,response=?,completed_at=? WHERE id=? AND status='pending'", (status, payload, now(), interaction_id))
+        if not cursor.rowcount:
+            raise HTTPException(409, "interaction_already_resolved")
+    return {"ok": True}
 
 
 def resolve_notebook_id(request: ChatIn, conversation: sqlite3.Row | None) -> str | None:
@@ -1586,24 +1658,31 @@ async def chat(req: ChatIn):
                                                 profile_config.profile_name if profile_config else None,
                                                 runtime_snapshot, grounded_context, effective_configuration,
                                                 knowledge_outcome=knowledge_outcome,
-                                                request_started_at=request_started_at)
-                async for event in run_agent.stream(run_request):
+                                                request_started_at=request_started_at, interaction_handler=True)
+                runtime_stream = run_agent.stream(run_request)
+                try:
+                    event = await runtime_stream.__anext__()
+                except StopAsyncIteration:
+                    event = None
+                while event is not None:
+                    if "interaction" in event:
+                        interaction = event["interaction"]
+                        interaction_id = create_runtime_interaction(run_id, cid, interaction)
+                        yield "data: " + json.dumps({"interaction": {"id": interaction_id, "kind": interaction["kind"], "tool": interaction.get("tool"), "payload": interaction["payload"]}}) + "\n\n"
+                        event = await runtime_stream.asend(await wait_runtime_interaction(interaction_id))
+                        continue
                     if "trace" in event:
                         trace = event["trace"]
                         _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))
                         yield "data: " + json.dumps({"trace": trace}) + "\n\n"
-                        continue
-                    if "activity" in event:
+                    elif "activity" in event:
                         yield "data: " + json.dumps({"activity": event["activity"]}) + "\n\n"
-                        continue
-                    if "thinking_delta" in event:
+                    elif "thinking_delta" in event:
                         yield "data: " + json.dumps({"thinking_delta": event["thinking_delta"]}) + "\n\n"
-                        continue
-                    if "artifact" in event:
+                    elif "artifact" in event:
                         artifacts.append(event["artifact"])
                         yield "data: " + json.dumps({"artifact": event["artifact"]}) + "\n\n"
-                        continue
-                    if "delta" in event:
+                    elif "delta" in event:
                         yield "data: " + json.dumps({"delta": event["delta"]}) + "\n\n"
                     elif "status" in event:
                         yield "data: " + json.dumps({"status": event["status"], "message": event["message"]}) + "\n\n"
@@ -1626,6 +1705,10 @@ async def chat(req: ChatIn):
                         if not execution_future.done():
                             execution_future.set_result(execution)
                         run_status = "completed"
+                    try:
+                        event = await runtime_stream.__anext__()
+                    except StopAsyncIteration:
+                        break
             notebook_citations = cited_results(answer, grounded_context) if grounded_context else []
             cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             sources = [source for index, source in enumerate(sources, 1) if index in cited]
@@ -1651,6 +1734,8 @@ async def chat(req: ChatIn):
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
         finally:
             _finish_runtime_run(run_id, locals().get("run_status", "failed"))
+            with db() as c:
+                c.execute("DELETE FROM runtime_interactions WHERE run_id=?", (run_id,))
             if not execution_future.done():
                 execution_future.set_result({"tools_used": [], "tool_rounds": 0, "web_search_used": False})
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})

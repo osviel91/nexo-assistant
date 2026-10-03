@@ -225,10 +225,11 @@ class ChatToolTests(unittest.TestCase):
                 main.module_registry.context.tools._tools.clear()
                 main.module_registry.context.tools._tools.update(old_tools)
 
-        self.assertCountEqual(research_tools, ["web_search", "native.get_current_datetime", "native.render_artifact"])
-        self.assertCountEqual(restricted_tools, ["native.get_current_datetime", "native.render_artifact"])
-        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[2]["tools"]], ["native.get_current_datetime", "native.render_artifact"])
-        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[3]["tools"]], ["web_search", "native.get_current_datetime", "native.render_artifact"])
+        native = ["native.get_current_datetime", "native.render_artifact", "native.request_user_input"]
+        self.assertCountEqual(research_tools, ["web_search", *native])
+        self.assertCountEqual(restricted_tools, native)
+        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[2]["tools"]], native)
+        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[3]["tools"]], ["web_search", *native])
         self.assertEqual(snapshot["max_tool_calls"], 12)
         self.assertEqual(snapshot["agent_profile_name"], "Research")
         self.assertEqual(snapshot["effective_tool_names"], historical["effective_tool_names"])

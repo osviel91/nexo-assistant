@@ -24,7 +24,9 @@ async function api(path, options = {}) {
   if (!response.ok) {
     let detail = await response.text();
     try { detail = JSON.parse(detail).detail || detail; } catch { /* plain error */ }
-    throw Error(typeof detail === 'string' ? detail : 'La operación no pudo completarse.');
+    const error = Error(typeof detail === 'string' ? detail : 'La operación no pudo completarse.');
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -707,6 +709,98 @@ function renderAttachments() {
   document.querySelectorAll('.attachment-chip button').forEach((button) => { button.onclick = () => { state.attachments.splice(Number(button.dataset.index), 1); renderAttachments(); }; });
 }
 
+function interactionOption(value) { return JSON.stringify(value); }
+function renderInteractionField(field) {
+  const label = document.createElement('label');
+  label.className = 'interaction-field';
+  const caption = document.createElement('span');
+  caption.textContent = field.label + (field.required ? ' *' : '');
+  label.append(caption);
+  let control;
+  if (field.type === 'textarea' || field.type === 'json') {
+    control = document.createElement('textarea');
+    control.rows = field.type === 'json' ? 5 : 3;
+    if (field.type === 'json' && field.default != null) control.value = typeof field.default === 'string' ? field.default : JSON.stringify(field.default, null, 2);
+    else control.value = field.default ?? '';
+  } else if (field.type === 'select' || field.type === 'multiselect') {
+    control = document.createElement('select');
+    control.multiple = field.type === 'multiselect';
+    if (field.type === 'select' && !field.required) control.add(new Option('—', ''));
+    for (const option of field.options || []) {
+      const value = interactionOption(option.value);
+      control.add(new Option(option.label, value));
+      if ((field.type === 'multiselect' ? field.default || [] : [field.default]).some((item) => interactionOption(item) === value)) control.options[control.options.length - 1].selected = true;
+    }
+  } else {
+    control = document.createElement('input');
+    control.type = field.type === 'boolean' ? 'checkbox' : field.type === 'integer' || field.type === 'number' ? 'number' : 'text';
+    if (control.type === 'checkbox') control.checked = Boolean(field.default);
+    else if (field.default != null) control.value = field.default;
+    if (control.type === 'number') { if (field.type === 'integer') control.step = '1'; if (field.min != null) control.min = field.min; if (field.max != null) control.max = field.max; }
+    if (field.placeholder) control.placeholder = field.placeholder;
+  }
+  control.dataset.fieldId = field.id;
+  control.required = Boolean(field.required) && field.type !== 'boolean' && field.type !== 'multiselect' && field.type !== 'json';
+  label.append(control);
+  if (field.help) { const help = document.createElement('small'); help.textContent = field.help; label.append(help); }
+  return label;
+}
+
+async function presentInteraction(interaction) {
+  const dialog = $('#interaction-dialog');
+  const form = $('#interaction-form');
+  $('#interaction-title').textContent = interaction.payload.title;
+  $('#interaction-message').textContent = interaction.payload.message || '';
+  $('#interaction-tool').hidden = interaction.kind !== 'tool_approval';
+  $('#interaction-tool').textContent = interaction.tool ? `Tool: ${interaction.tool}` : '';
+  $('#interaction-submit').textContent = interaction.payload.submit_label || (interaction.kind === 'tool_approval' ? 'Approve and run' : 'Continue');
+  $('#interaction-fields').replaceChildren(...(interaction.payload.fields || []).map(renderInteractionField));
+  dialog.showModal();
+  let settled = false;
+  return new Promise((resolve) => {
+    const finish = async (approved) => {
+      if (settled) return;
+      settled = true;
+      try {
+        const values = {};
+        for (const control of form.querySelectorAll('[data-field-id]')) {
+          const field = (interaction.payload.fields || []).find((item) => item.id === control.dataset.fieldId);
+          if (control.type === 'checkbox') values[field.id] = control.checked;
+          else if (control.multiple) values[field.id] = [...control.selectedOptions].map((option) => JSON.parse(option.value));
+          else if (field.type === 'json' && control.value.trim()) values[field.id] = control.value;
+          else if (control.tagName === 'SELECT') values[field.id] = control.value === '' ? '' : JSON.parse(control.value);
+          else if (control.type === 'number' && control.value !== '') values[field.id] = field.type === 'integer' ? Number.parseInt(control.value, 10) : Number(control.value);
+          else if (control.value !== '') values[field.id] = control.value;
+        }
+        await api(`/interactions/${encodeURIComponent(interaction.id)}`, { method: 'POST', body: JSON.stringify({ approved, values }) });
+        form.removeEventListener('submit', submit);
+        $('#interaction-cancel').removeEventListener('click', cancel);
+        dialog.removeEventListener('cancel', onCancel);
+        dialog.close();
+        resolve();
+      } catch (error) {
+        if ([404, 409, 410].includes(error.status)) {
+          form.removeEventListener('submit', submit);
+          $('#interaction-cancel').removeEventListener('click', cancel);
+          dialog.removeEventListener('cancel', onCancel);
+          dialog.close();
+          toast('This interaction is no longer active.');
+          resolve();
+          return;
+        }
+        settled = false;
+        toast(error.message);
+      }
+    };
+    const submit = (event) => { event.preventDefault(); void finish(true); };
+    const cancel = () => { void finish(false); };
+    const onCancel = (event) => { event.preventDefault(); void finish(false); };
+    form.addEventListener('submit', submit);
+    $('#interaction-cancel').addEventListener('click', cancel);
+    dialog.addEventListener('cancel', onCancel);
+  });
+}
+
 async function send() {
   if (state.busy) return;
   const text = $('#prompt').value.trim();
@@ -760,8 +854,9 @@ async function send() {
       for (const event of events) {
         const line = event.split('\n').find((item) => item.startsWith('data: '));
         if (!line) continue;
-        const data = JSON.parse(line.slice(6));
-        if (data.error) throw Error(data.error);
+         const data = JSON.parse(line.slice(6));
+         if (data.error) throw Error(data.error);
+         if (data.interaction) await presentInteraction(data.interaction);
          if (data.status) toast(data.message);
           if (data.thinking_delta) { const message = state.messages.at(-1); message.runtime ||= {}; message.runtime.thinking ||= { available: true, content: '' }; message.runtime.thinking.available = true; message.runtime.thinking.content += data.thinking_delta; updateStreamingThinking(message.runtime.thinking.content); }
           if (data.activity) { if (data.activity.type === 'REASON') state.streamTimestamps.reasoning_started ||= performance.now(); updateStreamingActivity(data.activity); }

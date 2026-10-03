@@ -11,6 +11,10 @@ assert.match(source, /state\.currentNotebookId = null;\n\s*renderNotebookPicker\
 assert.match(source, /visibleNotebookId !== state\.currentNotebookId/);
 assert.match(source, /state\.webEnabled = false;\s*state\.toolsEnabled = false;\s*renderToolToggles\(\);/);
 assert.match(source, /data\.thinking_delta[\s\S]*message\.runtime\.thinking\.content \+= data\.thinking_delta/);
+assert.match(source, /dialog\.showModal\(\)/);
+assert.match(source, /textContent = interaction\.payload\.title/);
+assert.match(source, /api\(`\/interactions\/\$\{encodeURIComponent\(interaction\.id\)\}`/);
+assert.match(source, /if \(data\.interaction\) await presentInteraction\(data\.interaction\)/);
 assert.match(source, /<details class="thinking-block"><summary>Thinking/);
 for (const tab of ['providers', 'general', 'knowledge', 'tools', 'mcp', 'decision']) {
   assert.match(html, new RegExp(`data-settings-tab="${tab}"`));

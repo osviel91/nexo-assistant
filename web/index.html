@@ -233,6 +233,15 @@
        <div id="config-content" class="config-content"></div>
       </div>
     </section>
+  <dialog class="interaction-dialog" id="interaction-dialog" aria-labelledby="interaction-title" aria-describedby="interaction-message">
+    <form id="interaction-form">
+      <h2 id="interaction-title"></h2>
+      <p id="interaction-message"></p>
+      <p class="interaction-tool" id="interaction-tool" hidden></p>
+      <div class="interaction-fields" id="interaction-fields"></div>
+      <div class="form-actions interaction-actions"><button type="button" class="text-button" id="interaction-cancel">Cancel</button><button type="submit" class="primary-button" id="interaction-submit">Continue</button></div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status"></div>
   <script type="module" src="/assets/app.js"></script>
 </body>

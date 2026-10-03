@@ -405,6 +405,22 @@ def _migration_22(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((22, _migration_22),)
 
 
+def _migration_23(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS runtime_interactions (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runtime_runs(id) ON DELETE CASCADE,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, payload TEXT NOT NULL, validation_schema TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending', response TEXT,
+      created_at TEXT NOT NULL, expires_at TEXT NOT NULL, completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_interactions_pending ON runtime_interactions(status, expires_at);
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((23, _migration_23),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
