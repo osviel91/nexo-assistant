@@ -43,6 +43,20 @@ class ConversationUXTests(unittest.TestCase):
         self.assertEqual(data["messages"][0]["content"], "answer")
         self.assertNotEqual(data["messages"][0]["id"], message_id)
 
+    def test_tools_toggle_persists_per_conversation_and_is_copied_to_branches(self):
+        main = self.main
+        conversation_id, message_id = "tools-chat", "tools-message"
+        with main.db() as connection:
+            connection.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)", (conversation_id, "Tools", "1", "2"))
+            connection.execute("INSERT INTO messages(id,conversation_id,role,content,created_at) VALUES(?,?,?,?,?)", (message_id, conversation_id, "user", "hello", "2"))
+
+        self.assertTrue(main.get_conversation(conversation_id)["conversation"]["tools_enabled"])
+        main.update_conversation(conversation_id, main.ConversationPatch(tools_enabled=False))
+        self.assertFalse(main.get_conversation(conversation_id)["conversation"]["tools_enabled"])
+
+        branch = main.branch_conversation(conversation_id, message_id)
+        self.assertFalse(main.get_conversation(branch["id"])["conversation"]["tools_enabled"])
+
     def test_thinking_contract_does_not_expose_hidden_content(self):
         main = self.main
         result = main.public_runtime({"thinking_available": True, "thinking_content": "private", "thinking_tokens": 7})

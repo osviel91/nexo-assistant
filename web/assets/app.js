@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: false, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: true, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -367,7 +367,6 @@ function renderExecutionMode() {
 async function setExecutionMode(mode) {
   if (mode === state.executionMode) return;
   if (mode === 'agent' && !state.agentProfileId) { openSurface('agents'); toast('Selecciona un Agent Profile'); return; }
-  state.toolsEnabled = mode === 'agent';
   state.executionMode = mode;
   if (mode === 'chat' && $('#model-select').value) await savePreference('last_chat_model', $('#model-select').value);
   if (mode === 'agent' && state.agentProfileId) await savePreference('last_agent_profile', state.agentProfileId);
@@ -393,7 +392,7 @@ function renderAgentList() {
 async function selectAgent(id) {
   state.agentProfileId = id || null;
   if (id) await savePreference('last_agent_profile', id);
-  if (id) { state.executionMode = 'agent'; state.toolsEnabled = true; }
+  if (id) state.executionMode = 'agent';
   renderAgentPicker(); renderAgentList();
   renderExecutionMode();
   if (state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ execution_mode: 'agent', agent_profile_id: state.agentProfileId }) }); await loadChats(); } catch (error) { toast(error.message); }
@@ -534,7 +533,7 @@ function beginChat() {
   state.agentProfileId = state.preferences.last_agent_profile || null;
   state.executionMode = 'chat';
   state.webEnabled = false;
-  state.toolsEnabled = false;
+  state.toolsEnabled = true;
   renderToolToggles();
   state.currentNotebookId = null;
   renderNotebookPicker();
@@ -684,7 +683,7 @@ async function openChat(id) {
     const data = await api(`/conversations/${id}`);
     state.conversationId = id;
     state.executionMode = data.conversation.execution_mode || (data.conversation.agent_profile_id ? 'agent' : 'chat');
-    state.toolsEnabled = state.executionMode === 'agent';
+    state.toolsEnabled = Boolean(data.conversation.tools_enabled);
     state.agentProfileId = data.conversation.agent_profile_id || null;
     state.currentNotebookId = data.conversation.notebook_id || null;
     state.followingBottom = true;
@@ -1094,7 +1093,7 @@ $('#notebook-form').onsubmit = async (event) => {
 $('#model-select').onchange = () => { updateComposerModel(); if ($('#model-select').value) savePreference('last_chat_model', $('#model-select').value); };
 document.querySelectorAll('[data-mode]').forEach((button) => { button.onclick = () => setExecutionMode(button.dataset.mode); });
 document.querySelectorAll('[data-settings-tab]').forEach((button) => { button.onclick = () => { state.settingsTab = button.dataset.settingsTab; renderSettingsTabs(); }; });
-['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; renderToolToggles(); }; });
+['web-chip', 'tools-chip'].forEach((id) => { $(`#${id}`).onclick = async () => { const key = id === 'web-chip' ? 'webEnabled' : 'toolsEnabled'; state[key] = !state[key]; renderToolToggles(); if (key === 'toolsEnabled' && state.conversationId) try { await api(`/conversations/${state.conversationId}`, { method: 'PATCH', body: JSON.stringify({ tools_enabled: state.toolsEnabled }) }); } catch (error) { state.toolsEnabled = !state.toolsEnabled; renderToolToggles(); toast(error.message); } }; });
 $('#notebook-picker').onchange = async (event) => {
   state.currentNotebookId = event.target.value || null;
   if (!state.conversationId) return;
