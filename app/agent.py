@@ -55,6 +55,7 @@ class AgentRunRequest:
     knowledge_outcome: KnowledgeOutcome | None = None
     request_started_at: float | None = None
     interaction_handler: bool = False
+    session_approved_tools: set[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ class AgentRuntime:
         tool_call_count = 0
         artifact_render_failures = 0
         blocked_calls: set[tuple[str, str]] = set()
+        session_approved_tools = set(request.session_approved_tools or ())
         result_pipeline = ToolResultPipeline(self.limits.max_tool_output_chars)
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
@@ -249,7 +251,7 @@ class AgentRuntime:
                                     else:
                                         values = validate_values(dialog["fields"], response.get("values"))
                                         result = {"content": "User response received.", "structured_data": values}
-                            elif decision != PolicyDecision.ALLOW:
+                            elif decision != PolicyDecision.ALLOW and call["name"] not in session_approved_tools:
                                 signature = (call["name"], call["arguments"])
                                 if signature in blocked_calls:
                                     result = {"error": {"code": "repeated_approval_required", "message": "The same tool call was denied or blocked again; execution stopped."}}
@@ -273,7 +275,12 @@ class AgentRuntime:
                                     else:
                                         arguments = response.get("values", {})
                                         validate_schema(arguments, definition.parameters)
+                                        if response.get("session_approved"):
+                                            session_approved_tools.add(call["name"])
                                         result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                            elif decision != PolicyDecision.ALLOW:
+                                validate_schema(arguments, definition.parameters)
+                                result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
                             else:
                                 result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
                         except (ValueError, TypeError, json.JSONDecodeError) as exc:

@@ -35,19 +35,21 @@ class InteractionTests(unittest.TestCase):
                     connection.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)", (conversation_id, "Test", main.now(), main.now()))
                     connection.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,metadata) VALUES(?,?,?,?,?,?)", (run_id, conversation_id, "message", main.now(), "running", "{}"))
                 interaction_id = main.create_runtime_interaction(run_id, conversation_id, {
-                    "kind": "tool_approval", "payload": {"title": "Approve", "fields": []},
+                    "kind": "tool_approval", "tool": "vault.write", "payload": {"title": "Approve", "fields": []},
                     "validation_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False},
                 })
                 with TestClient(main.app) as client:
                     self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"values": {"path": "note.md"}}).status_code, 422)
                     self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": 1, "values": {"arguments": {"path": "note.md"}}}).status_code, 422)
                     self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": 123}}}).status_code, 422)
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": "edited.md"}}}).status_code, 200)
+                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "session_approved": True, "values": {"arguments": {"path": "edited.md"}}}).status_code, 200)
                     self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": "again.md"}}}).status_code, 409)
                 with main.db() as connection:
                     row = connection.execute("SELECT status,response FROM runtime_interactions WHERE id=?", (interaction_id,)).fetchone()
                 self.assertEqual(row["status"], "approved")
                 self.assertEqual(json.loads(row["response"])["values"], {"path": "edited.md"})
+                with main.db() as connection:
+                    self.assertEqual(connection.execute("SELECT tool_name FROM conversation_tool_approvals WHERE conversation_id=?", (conversation_id,)).fetchone()[0], "vault.write")
             finally:
                 main.DB_PATH = old_db
 

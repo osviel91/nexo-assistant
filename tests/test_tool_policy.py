@@ -146,6 +146,45 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertEqual(seen, [{"path": "edited.md"}])
         self.assertEqual(events[-1]["answer"], "finished")
 
+    def test_session_approval_skips_later_prompts_for_same_tool(self):
+        seen = []
+        registry = ModuleRegistry(FastAPI())
+
+        async def handler(_context, arguments):
+            seen.append(arguments)
+            return {"ok": True}
+
+        registry.context.tools.register(ToolDefinition("vault.write", "Write", {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False,
+        }, handler, source="mcp", module_id="mcp", action="mutating"))
+        adapter = Adapter([
+            [{"tool_calls": [{"id": "first", "function": {"name": "vault.write", "arguments": '{"path":"one.md"}'}}]}],
+            [{"tool_calls": [{"id": "second", "function": {"name": "vault.write", "arguments": '{"path":"two.md"}'}}]}],
+            [{"content": "finished"}],
+        ])
+
+        async def collect():
+            effective = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
+            request = AgentRunRequest(adapter, [{"role": "user", "content": "write"}], effective, ToolExecutor(),
+                                      ToolExecutionContext("conversation", "provider", "model", 0), interaction_handler=True)
+            stream = AgentRuntime().stream(request)
+            interactions = 0
+            event = await stream.__anext__()
+            while True:
+                if "interaction" in event:
+                    interactions += 1
+                    event = await stream.asend({"approved": True, "session_approved": True, "values": {"path": "one.md"}})
+                else:
+                    try:
+                        event = await stream.__anext__()
+                    except StopAsyncIteration:
+                        return interactions, event
+
+        interactions, final = asyncio.run(collect())
+        self.assertEqual(interactions, 1)
+        self.assertEqual(seen, [{"path": "one.md"}, {"path": "two.md"}])
+        self.assertEqual(final["answer"], "finished")
+
     def test_agent_can_request_structured_user_input(self):
         registry = ModuleRegistry(FastAPI())
         from app.native_tools import register_native_tools

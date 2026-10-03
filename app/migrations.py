@@ -435,6 +435,20 @@ def _migration_25(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((25, _migration_25),)
 
 
+def _migration_26(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(connection, "runtime_interactions", "tool_name", "TEXT")
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS conversation_tool_approvals (
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      tool_name TEXT NOT NULL,
+      PRIMARY KEY(conversation_id, tool_name)
+    );
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((26, _migration_26),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

@@ -432,6 +432,7 @@ class ChatIn(BaseModel):
 class RuntimeInteractionInput(BaseModel):
     approved: StrictBool
     values: dict[str, Any] = Field(default_factory=dict)
+    session_approved: StrictBool = False
 
 
 def create_runtime_interaction(run_id: str, conversation_id: str, event: dict[str, Any]) -> str:
@@ -441,9 +442,9 @@ def create_runtime_interaction(run_id: str, conversation_id: str, event: dict[st
     schema = event.get("validation_schema", {})
     with db() as c:
         c.execute("""INSERT INTO runtime_interactions
-            (id,run_id,conversation_id,kind,payload,validation_schema,status,created_at,expires_at)
-            VALUES(?,?,?,?,?,?, 'pending', ?, ?)""",
-            (interaction_id, run_id, conversation_id, event["kind"], json.dumps(payload), json.dumps(schema),
+            (id,run_id,conversation_id,kind,payload,validation_schema,tool_name,status,created_at,expires_at)
+            VALUES(?,?,?,?,?,?,?, 'pending', ?, ?)""",
+            (interaction_id, run_id, conversation_id, event["kind"], json.dumps(payload), json.dumps(schema), event.get("tool"),
              created.isoformat(), (created + timedelta(minutes=5)).isoformat()))
     return interaction_id
 
@@ -493,7 +494,10 @@ def respond_to_runtime_interaction(interaction_id: str, response: RuntimeInterac
         except (ValueError, TypeError) as error:
             raise HTTPException(422, str(error)) from error
         status = "approved" if response.approved else "denied"
-        payload = json.dumps({"approved": response.approved, "values": values if response.approved else {}})
+        session_approved = response.approved and response.session_approved and row["kind"] == "tool_approval" and bool(row["tool_name"])
+        if session_approved:
+            c.execute("INSERT OR IGNORE INTO conversation_tool_approvals(conversation_id,tool_name) VALUES(?,?)", (row["conversation_id"], row["tool_name"]))
+        payload = json.dumps({"approved": response.approved, "values": values if response.approved else {}, "session_approved": session_approved})
         cursor = c.execute("UPDATE runtime_interactions SET status=?,response=?,completed_at=? WHERE id=? AND status='pending'", (status, payload, now(), interaction_id))
         if not cursor.rowcount:
             raise HTTPException(409, "interaction_already_resolved")
@@ -1655,6 +1659,8 @@ async def chat(req: ChatIn):
                 runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + (["system"] if knowledge_outcome and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED else []) + [message["role"] for message in messages]
                 runtime_snapshot["max_tool_calls"] = run_agent.limits.max_tool_calls
                 _update_runtime_metadata(run_id, runtime_snapshot)
+                with db() as c:
+                    session_approved_tools = {row[0] for row in c.execute("SELECT tool_name FROM conversation_tool_approvals WHERE conversation_id=?", (cid,))}
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
@@ -1662,7 +1668,8 @@ async def chat(req: ChatIn):
                                                 profile_config.profile_name if profile_config else None,
                                                 runtime_snapshot, grounded_context, effective_configuration,
                                                 knowledge_outcome=knowledge_outcome,
-                                                request_started_at=request_started_at, interaction_handler=True)
+                                                request_started_at=request_started_at, interaction_handler=True,
+                                                session_approved_tools=session_approved_tools)
                 runtime_stream = run_agent.stream(run_request)
                 try:
                     event = await runtime_stream.__anext__()

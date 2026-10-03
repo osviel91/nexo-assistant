@@ -756,6 +756,9 @@ async function presentInteraction(interaction) {
   $('#interaction-message').textContent = interaction.payload.message || '';
   $('#interaction-tool').hidden = interaction.kind !== 'tool_approval';
   $('#interaction-tool').textContent = interaction.tool ? `Tool: ${interaction.tool}` : '';
+  const sessionApproval = $('#interaction-session-approval');
+  sessionApproval.checked = false;
+  $('#interaction-session-approval-row').hidden = interaction.kind !== 'tool_approval';
   $('#interaction-submit').textContent = interaction.payload.submit_label || (interaction.kind === 'tool_approval' ? 'Approve and run' : 'Continue');
   $('#interaction-fields').replaceChildren(...(interaction.payload.fields || []).map(renderInteractionField));
   dialog.showModal();
@@ -775,7 +778,7 @@ async function presentInteraction(interaction) {
           else if (control.type === 'number' && control.value !== '') values[field.id] = field.type === 'integer' ? Number.parseInt(control.value, 10) : Number(control.value);
           else if (control.value !== '') values[field.id] = control.value;
         }
-        await api(`/interactions/${encodeURIComponent(interaction.id)}`, { method: 'POST', body: JSON.stringify({ approved, values }) });
+        await api(`/interactions/${encodeURIComponent(interaction.id)}`, { method: 'POST', body: JSON.stringify({ approved, values, session_approved: approved && sessionApproval.checked }) });
         form.removeEventListener('submit', submit);
         $('#interaction-cancel').removeEventListener('click', cancel);
         dialog.removeEventListener('cancel', onCancel);
