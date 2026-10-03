@@ -746,6 +746,7 @@ async function resolveApproval(id, decision) {
   } finally {
     state.busy = false;
     $('#send-button').disabled = false;
+    renderMessages();
   }
 }
 
@@ -964,6 +965,7 @@ async function send() {
     state.activity = null;
     state.busy = false;
     $('#send-button').disabled = false;
+    renderMessages();
     $('#prompt').focus();
   }
 }

@@ -43,3 +43,4 @@ assert.match(app, /state\.toolsEnabled = Boolean\(data\.conversation\.tools_enab
 assert.doesNotMatch(app, /state\.toolsEnabled = mode === 'agent'/);
 assert.match(app, /Unclassified \(blocked\)/);
 assert.match(app, /Blocked until classified/);
+assert.equal((app.match(/state\.busy = false;\s*\$\('#send-button'\)\.disabled = false;\s*renderMessages\(\);/g) || []).length, 2);
