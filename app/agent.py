@@ -15,7 +15,9 @@ from app.tools import EffectiveToolSet, ToolExecutor, ToolNotAvailableError
 from app.runtime_trace import NullRuntimeEventSink, RuntimeEventSink
 from app.grounding import GROUNDING_INSTRUCTIONS, GroundedContext, KnowledgeOutcome, knowledge_outcome_instruction
 from app.tool_results import ToolResultPipeline
-from app.interactions import approval_dialog, normalize_dialog, validate_schema, validate_values
+from app.interactions import normalize_dialog, validate_schema, validate_values
+from app.approvals import tool_fingerprint
+from app.progress_guard import HARD_STOP_HINT, RECOVERY_HINT, ProgressGuard, call_fingerprint
 
 logger = logging.getLogger("nexo.agent")
 
@@ -55,7 +57,11 @@ class AgentRunRequest:
     knowledge_outcome: KnowledgeOutcome | None = None
     request_started_at: float | None = None
     interaction_handler: bool = False
-    session_approved_tools: set[str] | None = None
+    resume_messages: list[dict[str, Any]] | None = None
+    initial_tool_call_count: int = 0
+    initial_tool_rounds: int = 0
+    initial_tools_used: list[str] | None = None
+    progress_state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,11 +94,12 @@ class AgentRuntime:
         knowledge_outcome = configuration.knowledge_outcome if configuration else request.knowledge_outcome
         effective_tools = configuration.tools if configuration else request.effective_tools
         temperature = configuration.temperature if configuration else request.temperature
-        messages = list(request.messages)
-        if system_instructions:
+        resuming = request.resume_messages is not None
+        messages = list(request.resume_messages if resuming else request.messages)
+        if not resuming and system_instructions:
             messages.insert(0, {"role": "system", "content": system_instructions})
         tool_names = sorted(effective_tools.names)
-        if tool_names:
+        if tool_names and not resuming:
             guidance = [f"Available tools for this turn: {', '.join(tool_names)}.",
                         "Use an available tool when it can answer the request; do not claim a capability is unavailable if it is listed.",
                         "After tool calls, interpret their returned data and answer from it. Never invent external facts or show tool-call syntax to the user."]
@@ -105,25 +112,26 @@ class AgentRuntime:
             if "native.request_user_input" in effective_tools.names:
                 guidance.append("When you need a choice, preference, or clarification before proceeding, call native.request_user_input with a concise structured dialog instead of asking in prose. The user can edit supplied values. Tool calls that are not read-only may also pause for explicit approval.")
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": " ".join(guidance)})
-        if grounded_context is not None:
+        if grounded_context is not None and not resuming:
             grounding = f"{GROUNDING_INSTRUCTIONS}\n\n{grounded_context.serialize()}"
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": grounding})
-        if knowledge_outcome is not None and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED:
+        if not resuming and knowledge_outcome is not None and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED:
             messages.insert(1 if system_instructions else 0, {"role": "system", "content": knowledge_outcome_instruction(knowledge_outcome)})
         answer = ""
         sources: list[dict[str, Any]] = []
-        tools_used: list[str] = []
+        tools_used: list[str] = list(request.initial_tools_used or ())
         artifacts: list[dict[str, Any]] = []
-        tool_rounds = 0
-        tool_call_count = 0
+        tool_rounds = request.initial_tool_rounds
+        tool_call_count = request.initial_tool_call_count
         artifact_render_failures = 0
         blocked_calls: set[tuple[str, str]] = set()
-        session_approved_tools = set(request.session_approved_tools or ())
         result_pipeline = ToolResultPipeline(self.limits.max_tool_output_chars)
         request_started = request.request_started_at or time.perf_counter()
         first_content_at: float | None = None
         provider_ttft_ms: float | None = None
         usage: dict[str, int] = {}
+        guard = ProgressGuard.restore(request.progress_state)
+        force_final = False
         for _ in range(max_tool_calls + 1):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
@@ -148,7 +156,7 @@ class AgentRuntime:
             round_content = ""
             finish_reason = None
             try:
-                async for chunk in request.model.stream(messages, definitions if tool_call_count < max_tool_calls else [], temperature):
+                async for chunk in request.model.stream(messages, definitions if tool_call_count < max_tool_calls and not force_final else [], temperature):
                     finish_reason = chunk.finish_reason or finish_reason
                     if chunk.usage:
                         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -200,9 +208,33 @@ class AgentRuntime:
                     telemetry["tokens_per_second_source"] = "calculated"
                 if usage:
                     telemetry["usage_source"] = "provider"
+                telemetry["progress_guard"] = {"enabled": guard.enabled, **dict(guard.counters), "stagnation_score": guard.score,
+                                                "recoveries": guard.recoveries, "hard_stop": guard.hard_stop}
                 yield {"complete": True, "answer": answer, "sources": sources, "artifacts": artifacts, "tools_used": tools_used, "tool_rounds": tool_rounds, "telemetry": telemetry,
                        "native_tool_calls": sum(name.startswith("native.") for name in tools_used)}
                 return
+            if guard.enabled and not force_final:
+                blocked = False
+                for proposed in tool_calls.values():
+                    try:
+                        proposed_args = json.loads(proposed["arguments"] or "{}")
+                        if (proposed["name"] != "native.render_artifact" and isinstance(proposed_args, dict)
+                                and guard.evaluate_pre_call(call_fingerprint(proposed["name"], proposed_args)) == "hard_stop"):
+                            blocked = True
+                            break
+                    except Exception:
+                        guard.enabled = False
+                        continue
+                if blocked:
+                    guard.hard_stop = True
+                    force_final = True
+                    messages.append({"role": "system", "content": HARD_STOP_HINT})
+                    stop_event = request.event_sink.start_event("progress_hard_stop", "Progress Guard", {"stagnation_score": guard.score})
+                    request.event_sink.finish_event(stop_event, "completed", {"stagnation_score": guard.score}, 0)
+                    continue
+            if force_final:
+                messages.append({"role": "system", "content": HARD_STOP_HINT})
+                continue
             messages.append({
                 "role": "assistant",
                 "content": round_content or None,
@@ -223,6 +255,21 @@ class AgentRuntime:
                 result = None
                 definition = effective_tools.definition(call["name"])
                 decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
+                call_identity = None
+                guard_started = time.perf_counter()
+                if guard.enabled and call["name"] != "native.render_artifact":
+                    try:
+                        parsed_args = json.loads(call["arguments"] or "{}")
+                        if isinstance(parsed_args, dict):
+                            call_identity = call_fingerprint(call["name"], parsed_args)
+                            if decision != PolicyDecision.ALLOW:
+                                guard.pending = {"call": call_identity}
+                            else:
+                                guard.observe_call(call_identity)
+                    except Exception:
+                        guard.enabled = False
+                if guard.enabled:
+                    guard.counters["guard_overhead_ms"] += round((time.perf_counter() - guard_started) * 1000, 4)
                 if call["name"] == "native.render_artifact":
                     if artifact_render_failures >= 2:
                         result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ha fallado dos veces seguidas. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
@@ -251,7 +298,7 @@ class AgentRuntime:
                                     else:
                                         values = validate_values(dialog["fields"], response.get("values"))
                                         result = {"content": "User response received.", "structured_data": values}
-                            elif decision != PolicyDecision.ALLOW and call["name"] not in session_approved_tools:
+                            elif decision != PolicyDecision.ALLOW:
                                 signature = (call["name"], call["arguments"])
                                 if signature in blocked_calls:
                                     result = {"error": {"code": "repeated_approval_required", "message": "The same tool call was denied or blocked again; execution stopped."}}
@@ -261,26 +308,26 @@ class AgentRuntime:
                                     result = {"error": {"code": "approval_unavailable", "message": "This action requires explicit user approval, but interaction is unavailable in this run."}}
                                     status = "approval_required"
                                 else:
-                                    dialog = approval_dialog(call["name"], definition.description, arguments)
-                                    response = yield {"interaction": {"kind": "tool_approval", "tool": call["name"], "payload": dialog, "validation_schema": definition.parameters}}
-                                    if not response or not response.get("approved"):
-                                        if response and response.get("error"):
-                                            blocked_calls.add(signature)
-                                            result = {"error": {"code": "interaction_expired", "message": "The approval request expired before a response was received."}}
-                                            status = "approval_expired"
-                                        else:
-                                            blocked_calls.add(signature)
-                                            result = {"error": {"code": "tool_denied", "message": "The user denied this tool call."}}
-                                            status = "tool_denied"
-                                    else:
-                                        arguments = response.get("values", {})
-                                        validate_schema(arguments, definition.parameters)
-                                        if response.get("session_approved"):
-                                            session_approved_tools.add(call["name"])
-                                        result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
-                            elif decision != PolicyDecision.ALLOW:
-                                validate_schema(arguments, definition.parameters)
-                                result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                                    duration_ms = round(time.monotonic() - started, 4) * 1000
+                                    request.event_sink.finish_event(event_id, "waiting_approval", {"tool": call["name"], "round": tool_rounds, "action": definition.action or "unknown", "approval_required": True}, duration_ms)
+                                    yield {"approval_required": {
+                                        "tool": call["name"], "tool_call_id": call["id"],
+                                         "action": definition.action or "unknown", "arguments": arguments,
+                                         "tool_fingerprint": tool_fingerprint(definition),
+                                        "continuation": {"messages": messages, "tool_call_count": tool_call_count,
+                                            "tool_rounds": tool_rounds, "tools_used": tools_used,
+                                            "max_tool_calls": max_tool_calls,
+                                            "tool_names": sorted(effective_tools.names),
+                                            "provider_id": request.context.provider_id,
+                                            "provider_base_url": (request.runtime_snapshot or {}).get("provider_base_url"),
+                                            "model_id": request.context.model_id,
+                                             "temperature": temperature,
+                                             "progress_state": guard.snapshot(),
+                                            "profile_id": request.profile_id,
+                                            "profile_name": request.profile_name,
+                                            "runtime_snapshot": request.runtime_snapshot or {}},
+                                    }}
+                                    return
                             else:
                                 result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
                         except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -323,6 +370,33 @@ class AgentRuntime:
                     result = {key: value for key, value in result.items() if key != "artifacts"}
                 canonical, pipeline_metadata = result_pipeline.process(result)
                 projection = pipeline_metadata.pop("projection", canonical)
+                progress_action = "allow"
+                if guard.enabled and call_identity:
+                    prior_score = guard.score
+                    guard_started = time.perf_counter()
+                    try:
+                        progress = guard.observe_result(projection, status, duration_ms)
+                    except Exception:
+                        guard.enabled = False
+                        logger.exception("progress guard failed open", extra={"conversation_id": request.context.conversation_id, "run_id": request.context.run_id})
+                        progress = {"action": "allow", "delta": 0}
+                    guard.counters["guard_overhead_ms"] += round((time.perf_counter() - guard_started) * 1000, 4)
+                    progress_action = progress["action"]
+                    trace_metadata = {"tool_calls": guard.counters.get("tool_calls", 0), "unique_calls": guard.counters.get("unique_calls", 0),
+                                      "unique_results": guard.counters.get("unique_results", 0), "exact_repeats": guard.counters.get("exact_repeats", 0),
+                                      "repeated_results": guard.counters.get("repeated_results", 0), "cycles_detected": guard.counters.get("cycles_detected", 0),
+                                      "repeated_failures": guard.counters.get("repeated_failures", 0), "stagnation_score": guard.score}
+                    trace_metadata["guard_overhead_ms"] = guard.counters.get("guard_overhead_ms", 0)
+                    if progress["action"] == "recover":
+                        recovery_event = request.event_sink.start_event("recovery_injected", "Progress Guard", trace_metadata)
+                        request.event_sink.finish_event(recovery_event, "completed", trace_metadata, 0)
+                    elif progress["action"] == "hard_stop":
+                        force_final = True
+                        stop_event = request.event_sink.start_event("progress_hard_stop", "Progress Guard", trace_metadata)
+                        request.event_sink.finish_event(stop_event, "completed", trace_metadata, 0)
+                    elif prior_score > guard.score:
+                        recovered_event = request.event_sink.start_event("progress_recovered", "Progress Guard", trace_metadata)
+                        request.event_sink.finish_event(recovered_event, "completed", trace_metadata, 0)
                 result_text = json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
                 diagnostic(logger, "tool_result_pipeline", tool=call["name"], original_size=pipeline_metadata["original_size"], projected_size=pipeline_metadata["projected_size"], compacted=pipeline_metadata["compacted"], truncated=pipeline_metadata["truncated"], structured_result=isinstance(canonical.get("structured_data"), (dict, list)))
                 diagnostic(logger, "tool_policy", tool=call["name"], source=definition.source if definition else "unknown", action=definition.action if definition else "unknown", policy_decision=decision.value, execution_attempted=status not in {"approval_required", "repeated_approval_required"}, execution_status=status, duration_ms=duration_ms)
@@ -330,6 +404,10 @@ class AgentRuntime:
                 if result.get("error"):
                     yield {"status": "tool_error", "tool": call["name"], "message": result["error"].get("message", "Error de herramienta")}
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result_text})
+                if progress_action == "recover":
+                    messages.append({"role": "system", "content": RECOVERY_HINT})
+                elif progress_action == "hard_stop":
+                    messages.append({"role": "system", "content": HARD_STOP_HINT})
                 logger.info("tool call", extra={"conversation_id": request.context.conversation_id, "provider_id": request.context.provider_id, "model_id": request.context.model_id, "tool": call["name"], "round": tool_rounds, "status": status, "duration": round(time.monotonic() - started, 4)})
                 if status == "repeated_approval_required":
                     yield {"error": "The same tool call was blocked by its action policy and was already stopped."}

@@ -22,7 +22,7 @@ class InteractionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_dialog({"title": "Bad", "fields": [{"id": "n", "type": "number", "default": float("nan")}]})
 
-    def test_interaction_endpoint_requires_explicit_approval_and_validates_values(self):
+    def test_legacy_editable_tool_approval_endpoint_is_disabled(self):
         from app import main
 
         with tempfile.TemporaryDirectory() as directory:
@@ -39,21 +39,16 @@ class InteractionTests(unittest.TestCase):
                     "validation_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False},
                 })
                 with TestClient(main.app) as client:
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"values": {"path": "note.md"}}).status_code, 422)
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": 1, "values": {"arguments": {"path": "note.md"}}}).status_code, 422)
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": 123}}}).status_code, 422)
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "session_approved": True, "values": {"arguments": {"path": "edited.md"}}}).status_code, 200)
-                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": "again.md"}}}).status_code, 409)
+                    self.assertEqual(client.post(f"/api/interactions/{interaction_id}", json={"approved": True, "values": {"arguments": {"path": "edited.md"}}}).status_code, 410)
                 with main.db() as connection:
                     row = connection.execute("SELECT status,response FROM runtime_interactions WHERE id=?", (interaction_id,)).fetchone()
-                self.assertEqual(row["status"], "approved")
-                self.assertEqual(json.loads(row["response"])["values"], {"path": "edited.md"})
+                self.assertEqual(row["status"], "pending")
                 with main.db() as connection:
-                    self.assertEqual(connection.execute("SELECT tool_name FROM conversation_tool_approvals WHERE conversation_id=?", (conversation_id,)).fetchone()[0], "vault.write")
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM conversation_tool_approvals WHERE conversation_id=?", (conversation_id,)).fetchone()[0], 0)
             finally:
                 main.DB_PATH = old_db
 
-    def test_chat_pauses_for_editable_approval_then_resumes_tool_call(self):
+    def test_chat_persists_approval_without_executing_or_exposing_arguments(self):
         from app import main
         from app.agent_profiles import AgentProfileInput
         from app.kernel import ToolDefinition
@@ -128,16 +123,26 @@ class InteractionTests(unittest.TestCase):
                                 continue
                             event = json.loads(line[6:])
                             events.append(event)
-                            if "interaction" in event:
-                                self.assertEqual(executed, [])
-                                approval = main.RuntimeInteractionInput(approved=True, values={"arguments": '{"path":"edited.md"}'})
-                                main.respond_to_runtime_interaction(event["interaction"]["id"], approval)
-                    return events
+                    pending = next(event["approval_required"] for event in events if "approval_required" in event)
+                    resumed = await main.decide_approval(pending["approval_id"], main.ApprovalDecisionInput(decision="approve"))
+                    resumed_events = []
+                    async for part in resumed.body_iterator:
+                        for line in part.splitlines():
+                            if line.startswith("data: "):
+                                resumed_events.append(json.loads(line[6:]))
+                    return events, resumed_events
 
-                events = asyncio.run(collect())
-                self.assertEqual(executed, [{"path": "edited.md"}])
-                self.assertTrue(any(event.get("done") for event in events))
+                events, resumed_events = asyncio.run(collect())
+                self.assertEqual(executed, [{"path": "model.md"}])
+                pending = next(event["approval_required"] for event in events if "approval_required" in event)
+                self.assertEqual(pending["tool_id"], "vault.write")
+                self.assertEqual(pending["details"], {})
+                self.assertTrue(any(event.get("done") for event in resumed_events))
                 with main.db() as connection:
+                    approval = connection.execute("SELECT status,frozen_arguments,execution_status FROM pending_approvals WHERE id=?", (pending["approval_id"],)).fetchone()
+                    self.assertEqual(approval["status"], "executed")
+                    self.assertEqual(approval["execution_status"], "executed")
+                    self.assertEqual(json.loads(approval["frozen_arguments"]), {"path": "model.md"})
                     self.assertEqual(connection.execute("SELECT COUNT(*) FROM runtime_interactions").fetchone()[0], 0)
             finally:
                 main.httpx.AsyncClient = old_client

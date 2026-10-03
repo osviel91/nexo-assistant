@@ -141,6 +141,12 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 .messages, .composer-wrap { width: min(var(--reading-width), 100%); }
 .chat-view { scroll-padding-bottom: 24px; }
 .message-body { white-space: normal; }
+.approval-card { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); font-size: 12px; line-height: 1.5; }
+.approval-status { color: var(--muted); font: 10px ui-monospace, monospace; }
+.approval-warning { margin: 0; color: var(--warning); font-weight: 650; }
+.approval-details { display: grid; gap: 4px; overflow-wrap: anywhere; }
+.approval-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.approval-actions button { min-height: 38px; }
 .message-content > :first-child { margin-top: 0; }
 .message-content > :last-child { margin-bottom: 0; }
 .artifact { max-width: 100%; margin: 18px 0; padding: 16px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); }
@@ -347,4 +353,3 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 .interaction-dialog::backdrop { background: rgb(0 0 0 / .55); }
 .interaction-dialog h2 { margin: 0; font-size: 20px; }.interaction-dialog p { color: var(--muted); line-height: 1.5; }.interaction-tool { font: 11px var(--font-ui); overflow-wrap: anywhere; }
 .interaction-fields { display: grid; gap: 14px; margin-top: 18px; }.interaction-field { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }.interaction-field input, .interaction-field select, .interaction-field textarea { width: 100%; min-height: 40px; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--text); font: inherit; }.interaction-field input[type="checkbox"] { width: 20px; min-height: 20px; accent-color: var(--accent); }.interaction-field select[multiple] { min-height: 100px; }.interaction-field small { color: var(--muted); font-size: 10px; }.interaction-actions { justify-content: flex-end; margin-top: 20px; }
-.interaction-session-approval { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 12px; }.interaction-session-approval input { accent-color: var(--accent); }

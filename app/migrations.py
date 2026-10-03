@@ -449,6 +449,36 @@ def _migration_26(connection: sqlite3.Connection) -> None:
 MIGRATIONS = MIGRATIONS + ((26, _migration_26),)
 
 
+def _migration_27(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runtime_runs(id) ON DELETE CASCADE,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      tool_call_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('mutating','destructive','unknown')),
+      tool_fingerprint TEXT NOT NULL,
+      frozen_arguments TEXT NOT NULL,
+      arguments_sha256 TEXT NOT NULL,
+      safe_summary TEXT NOT NULL,
+      continuation TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','executing','executed','failed','expired','invalidated')),
+      resolution TEXT,
+      execution_status TEXT,
+      safe_error_category TEXT,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_conversation ON pending_approvals(conversation_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_run ON pending_approvals(run_id, status);
+    """)
+
+
+MIGRATIONS = MIGRATIONS + ((27, _migration_27),)
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}

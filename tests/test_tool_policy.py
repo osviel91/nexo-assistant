@@ -106,7 +106,7 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertIn("approval_unavailable", response)
         self.assertEqual(events[-1]["answer"], "approval needed")
 
-    def test_approval_pauses_edits_arguments_and_runs_only_after_consent(self):
+    def test_approval_freezes_exact_call_and_pauses_without_execution(self):
         seen = []
         registry = ModuleRegistry(FastAPI())
 
@@ -119,34 +119,23 @@ class ToolPolicyTests(unittest.TestCase):
         }, handler, source="mcp", module_id="mcp", action="mutating"))
         adapter = Adapter([
             [{"tool_calls": [{"id": "call", "function": {"name": "vault.write", "arguments": '{"path":"initial.md"}'}}]}],
-            [{"content": "finished"}],
         ])
 
         async def collect():
             effective = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
             request = AgentRunRequest(adapter, [{"role": "user", "content": "write"}], effective, ToolExecutor(), ToolExecutionContext("conversation", "provider", "model", 0), interaction_handler=True)
-            stream = AgentRuntime().stream(request)
-            events = []
-            event = await stream.__anext__()
-            while True:
-                if "interaction" in event:
-                    events.append(event)
-                    self.assertEqual(event["interaction"]["kind"], "tool_approval")
-                    self.assertEqual(event["interaction"]["payload"]["fields"][0]["default"], {"path": "initial.md"})
-                    self.assertEqual(seen, [])
-                    event = await stream.asend({"approved": True, "values": {"path": "edited.md"}})
-                else:
-                    events.append(event)
-                    try:
-                        event = await stream.__anext__()
-                    except StopAsyncIteration:
-                        return events
+            events = [event async for event in AgentRuntime().stream(request)]
+            return events
 
         events = asyncio.run(collect())
-        self.assertEqual(seen, [{"path": "edited.md"}])
-        self.assertEqual(events[-1]["answer"], "finished")
+        pending = next(event["approval_required"] for event in events if "approval_required" in event)
+        self.assertEqual(pending["arguments"], {"path": "initial.md"})
+        self.assertEqual(pending["tool_call_id"], "call")
+        self.assertEqual(pending["continuation"]["tool_call_count"], 1)
+        self.assertEqual(pending["continuation"]["messages"][-1]["tool_calls"][0]["id"], "call")
+        self.assertEqual(seen, [])
 
-    def test_session_approval_skips_later_prompts_for_same_tool(self):
+    def test_resumed_run_preserves_provider_tool_call_and_budget(self):
         seen = []
         registry = ModuleRegistry(FastAPI())
 
@@ -158,32 +147,22 @@ class ToolPolicyTests(unittest.TestCase):
             "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False,
         }, handler, source="mcp", module_id="mcp", action="mutating"))
         adapter = Adapter([
-            [{"tool_calls": [{"id": "first", "function": {"name": "vault.write", "arguments": '{"path":"one.md"}'}}]}],
-            [{"tool_calls": [{"id": "second", "function": {"name": "vault.write", "arguments": '{"path":"two.md"}'}}]}],
             [{"content": "finished"}],
         ])
 
         async def collect():
             effective = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
-            request = AgentRunRequest(adapter, [{"role": "user", "content": "write"}], effective, ToolExecutor(),
-                                      ToolExecutionContext("conversation", "provider", "model", 0), interaction_handler=True)
-            stream = AgentRuntime().stream(request)
-            interactions = 0
-            event = await stream.__anext__()
-            while True:
-                if "interaction" in event:
-                    interactions += 1
-                    event = await stream.asend({"approved": True, "session_approved": True, "values": {"path": "one.md"}})
-                else:
-                    try:
-                        event = await stream.__anext__()
-                    except StopAsyncIteration:
-                        return interactions, event
+            checkpoint = [{"role": "assistant", "tool_calls": [{"id": "first", "type": "function", "function": {"name": "vault.write", "arguments": '{"path":"one.md"}'}}]},
+                          {"role": "tool", "tool_call_id": "first", "name": "vault.write", "content": '{"ok":true}'}]
+            request = AgentRunRequest(adapter, [], effective, ToolExecutor(), ToolExecutionContext("conversation", "provider", "model", 1),
+                                      resume_messages=checkpoint, initial_tool_call_count=1, initial_tool_rounds=1, initial_tools_used=["vault.write"])
+            events = [event async for event in AgentRuntime().stream(request)]
+            return events
 
-        interactions, final = asyncio.run(collect())
-        self.assertEqual(interactions, 1)
-        self.assertEqual(seen, [{"path": "one.md"}, {"path": "two.md"}])
-        self.assertEqual(final["answer"], "finished")
+        events = asyncio.run(collect())
+        self.assertEqual(adapter.payloads[0]["messages"][:2], [{"role": "assistant", "tool_calls": [{"id": "first", "type": "function", "function": {"name": "vault.write", "arguments": '{"path":"one.md"}'}}]}, {"role": "tool", "tool_call_id": "first", "name": "vault.write", "content": '{"ok":true}'}])
+        self.assertEqual(seen, [])
+        self.assertEqual(events[-1]["answer"], "finished")
 
     def test_agent_can_request_structured_user_input(self):
         registry = ModuleRegistry(FastAPI())

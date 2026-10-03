@@ -3,7 +3,7 @@ import { effectiveMessageIdentity } from './identity.js';
 import { eligibleRerankerModels, rerankerState } from './reranking-state.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: true, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
+const state = { providers: [], knowledge: null, toolSettings: null, agents: [], preferences: {}, conversations: [], notebooks: [], notebookSources: [], mcpServers: [], currentNotebookId: null, executionMode: 'chat', webEnabled: false, toolsEnabled: true, modules: [], tools: [], catalogErrors: {}, agentBuilder: null, shadow: [], traces: [], runs: [], approvals: [], labTab: 'models', settingsTab: 'providers', conversationId: null, agentProfileId: null, messages: [], attachments: [], busy: false, lastRuntime: null, activity: null, lifecycle: 'Complete', followingBottom: true, streamTimestamps: {}, chatThinking: { enabled: false, budget: null } };
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function applyPreferences(persist = false) {
   const ui = document.documentElement.dataset.ui || 'standard';
@@ -584,13 +584,15 @@ function renderMessages() {
        const trace = document.documentElement.dataset.ui === 'developer' && message.role === 'assistant' && (runtime.diagnostic_error || message.trace?.length)
          ? `<details class="runtime-diagnostic"><summary>Diagnóstico · ${escapeHtml(runtime.diagnostic_error?.code || `${message.trace.length} eventos`)}</summary>${runtime.diagnostic_error ? `<p>${escapeHtml(runtime.diagnostic_error.stage)} · ${escapeHtml(runtime.diagnostic_error.code)}</p>` : ''}<ol>${(message.trace || []).map((item) => `<li><strong>${escapeHtml(item.type || 'EVENT')}</strong> · ${escapeHtml(item.name || item.metadata?.tool || item.metadata?.model || item.type || 'runtime')} · ${escapeHtml(item.status || 'unknown')}${item.duration_ms != null ? ` · ${escapeHtml(item.duration_ms)} ms` : ''}${item.metadata?.error_code ? ` · ${escapeHtml(item.metadata.error_code)}` : ''}</li>`).join('')}</ol></details>` : '';
       const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button class="icon-button" data-copy-message="${escapeHtml(message.id)}" type="button" aria-label="Copy answer" title="Copy answer"><span aria-hidden="true">⧉</span></button><button class="icon-button" data-branch-message="${escapeHtml(message.id)}" type="button" aria-label="Branch from message" title="Branch from message"><span aria-hidden="true">⑂</span></button><button class="icon-button" data-details-message="${escapeHtml(message.id)}" type="button" aria-label="Show run details" title="Show run details"><span aria-hidden="true">ⓘ</span></button></div>` : '';
-     const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
-        return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}${trace}<div class="message-content">${content}</div>${artifacts}${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
+      const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
+      const approvals = state.approvals.filter((item) => item.message_id === message.id).map(renderApproval).join('');
+         return `<article class="message ${message.role === 'user' ? 'user' : ''}">${message.role === 'assistant' ? '<div class="avatar-small" aria-hidden="true">n</div>' : ''}<div class="message-body">${message.role === 'assistant' ? `<div class="message-meta">${escapeHtml(effectiveMessageIdentity(message))}</div>` : ''}${thinking}${trace}<div class="message-content">${content}</div>${approvals}${artifacts}${activity}${summary}${toolbar}${attachments}${sourceList}${notebookList}</div></article>`;
    }).join('');
     box.querySelectorAll('[data-copy-message]').forEach((button) => { button.onclick = async () => { const message = state.messages.find((item) => item.id === button.dataset.copyMessage); if (!message) return; const copied = await copyText(message.content || ''); if (copied) { button.querySelector('span').textContent = '✓'; toast('Copied'); setTimeout(() => { if (button.isConnected) button.querySelector('span').textContent = '⧉'; }, 1200); } else toast('Copy failed'); }; });
     box.querySelectorAll('[data-branch-message]').forEach((button) => { button.onclick = () => branchFrom(button.dataset.branchMessage); });
     box.querySelectorAll('[data-details-message]').forEach((button) => { button.onclick = () => { state.lastRuntime = state.messages.find((item) => item.id === button.dataset.detailsMessage)?.runtime || null; $('#config-content').innerHTML = renderConfig(); openSurface('config'); bindConfig(); }; });
-    box.querySelectorAll('[data-copy-artifact]').forEach((button) => { button.onclick = async () => { const a = state.messages.flatMap((m) => m.artifacts || []).find((item) => item.id === button.dataset.copyArtifact); if (a && await copyText(JSON.stringify(a.data, null, 2))) toast('Data copied'); }; });
+     box.querySelectorAll('[data-copy-artifact]').forEach((button) => { button.onclick = async () => { const a = state.messages.flatMap((m) => m.artifacts || []).find((item) => item.id === button.dataset.copyArtifact); if (a && await copyText(JSON.stringify(a.data, null, 2))) toast('Data copied'); }; });
+     box.querySelectorAll('[data-approval-action]').forEach((button) => { button.onclick = () => resolveApproval(button.dataset.approvalId, button.dataset.approvalAction); });
    if (state.followingBottom) $('#chat-view').scrollTop = $('#chat-view').scrollHeight;
    updateScrollButton();
 }
@@ -680,6 +682,73 @@ function updateStreamingThinking(content) {
   text.textContent = content;
 }
 
+function renderApproval(approval) {
+  const summary = approval.safe_summary || {};
+  const details = Object.entries(summary.details || {}).map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(value)}</div>`).join('');
+  const warning = summary.action === 'destructive' ? '<p class="approval-warning">This action may be destructive.</p>' : summary.action === 'unknown' ? '<p class="approval-warning">Tool behavior has not been classified.</p>' : '';
+  const status = approval.status === 'pending' ? 'Waiting for approval' : approval.status === 'executing' ? 'Executing approved action' : approval.status === 'executed' ? 'Executed' : approval.status === 'rejected' ? 'Rejected' : approval.status === 'failed' ? 'Not executed' : approval.status;
+  const actions = approval.status === 'pending' ? `<div class="approval-actions"><button type="button" class="text-button" ${state.busy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="reject">${state.busy ? 'Processing…' : 'Reject'}</button><button type="button" class="primary-button" ${state.busy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="approve">${state.busy ? 'Processing…' : 'Approve exact call'}</button></div>` : '';
+  return `<section class="approval-card" aria-label="Tool approval"><strong>${escapeHtml(summary.tool_id || approval.tool_id)}</strong><span class="approval-status" role="status">${escapeHtml(status)}</span>${warning}${details ? `<div class="approval-details">${details}</div>` : ''}${approval.safe_error_category ? `<small>${escapeHtml(approval.safe_error_category)}</small>` : ''}${actions}</section>`;
+}
+
+async function resolveApproval(id, decision) {
+  if (state.busy) return;
+  state.busy = true;
+  $('#send-button').disabled = true;
+  renderMessages();
+  let answer = '';
+  let assistant = null;
+  try {
+    const response = await fetch(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision }) });
+    if (!response.ok) { const error = Error((await response.text()).slice(0, 300)); error.status = response.status; throw error; }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const chunks = buffer.split('\n\n'); buffer = chunks.pop();
+      if (done && buffer.trim()) { chunks.push(buffer); buffer = ''; }
+      for (const chunk of chunks) {
+        const line = chunk.split('\n').find((item) => item.startsWith('data: '));
+        if (!line) continue;
+        const data = JSON.parse(line.slice(6));
+        if (data.error) throw Error(data.error);
+        if (data.interaction) await presentInteraction(data.interaction);
+        if (data.approval_required) {
+          state.approvals.push({ ...data.approval_required, id: data.approval_required.approval_id, safe_summary: data.approval_required });
+          renderMessages();
+        }
+        if (data.delta) {
+          answer += data.delta;
+          if (!assistant) { assistant = { role: 'assistant', content: '', sources: [], artifacts: [] }; state.messages.push(assistant); renderMessages(); }
+          assistant.content = answer; updateStreamingAnswer(answer);
+        }
+        if (data.artifact && assistant) { assistant.artifacts.push(data.artifact); renderMessages(); }
+        if (data.done) {
+          if (!assistant) { assistant = { role: 'assistant', content: '' }; state.messages.push(assistant); }
+          Object.assign(assistant, { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], artifacts: data.artifacts || [], runtime: data.runtime || {} });
+          state.lastRuntime = data.runtime || null;
+        }
+      }
+      if (done) break;
+    }
+    const refreshed = await api(`/conversations/${encodeURIComponent(state.conversationId)}`);
+    state.approvals = refreshed.approvals || [];
+    renderMessages();
+    if (decision === 'reject') toast('Tool call rejected; execution did not start.');
+    await loadChats();
+  } catch (error) {
+    if (state.conversationId) {
+      try { const refreshed = await api(`/conversations/${encodeURIComponent(state.conversationId)}`); state.approvals = refreshed.approvals || []; renderMessages(); } catch { /* preserve the last known approval state */ }
+    }
+    toast(error.message || 'The approval status could not be confirmed. Refresh the conversation to check.');
+  } finally {
+    state.busy = false;
+    $('#send-button').disabled = false;
+  }
+}
+
 async function openChat(id) {
   try {
     const data = await api(`/conversations/${id}`);
@@ -694,6 +763,7 @@ async function openChat(id) {
     renderNotebookPicker();
     renderExecutionMode();
     state.messages = data.messages;
+    state.approvals = data.approvals || [];
     state.lastRuntime = [...state.messages].reverse().find((message) => message.role === 'assistant')?.runtime || null;
     $('#welcome').hidden = true;
     renderMessages();
@@ -754,12 +824,7 @@ async function presentInteraction(interaction) {
   const form = $('#interaction-form');
   $('#interaction-title').textContent = interaction.payload.title;
   $('#interaction-message').textContent = interaction.payload.message || '';
-  $('#interaction-tool').hidden = interaction.kind !== 'tool_approval';
-  $('#interaction-tool').textContent = interaction.tool ? `Tool: ${interaction.tool}` : '';
-  const sessionApproval = $('#interaction-session-approval');
-  sessionApproval.checked = false;
-  $('#interaction-session-approval-row').hidden = interaction.kind !== 'tool_approval';
-  $('#interaction-submit').textContent = interaction.payload.submit_label || (interaction.kind === 'tool_approval' ? 'Approve and run' : 'Continue');
+  $('#interaction-submit').textContent = interaction.payload.submit_label || 'Continue';
   $('#interaction-fields').replaceChildren(...(interaction.payload.fields || []).map(renderInteractionField));
   dialog.showModal();
   let settled = false;
@@ -778,7 +843,7 @@ async function presentInteraction(interaction) {
           else if (control.type === 'number' && control.value !== '') values[field.id] = field.type === 'integer' ? Number.parseInt(control.value, 10) : Number(control.value);
           else if (control.value !== '') values[field.id] = control.value;
         }
-        await api(`/interactions/${encodeURIComponent(interaction.id)}`, { method: 'POST', body: JSON.stringify({ approved, values, session_approved: approved && sessionApproval.checked }) });
+        await api(`/interactions/${encodeURIComponent(interaction.id)}`, { method: 'POST', body: JSON.stringify({ approved, values }) });
         form.removeEventListener('submit', submit);
         $('#interaction-cancel').removeEventListener('click', cancel);
         dialog.removeEventListener('cancel', onCancel);
@@ -865,6 +930,13 @@ async function send() {
         const line = event.split('\n').find((item) => item.startsWith('data: '));
         if (!line) continue;
           const data = JSON.parse(line.slice(6));
+          if (data.approval_required) {
+            const pending = data.approval_required;
+            const userMessage = [...state.messages].reverse().find((message) => message.role === 'user' && !message.id);
+            if (userMessage) userMessage.id = pending.message_id;
+            state.approvals.push({ ...pending, id: pending.approval_id, safe_summary: pending });
+            renderMessages();
+          }
           if (data.trace) { const message = state.messages.at(-1); message.trace ||= []; message.trace.push({ type: data.trace.type, name: data.trace.name, status: data.trace.status, duration_ms: data.trace.duration_ms, metadata: Object.fromEntries(Object.entries(data.trace.metadata || {}).filter(([key]) => ['tool', 'model', 'error_code'].includes(key))) }); }
           if (data.error) { failureCode = 'runtime_error'; throw Error(data.error); }
          if (data.interaction) await presentInteraction(data.interaction);

@@ -32,7 +32,7 @@ from app.modules.aemet import register_aemet_tool
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
-from app.tools import ExposurePolicy, ToolExecutor
+from app.tools import ExposurePolicy, ToolExecutor, ToolNotAvailableError
 from app.native_tools import register_native_tools
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
@@ -48,6 +48,9 @@ from app.knowledge import EmbeddingConfiguration, KnowledgeConfigurationError, b
 from app.chunking import ChunkingConfig
 from app.benchmark import RetrievalBenchmarkService
 from app.interactions import validate_schema, validate_values
+from app.approvals import create as create_approval, freeze_arguments, resolve as resolve_approval, tool_fingerprint
+from app.tool_results import ToolResultPipeline
+from app.progress_guard import ProgressGuard
 
 DATA_DIR = Path(os.getenv("NEXO_DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -432,7 +435,10 @@ class ChatIn(BaseModel):
 class RuntimeInteractionInput(BaseModel):
     approved: StrictBool
     values: dict[str, Any] = Field(default_factory=dict)
-    session_approved: StrictBool = False
+
+
+class ApprovalDecisionInput(BaseModel):
+    decision: Literal["approve", "reject"]
 
 
 def create_runtime_interaction(run_id: str, conversation_id: str, event: dict[str, Any]) -> str:
@@ -478,6 +484,8 @@ def respond_to_runtime_interaction(interaction_id: str, response: RuntimeInterac
             raise HTTPException(404, "interaction_not_found")
         if row["status"] != "pending":
             raise HTTPException(409, "interaction_already_resolved")
+        if row["kind"] == "tool_approval":
+            raise HTTPException(410, "use_exact_invocation_approval")
         if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
             c.execute("UPDATE runtime_interactions SET status='expired',completed_at=? WHERE id=? AND status='pending'", (now(), interaction_id))
             c.commit()
@@ -485,19 +493,11 @@ def respond_to_runtime_interaction(interaction_id: str, response: RuntimeInterac
         schema = json.loads(row["validation_schema"] or "{}")
         try:
             if response.approved:
-                if row["kind"] == "tool_approval":
-                    values = validate_values([{"id": "arguments", "label": "Tool arguments", "type": "json", "required": True}], response.values)
-                    values = values["arguments"]
-                    validate_schema(values, schema)
-                else:
-                    values = validate_values(schema.get("fields", []), response.values)
+                values = validate_values(schema.get("fields", []), response.values)
         except (ValueError, TypeError) as error:
             raise HTTPException(422, str(error)) from error
         status = "approved" if response.approved else "denied"
-        session_approved = response.approved and response.session_approved and row["kind"] == "tool_approval" and bool(row["tool_name"])
-        if session_approved:
-            c.execute("INSERT OR IGNORE INTO conversation_tool_approvals(conversation_id,tool_name) VALUES(?,?)", (row["conversation_id"], row["tool_name"]))
-        payload = json.dumps({"approved": response.approved, "values": values if response.approved else {}, "session_approved": session_approved})
+        payload = json.dumps({"approved": response.approved, "values": values if response.approved else {}})
         cursor = c.execute("UPDATE runtime_interactions SET status=?,response=?,completed_at=? WHERE id=? AND status='pending'", (status, payload, now(), interaction_id))
         if not cursor.rowcount:
             raise HTTPException(409, "interaction_already_resolved")
@@ -1277,6 +1277,7 @@ def get_conversation(cid: str):
         conv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if not conv: raise HTTPException(404, "Conversation not found")
         msgs = c.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)).fetchall()
+        approval_rows = c.execute("SELECT id,run_id,message_id,tool_id,action,safe_summary,status,resolution,execution_status,safe_error_category,created_at,resolved_at FROM pending_approvals WHERE conversation_id=? ORDER BY created_at,id", (cid,)).fetchall()
     citation_map: dict[str, list[dict[str, Any]]] = {}
     with db() as c:
         all_citations = c.execute("""SELECT mc.*, ns.title AS source_title,
@@ -1298,7 +1299,152 @@ def get_conversation(cid: str):
         else:
             item["status"] = "valid"
         citation_map.setdefault(citation["message_id"], []).append(item)
-    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "artifacts": json.loads(m["artifacts"] or "[]"), "runtime": public_runtime(json.loads(m["runtime_metadata"] or "{}")), "citations": citation_map.get(m["id"], [])} for m in msgs]}
+    return {"conversation": dict(conv), "messages": [{**dict(m), "attachments": json.loads(m["attachments"]), "sources": json.loads(m["sources"]), "artifacts": json.loads(m["artifacts"] or "[]"), "runtime": public_runtime(json.loads(m["runtime_metadata"] or "{}")), "citations": citation_map.get(m["id"], [])} for m in msgs],
+            "approvals": [{**dict(row), "safe_summary": json.loads(row["safe_summary"])} for row in approval_rows]}
+
+
+@app.post("/api/approvals/{approval_id}")
+async def decide_approval(approval_id: str, item: ApprovalDecisionInput):
+    with db() as c:
+        try:
+            approval = resolve_approval(c, approval_id, item.decision)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+    if approval is None:
+        raise HTTPException(404, "approval_not_found")
+    if not approval.get("won"):
+        raise HTTPException(409, "approval_already_resolved")
+
+    with db() as c:
+        if item.decision == "approve":
+            cursor = c.execute("UPDATE pending_approvals SET status='executing' WHERE id=? AND status='approved'", (approval_id,))
+            if cursor.rowcount != 1:
+                raise HTTPException(409, "approval_already_resolved")
+        provider = c.execute("SELECT * FROM providers WHERE id=?", (json.loads(approval["continuation"])["provider_id"],)).fetchone()
+        if provider is None:
+            c.execute("UPDATE pending_approvals SET status='failed',execution_status='failed',safe_error_category='dependency_unavailable' WHERE id=?", (approval_id,))
+            c.execute("UPDATE runtime_runs SET status='failed',completed_at=? WHERE id=?", (now(), approval["run_id"]))
+    if provider is None:
+        raise HTTPException(409, "provider_unavailable")
+    continuation = json.loads(approval["continuation"])
+    arguments = json.loads(approval["frozen_arguments"])
+    encoded, digest = freeze_arguments(arguments)
+    result: dict[str, Any]
+    execution_status = "not_executed"
+    error_category = None
+    if item.decision == "reject":
+        result = {"status": "rejected", "reason": "user_rejected"}
+    elif digest != approval["arguments_sha256"] or encoded != approval["frozen_arguments"]:
+        result = {"error": {"code": "approval_integrity_error", "message": "The approved request could not be verified."}}
+        execution_status, error_category = "failed", "integrity_error"
+    else:
+        tool = next((item for item in module_registry.context.tools.registered_tools() if item.name == approval["tool_id"]), None)
+        if tool is None:
+            result = {"error": {"code": "tool_not_available", "message": "The approved tool is no longer available."}}
+            execution_status, error_category = "failed", "dependency_unavailable"
+        elif tool_fingerprint(tool) != approval["tool_fingerprint"]:
+            result = {"error": {"code": "tool_identity_changed", "message": "The approved tool changed; this call cannot be executed."}}
+            execution_status, error_category = "failed", "policy_changed"
+        elif approval["tool_id"] not in continuation["tool_names"]:
+            result = {"error": {"code": "tool_not_available", "message": "The approved tool is outside this run's tool snapshot."}}
+            execution_status, error_category = "failed", "dependency_unavailable"
+        else:
+            try:
+                validate_schema(arguments, tool.parameters)
+                context = ToolExecutionContext(approval["conversation_id"], continuation["provider_id"], continuation["model_id"], continuation["tool_rounds"], approval["run_id"])
+                result = await ToolExecutor().invoke(ExposurePolicy().resolve(module_registry.tool_catalog_view(), {"tool-calling"}, continuation["tool_names"]), approval["tool_id"], context, arguments)
+                execution_status = "executed"
+            except ToolNotAvailableError:
+                result = {"error": {"code": "tool_not_available", "message": "The approved tool is no longer available."}}
+                execution_status, error_category = "failed", "dependency_unavailable"
+            except Exception:
+                logger.exception("approved tool execution failed", extra={"tool": approval["tool_id"], "run_id": approval["run_id"]})
+                result = {"error": {"code": "tool_execution_error", "message": "The approved action could not be completed."}}
+                execution_status, error_category = "failed", "execution_error"
+    pipeline = ToolResultPipeline()
+    _, metadata = pipeline.process(result)
+    projection = metadata.pop("projection", result)
+    progress_guard = ProgressGuard.restore(continuation.get("progress_state"))
+    progress_guard.observe_resumed_result(projection, "user_rejected" if item.decision == "reject" else execution_status if execution_status != "executed" else "ok")
+    continuation["progress_state"] = progress_guard.snapshot()
+    continuation["messages"].append({"role": "tool", "tool_call_id": approval["tool_call_id"], "name": approval["tool_id"],
+                                     "content": json.dumps(projection, ensure_ascii=False, separators=(",", ":"))})
+    with db() as c:
+        c.execute("UPDATE pending_approvals SET status=?,execution_status=?,safe_error_category=? WHERE id=?",
+                  ("rejected" if item.decision == "reject" else "executed" if execution_status == "executed" else "failed",
+                   execution_status, error_category, approval_id))
+        c.execute("UPDATE runtime_runs SET status='running' WHERE id=?", (approval["run_id"],))
+
+    effective_tools = ExposurePolicy().resolve(module_registry.tool_catalog_view(), {"tool-calling"}, continuation["tool_names"])
+    async def events():
+        run_status = "failed"
+        answer = ""
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
+                adapter = OpenAICompatibleModelAdapter(client, (continuation.get("provider_base_url") or provider["base_url"].rstrip("/")) + "/chat/completions",
+                    {"Authorization": f"Bearer {provider['api_key']}"} if provider["api_key"] else {}, continuation["model_id"])
+                runtime = AgentRuntime(AgentRuntimeLimits(max_tool_calls=continuation["max_tool_calls"]))
+                request = AgentRunRequest(adapter, [], effective_tools, ToolExecutor(),
+                    ToolExecutionContext(approval["conversation_id"], continuation["provider_id"], continuation["model_id"], continuation["tool_rounds"], approval["run_id"]),
+                    temperature=continuation.get("temperature"), profile_id=continuation.get("profile_id"), profile_name=continuation.get("profile_name"),
+                    runtime_snapshot=continuation.get("runtime_snapshot"), resume_messages=continuation["messages"],
+                    initial_tool_call_count=continuation["tool_call_count"], initial_tool_rounds=continuation["tool_rounds"], initial_tools_used=continuation["tools_used"],
+                    progress_state=continuation.get("progress_state"),
+                    event_sink=SQLiteRuntimeEventSink(approval["run_id"]), interaction_handler=True)
+                runtime_stream = runtime.stream(request)
+                try:
+                    event = await runtime_stream.__anext__()
+                except StopAsyncIteration:
+                    event = None
+                while event is not None:
+                    if "interaction" in event:
+                        interaction = event["interaction"]
+                        interaction_id = create_runtime_interaction(approval["run_id"], approval["conversation_id"], interaction)
+                        yield "data: " + json.dumps({"interaction": {"id": interaction_id, "kind": interaction["kind"], "tool": interaction.get("tool"), "payload": interaction["payload"]}}) + "\n\n"
+                        event = await runtime_stream.asend(await wait_runtime_interaction(interaction_id))
+                        continue
+                    if "delta" in event:
+                        answer += event["delta"]
+                        yield "data: " + json.dumps(event) + "\n\n"
+                    elif "activity" in event or "thinking_delta" in event or "trace" in event:
+                        yield "data: " + json.dumps(event) + "\n\n"
+                    elif "approval_required" in event:
+                        pending = event["approval_required"]
+                        with db() as c:
+                            next_id = create_approval(c, run_id=approval["run_id"], conversation_id=approval["conversation_id"], message_id=approval["message_id"],
+                                tool_call_id=pending["tool_call_id"], tool_id=pending["tool"], action=pending["action"], arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"])
+                            c.execute("UPDATE runtime_runs SET status='waiting_approval' WHERE id=?", (approval["run_id"],))
+                            summary = json.loads(c.execute("SELECT safe_summary FROM pending_approvals WHERE id=?", (next_id,)).fetchone()[0])
+                        run_status = "waiting_approval"
+                        yield "data: " + json.dumps({"approval_required": {"approval_id": next_id, "message_id": approval["message_id"], "status": "pending", **summary}}) + "\n\n"
+                        return
+                    elif event.get("complete"):
+                        run_status = "completed"
+                        runtime_metadata = {**continuation.get("runtime_snapshot", {}), **event.get("telemetry", {}),
+                                            "tool_calls": len(event.get("tools_used", [])), "tools_used": event.get("tools_used", [])}
+                        assistant_id = str(uuid.uuid4())
+                        with db() as c:
+                            c.execute("INSERT INTO messages(id,conversation_id,role,content,provider_id,model_id,attachments,sources,runtime_metadata,created_at,artifacts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                                (assistant_id, approval["conversation_id"], "assistant", answer, continuation["provider_id"], continuation["model_id"], "[]", json.dumps(event.get("sources", [])), json.dumps(runtime_metadata), now(), json.dumps(event.get("artifacts", []))))
+                            c.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), approval["conversation_id"]))
+                            c.execute("UPDATE runtime_runs SET status='completed',completed_at=? WHERE id=?", (now(), approval["run_id"]))
+                        yield "data: " + json.dumps({"done": True, "conversation_id": approval["conversation_id"], "message_id": assistant_id, "provider_id": continuation["provider_id"], "model_id": continuation["model_id"], "sources": event.get("sources", []), "artifacts": event.get("artifacts", []), "runtime": public_runtime(runtime_metadata)}) + "\n\n"
+                    elif "error" in event:
+                        run_status = "failed"
+                        yield "data: " + json.dumps(event) + "\n\n"
+                    try:
+                        event = await runtime_stream.__anext__()
+                    except StopAsyncIteration:
+                        event = None
+        except Exception:
+            logger.exception("approval continuation failed", extra={"run_id": approval["run_id"]})
+            yield "data: " + json.dumps({"error": "resume_failed"}) + "\n\n"
+        finally:
+            if run_status != "waiting_approval":
+                with db() as c:
+                    c.execute("UPDATE runtime_runs SET status=?,completed_at=? WHERE id=? AND completed_at IS NULL", (run_status, now(), approval["run_id"]))
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
 
 @app.delete("/api/conversations/{cid}")
@@ -1455,6 +1601,7 @@ async def chat(req: ChatIn):
             "knowledge_resolution_status": "resolved" if notebook_id else "not_bound",
             "requested_tool_names": list(profile_config.requested_tool_names) if profile_config else [],
             "resolved_provider": selected_provider_id,
+            "provider_base_url": provider["base_url"].rstrip("/"),
             "resolved_provider_name": provider["name"],
             "resolved_model": selected_model_id,
             "resolved_model_name": model["label"],
@@ -1659,8 +1806,6 @@ async def chat(req: ChatIn):
                 runtime_snapshot["physical_message_roles"] = (["system"] if profile_config else []) + (["system"] if grounded_context else []) + (["system"] if knowledge_outcome and knowledge_outcome != KnowledgeOutcome.GROUNDING_APPLIED else []) + [message["role"] for message in messages]
                 runtime_snapshot["max_tool_calls"] = run_agent.limits.max_tool_calls
                 _update_runtime_metadata(run_id, runtime_snapshot)
-                with db() as c:
-                    session_approved_tools = {row[0] for row in c.execute("SELECT tool_name FROM conversation_tool_approvals WHERE conversation_id=?", (cid,))}
                 run_request = AgentRunRequest(model_adapter, messages, effective_tools, ToolExecutor(), execution_context,
                                               profile_config.temperature if profile_config else req.temperature, event_sink,
                                               profile_config.system_instructions if profile_config else "",
@@ -1669,7 +1814,7 @@ async def chat(req: ChatIn):
                                                 runtime_snapshot, grounded_context, effective_configuration,
                                                 knowledge_outcome=knowledge_outcome,
                                                 request_started_at=request_started_at, interaction_handler=True,
-                                                session_approved_tools=session_approved_tools)
+                                                )
                 runtime_stream = run_agent.stream(run_request)
                 try:
                     event = await runtime_stream.__anext__()
@@ -1682,6 +1827,18 @@ async def chat(req: ChatIn):
                         yield "data: " + json.dumps({"interaction": {"id": interaction_id, "kind": interaction["kind"], "tool": interaction.get("tool"), "payload": interaction["payload"]}}) + "\n\n"
                         event = await runtime_stream.asend(await wait_runtime_interaction(interaction_id))
                         continue
+                    if "approval_required" in event:
+                        pending = event["approval_required"]
+                        with db() as c:
+                            approval_id = create_approval(c, run_id=run_id, conversation_id=cid, message_id=message_id,
+                                tool_call_id=pending["tool_call_id"], tool_id=pending["tool"], action=pending["action"],
+                                arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"])
+                            c.execute("UPDATE runtime_runs SET status='waiting_approval' WHERE id=?", (run_id,))
+                        run_status = "waiting_approval"
+                        with db() as c:
+                            summary = json.loads(c.execute("SELECT safe_summary FROM pending_approvals WHERE id=?", (approval_id,)).fetchone()[0])
+                        yield "data: " + json.dumps({"approval_required": {"approval_id": approval_id, "message_id": message_id, "status": "pending", **summary}}) + "\n\n"
+                        return
                     if "trace" in event:
                         trace = event["trace"]
                         _insert_trace_event(cid, message_id, trace["type"], trace["status"], trace.get("metadata", {}), trace.get("duration_ms"))
@@ -1744,7 +1901,8 @@ async def chat(req: ChatIn):
             run_status = "failed"
             yield "data: " + json.dumps({"error": f"Provider connection failed: {str(e)[:180]}"}) + "\n\n"
         finally:
-            _finish_runtime_run(run_id, locals().get("run_status", "failed"))
+            if locals().get("run_status") != "waiting_approval":
+                _finish_runtime_run(run_id, locals().get("run_status", "failed"))
             with db() as c:
                 c.execute("DELETE FROM runtime_interactions WHERE run_id=?", (run_id,))
             if not execution_future.done():
