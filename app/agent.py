@@ -256,7 +256,7 @@ class AgentRuntime:
             tool_rounds += 1
             for call in tool_calls.values():
                 if tool_call_count >= max_tool_calls:
-                    yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
+                    yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas.", "error_code": "tool_call_limit"}
                     return
                 tool_call_count += 1
                 tools_used.append(call["name"])
@@ -443,4 +443,4 @@ class AgentRuntime:
                     yield {"error": "The same tool call was blocked by its action policy and was already stopped."}
                     return
             diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
-        yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas."}
+        yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas.", "error_code": "tool_call_limit"}

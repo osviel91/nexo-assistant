@@ -1872,7 +1872,7 @@ async def chat(req: ChatIn):
                         yield "data: " + json.dumps({"status": event["status"], "message": event["message"]}) + "\n\n"
                     elif "error" in event:
                         run_status = "failed"
-                        yield "data: " + json.dumps({"error": event["error"]}) + "\n\n"
+                        yield "data: " + json.dumps({"error": event["error"], "error_code": event.get("error_code", "runtime_error")}) + "\n\n"
                         return
                     elif event.get("complete"):
                         answer, sources = event["answer"], event["sources"]

@@ -945,7 +945,7 @@ async function send() {
             renderMessages();
           }
           if (data.trace) { const message = [...state.messages].reverse().find((item) => item.role === 'user'); message.trace ||= []; message.trace.push({ type: data.trace.type, name: data.trace.name, status: data.trace.status, duration_ms: data.trace.duration_ms, metadata: Object.fromEntries(Object.entries(data.trace.metadata || {}).filter(([key]) => ['tool', 'model', 'error_code', 'action', 'policy_decision', 'execution_status'].includes(key))) }); }
-          if (data.error) { failureCode = 'runtime_error'; throw Error(data.error); }
+          if (data.error) { failureCode = data.error_code || 'runtime_error'; throw Error(data.error); }
          if (data.interaction) await presentInteraction(data.interaction);
          if (data.status) toast(data.message);
           if (data.thinking_delta) { const message = state.messages.at(-1); message.runtime ||= {}; message.runtime.thinking ||= { available: true, content: '' }; message.runtime.thinking.available = true; message.runtime.thinking.content += data.thinking_delta; updateStreamingThinking(message.runtime.thinking.content); }
