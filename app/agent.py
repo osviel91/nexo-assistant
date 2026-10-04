@@ -36,7 +36,9 @@ class PolicyDecision(str, Enum):
 
 class PolicyEvaluator:
     def evaluate(self, tool: Any) -> PolicyDecision:
-        return PolicyDecision.ALLOW if tool and tool.action == "read_only" else PolicyDecision.APPROVAL_REQUIRED
+        if not tool or tool.action == "unknown" or tool.action is None:
+            return PolicyDecision.DENY
+        return PolicyDecision.ALLOW if tool.action == "read_only" else PolicyDecision.APPROVAL_REQUIRED
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,9 @@ class AgentRuntime:
             yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "success", "metadata": {**reason_metadata, "run_id": request.context.run_id}}}
 
             if not tool_calls:
+                if not answer.strip():
+                    yield {"error": "provider_empty_response"}
+                    return
                 diagnostic(logger, "agent_loop", tool_rounds=tool_rounds, executed_tool_names=tools_used)
                 completed_at = time.perf_counter()
                 telemetry = {**usage, "ttft_ms": provider_ttft_ms,
@@ -311,7 +316,10 @@ class AgentRuntime:
                                     else:
                                         values = validate_values(dialog["fields"], response.get("values"))
                                         result = {"content": "User response received.", "structured_data": values}
-                            elif decision != PolicyDecision.ALLOW:
+                            elif decision == PolicyDecision.DENY:
+                                result = {"error": {"code": "unclassified_tool", "message": "This tool is not classified as read-only or state-changing, so it was not executed."}}
+                                status = "unclassified_tool"
+                            elif decision == PolicyDecision.APPROVAL_REQUIRED:
                                 signature = (call["name"], call["arguments"])
                                 if signature in blocked_calls:
                                     result = {"error": {"code": "repeated_approval_required", "message": "The same tool call was denied or blocked again; execution stopped."}}
@@ -323,9 +331,11 @@ class AgentRuntime:
                                 else:
                                     duration_ms = round(time.monotonic() - started, 4) * 1000
                                     request.event_sink.finish_event(event_id, "waiting_approval", {"tool": call["name"], "round": tool_rounds, "action": definition.action or "unknown", "approval_required": True}, duration_ms)
+                                    yield {"trace": {"type": "ACT", "name": call["name"], "status": "waiting_approval", "duration_ms": duration_ms,
+                                        "metadata": {"tool": call["name"], "action": definition.action or "unknown", "policy_decision": decision.value, "run_id": request.context.run_id}}}
                                     yield {"approval_required": {
-                                        "tool": call["name"], "tool_call_id": call["id"],
-                                         "action": definition.action or "unknown", "arguments": arguments,
+                                         "tool": call["name"], "tool_call_id": call["id"],
+                                          "action": definition.action or "unknown", "description": definition.description, "arguments": arguments,
                                          "tool_fingerprint": tool_fingerprint(definition),
                                         "continuation": {"messages": messages, "tool_call_count": tool_call_count,
                                             "tool_rounds": tool_rounds, "tools_used": tools_used,

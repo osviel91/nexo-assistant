@@ -47,3 +47,5 @@ assert.equal((app.match(/state\.busy = false;\s*\$\('#send-button'\)\.disabled =
 assert.match(app, /approvalBusy: false/);
 assert.match(app, /approval\.status === 'pending'.*state\.approvalBusy/);
 assert.match(app, /state\.approvalBusy = false;\s*\$\('#send-button'\)\.disabled = state\.busy;\s*renderMessages\(\);/);
+assert.match(app, /summary\.arguments && Object\.keys\(summary\.arguments\)\.length/);
+assert.match(app, /if \(!assistant && answer\.trim\(\)\)/);

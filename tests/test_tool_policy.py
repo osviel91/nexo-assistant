@@ -34,9 +34,9 @@ def execute(registry, adapter, capabilities={"tool-calling"}, requested=None):
 
 
 class ToolPolicyTests(unittest.TestCase):
-    def test_action_policy_allows_reads_and_requires_approval_for_other_actions(self):
+    def test_action_policy_allows_reads_approves_mutations_and_denies_unknown(self):
         evaluator = PolicyEvaluator()
-        for action, decision in (("read_only", PolicyDecision.ALLOW), ("mutating", PolicyDecision.APPROVAL_REQUIRED), ("destructive", PolicyDecision.APPROVAL_REQUIRED), (None, PolicyDecision.APPROVAL_REQUIRED)):
+        for action, decision in (("read_only", PolicyDecision.ALLOW), ("mutating", PolicyDecision.APPROVAL_REQUIRED), ("destructive", PolicyDecision.APPROVAL_REQUIRED), ("unknown", PolicyDecision.DENY), (None, PolicyDecision.DENY)):
             tool = SimpleNamespace(action=action)
             self.assertEqual(evaluator.evaluate(tool), decision)
 
@@ -91,7 +91,7 @@ class ToolPolicyTests(unittest.TestCase):
         execute(registry, adapter, set())
         self.assertEqual(adapter.payloads[0]["tools"], [])
 
-    def test_unknown_action_fails_closed_without_interaction_support(self):
+    def test_unknown_action_is_blocked_without_approval(self):
         seen = []
         registry = self.native_registry(seen)
         tool = registry.context.tools._tools["visible"]
@@ -103,8 +103,13 @@ class ToolPolicyTests(unittest.TestCase):
         events = execute(registry, adapter, requested={"visible"})
         self.assertEqual(seen, [])
         response = adapter.payloads[1]["messages"][-1]["content"]
-        self.assertIn("approval_unavailable", response)
+        self.assertIn("unclassified_tool", response)
         self.assertEqual(events[-1]["answer"], "approval needed")
+
+    def test_empty_provider_response_is_an_error_not_success(self):
+        registry = self.native_registry([])
+        events = execute(registry, Adapter([[{"content": ""}]]))
+        self.assertEqual(events[-1], {"error": "provider_empty_response"})
 
     def test_approval_freezes_exact_call_and_pauses_without_execution(self):
         seen = []

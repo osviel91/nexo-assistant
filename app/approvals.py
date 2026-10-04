@@ -23,20 +23,35 @@ def tool_fingerprint(tool) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def safe_summary(tool_id: str, action: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    details = {}
-    for key, value in arguments.items():
-        if key.casefold() not in SAFE_FIELDS or SECRET_KEY.search(key):
-            continue
-        if isinstance(value, str) and len(value) <= 120 and not re.search(r"(?i)(bearer\s|(?:api[_-]?key|password|token|secret)=|https?://[^\s:@]+:[^\s@]+@)", value):
-            details[key] = value
-        elif isinstance(value, (int, bool)):
-            details[key] = value
-    return {"tool_id": tool_id[:160], "action": action, "details": details}
+def _preview(value: Any, key: str = "", depth: int = 0) -> Any:
+    if SECRET_KEY.search(key):
+        return "[redacted]"
+    if depth >= 5:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {str(name)[:100]: _preview(item, str(name), depth + 1) for name, item in list(value.items())[:40]}
+    if isinstance(value, list):
+        return [_preview(item, depth=depth + 1) for item in value[:40]]
+    if isinstance(value, str):
+        if re.search(r"(?i)(bearer\s|(?:api[_-]?key|password|token|secret)=|https?://[^\s:@]+:[^\s@]+@)", value):
+            return "[redacted]"
+        return value[:500] + ("…" if len(value) > 500 else "")
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:500]
+
+
+def safe_summary(tool_id: str, action: str, arguments: dict[str, Any], description: str = "") -> dict[str, Any]:
+    preview = _preview(arguments)
+    while len(json.dumps(preview, ensure_ascii=False)) > 6000 and isinstance(preview, dict) and preview:
+        preview.pop(next(reversed(preview)))
+    details = {key: value for key, value in preview.items() if key.casefold() in SAFE_FIELDS} if isinstance(preview, dict) else {}
+    return {"tool_id": tool_id[:160], "action": action, "description": description[:500], "arguments": preview, "details": details}
 
 
 def create(connection, *, run_id: str, conversation_id: str, message_id: str, tool_call_id: str,
-           tool_id: str, action: str, arguments: dict[str, Any], continuation: dict[str, Any], fingerprint: str) -> str:
+           tool_id: str, action: str, arguments: dict[str, Any], continuation: dict[str, Any], fingerprint: str,
+           description: str = "") -> str:
     encoded, digest = freeze_arguments(arguments)
     approval_id = str(uuid.uuid4())
     connection.execute("""INSERT INTO pending_approvals
@@ -44,7 +59,7 @@ def create(connection, *, run_id: str, conversation_id: str, message_id: str, to
          arguments_sha256,safe_summary,continuation,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (approval_id, run_id, conversation_id, message_id, tool_call_id, tool_id, action,
-         fingerprint, encoded, digest, json.dumps(safe_summary(tool_id, action, arguments)),
+         fingerprint, encoded, digest, json.dumps(safe_summary(tool_id, action, arguments, description)),
          json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))))
     return approval_id
 

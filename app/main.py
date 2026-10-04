@@ -144,8 +144,12 @@ class MCPRepository:
             c.execute("DELETE FROM mcp_tools WHERE server_id=?", (server_id,))
             for tool in tools:
                 old = existing.get(tool["remote_name"])
-                action = old["action"] if old and old["action"] != "unknown" else tool.get("action", "unknown")
-                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at,action) VALUES(?,?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now(), action))
+                action = tool.get("action", "unknown") if tool.get("read_only_hint") is False and old and old["action"] == "read_only" else old["action"] if old and old["action"] != "unknown" else tool.get("action", "unknown")
+                c.execute("INSERT INTO mcp_tools(id,server_id,remote_name,description,input_schema,enabled,discovered_at,action,read_only_hint) VALUES(?,?,?,?,?,?,?,?,?)", (tool["id"], server_id, tool["remote_name"], tool["description"], tool["input_schema"], old["enabled"] if old else 0, now(), action, tool.get("read_only_hint")))
+
+    def set_tool_action(self, tool_id, action):
+        with db() as c:
+            c.execute("UPDATE mcp_tools SET action=? WHERE id=? AND action='unknown'", (action, tool_id))
 
     def status(self, server_id, status, error):
         with db() as c:
@@ -1375,11 +1379,20 @@ async def decide_approval(approval_id: str, item: ApprovalDecisionInput):
                    execution_status, error_category, approval_id))
         c.execute("UPDATE runtime_runs SET status='running' WHERE id=?", (approval["run_id"],))
 
+    decision_status = "rejected" if item.decision == "reject" else execution_status
+    policy_decision = "rejected_by_user" if item.decision == "reject" else "approved_by_user"
+    approval_sink = SQLiteRuntimeEventSink(approval["run_id"])
+    approval_event = approval_sink.start_event("ACT", approval["tool_id"], {"tool": approval["tool_id"], "action": approval["action"], "policy_decision": policy_decision, "execution_status": decision_status})
+    approval_sink.finish_event(approval_event, decision_status, {"tool": approval["tool_id"], "action": approval["action"], "policy_decision": policy_decision, "execution_attempted": item.decision == "approve", "execution_status": decision_status, **({"error_code": result["error"].get("code")} if result.get("error") else {})})
+
     effective_tools = ExposurePolicy().resolve(module_registry.tool_catalog_view(), {"tool-calling"}, continuation["tool_names"])
     async def events():
         run_status = "failed"
         answer = ""
         try:
+            yield "data: " + json.dumps({"trace": {"type": "ACT", "name": approval["tool_id"], "status": decision_status,
+                "metadata": {"tool": approval["tool_id"], "action": approval["action"], "policy_decision": policy_decision,
+                             "execution_status": decision_status, **({"error_code": result["error"].get("code")} if result.get("error") else {})}}}) + "\n\n"
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
                 adapter = OpenAICompatibleModelAdapter(client, (continuation.get("provider_base_url") or provider["base_url"].rstrip("/")) + "/chat/completions",
                     {"Authorization": f"Bearer {provider['api_key']}"} if provider["api_key"] else {}, continuation["model_id"])
@@ -1412,7 +1425,7 @@ async def decide_approval(approval_id: str, item: ApprovalDecisionInput):
                         pending = event["approval_required"]
                         with db() as c:
                             next_id = create_approval(c, run_id=approval["run_id"], conversation_id=approval["conversation_id"], message_id=approval["message_id"],
-                                tool_call_id=pending["tool_call_id"], tool_id=pending["tool"], action=pending["action"], arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"])
+                             tool_call_id=pending["tool_call_id"], tool_id=pending["tool"], action=pending["action"], arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"], description=pending.get("description", ""))
                             c.execute("UPDATE runtime_runs SET status='waiting_approval' WHERE id=?", (approval["run_id"],))
                             summary = json.loads(c.execute("SELECT safe_summary FROM pending_approvals WHERE id=?", (next_id,)).fetchone()[0])
                         run_status = "waiting_approval"
@@ -1835,7 +1848,7 @@ async def chat(req: ChatIn):
                         with db() as c:
                             approval_id = create_approval(c, run_id=run_id, conversation_id=cid, message_id=message_id,
                                 tool_call_id=pending["tool_call_id"], tool_id=pending["tool"], action=pending["action"],
-                                arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"])
+                                arguments=pending["arguments"], continuation=pending["continuation"], fingerprint=pending["tool_fingerprint"], description=pending.get("description", ""))
                             c.execute("UPDATE runtime_runs SET status='waiting_approval' WHERE id=?", (run_id,))
                         run_status = "waiting_approval"
                         with db() as c:

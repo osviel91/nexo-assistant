@@ -77,9 +77,14 @@ class MCPManager:
             server = self.repository.server(tool["server_id"])
             if not server or not server["enabled"] or server["status"] != "connected" or self.context.tools.has(tool["id"]):
                 continue
+            action = tool.get("action") or "unknown"
+            if action == "unknown" and tool.get("read_only_hint") != 0:
+                action = inferred_action(tool["remote_name"])
+                if action == "read_only" and hasattr(self.repository, "set_tool_action"):
+                    self.repository.set_tool_action(tool["id"], action)
             async def invoke(execution: ToolExecutionContext, arguments: dict[str, Any], tool=tool, server=server):
                 return await self.call(server, tool, arguments)
-            self.context.tools.register(ToolDefinition(tool["id"], tool["description"], json.loads(tool["input_schema"]), invoke, "mcp", "mcp", action=tool.get("action")))
+            self.context.tools.register(ToolDefinition(tool["id"], tool["description"], json.loads(tool["input_schema"]), invoke, "mcp", "mcp", action=action))
 
     async def refresh(self, server: dict[str, Any]) -> dict[str, Any]:
         self.repository.status(server["id"], "connecting", None)
@@ -107,8 +112,8 @@ class MCPManager:
                 else:
                     has_read_hint = hasattr(annotations, "readOnlyHint") or hasattr(annotations, "read_only_hint")
                 read_hint = annotation("readOnlyHint", annotation("read_only_hint"))
-                action = "read_only" if read_hint is True else "unknown" if has_read_hint else inferred_action(name)
-                tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema), "action": action})
+                action = "read_only" if read_hint is True else "mutating" if read_hint is False else inferred_action(name)
+                tools.append({"id": identity, "remote_name": name, "description": str(get("description", ""))[:1000], "input_schema": json.dumps(schema), "action": action, "read_only_hint": read_hint if isinstance(read_hint, bool) else None})
             self.repository.replace_tools(server["id"], tools)
             self.repository.status(server["id"], "connected", None)
             self._sync_tools()

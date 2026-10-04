@@ -29,6 +29,8 @@ class Repo:
     def status(self, _id, status, error): self.server_value.update(status=status, error_category=error)
     def auth_token(self, _id): return None
     def invocation(self, server_id, tool_id, duration, status, truncated): self.diagnostics.append((server_id, tool_id, duration, status, truncated))
+    def set_tool_action(self, tool_id, action):
+        next(tool for tool in self.items if tool["id"] == tool_id)["action"] = action
 
 
 class FakeClient:
@@ -154,7 +156,26 @@ class MCPTests(unittest.TestCase):
 
         actions = {tool["remote_name"]: tool["action"] for tool in repo.items}
         self.assertEqual(actions, {"search": "read_only", "query_database": "read_only", "update_status": "unknown",
-                                   "search_and_delete": "unknown", "search_with_false_hint": "unknown", "other": "read_only"})
+                                   "search_and_delete": "unknown", "search_with_false_hint": "mutating", "other": "read_only"})
+
+    def test_startup_reclassifies_persisted_obvious_read_tools(self):
+        repo, registry = Repo(), ToolRegistry()
+        repo.items = [{"id": "mcp.demo.search", "server_id": "s1", "remote_name": "search", "description": "Search records",
+                       "input_schema": '{"type":"object"}', "enabled": True, "action": "unknown", "read_only_hint": None}]
+        manager = MCPManager(repo)
+        manager.register(ModuleContext(None, {}, registry))
+        manager.startup(manager.context)
+        self.assertEqual(registry._tools["mcp.demo.search"].action, "read_only")
+        self.assertEqual(repo.items[0]["action"], "read_only")
+
+    def test_startup_respects_explicit_non_readonly_annotation(self):
+        repo, registry = Repo(), ToolRegistry()
+        repo.items = [{"id": "mcp.demo.search", "server_id": "s1", "remote_name": "search", "description": "",
+                       "input_schema": '{"type":"object"}', "enabled": True, "action": "unknown", "read_only_hint": False}]
+        manager = MCPManager(repo)
+        manager.register(ModuleContext(None, {}, registry))
+        manager.startup(manager.context)
+        self.assertEqual(registry._tools["mcp.demo.search"].action, "unknown")
 
     def test_refresh_failure_keeps_stale_snapshot_but_unexposes_tools(self):
         repo = Repo()

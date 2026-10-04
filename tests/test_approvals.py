@@ -12,8 +12,9 @@ class ApprovalTests(unittest.TestCase):
         encoded, digest = approvals.freeze_arguments(args)
         self.assertEqual(encoded, '{"api_key":"secret","name":"database","password":"never-show","resource":"prod"}')
         self.assertEqual(len(digest), 64)
-        self.assertEqual(approvals.safe_summary("service.update", "mutating", args),
-                         {"tool_id": "service.update", "action": "mutating", "details": {"name": "database", "resource": "prod"}})
+        preview = approvals.safe_summary("service.update", "mutating", {**args, "query": "status: active", "filters": {"owner": "me", "access_token": "private"}}, "Update a service")
+        self.assertEqual(preview["arguments"], {"name": "database", "password": "[redacted]", "api_key": "[redacted]", "resource": "prod", "query": "status: active", "filters": {"owner": "me", "access_token": "[redacted]"}})
+        self.assertEqual(preview["description"], "Update a service")
 
     def test_resolution_is_compare_and_set_and_delete_cascades(self):
         with tempfile.TemporaryDirectory() as directory:

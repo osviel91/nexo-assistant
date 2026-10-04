@@ -581,7 +581,7 @@ function renderMessages() {
      const summary = message.role === 'assistant' && (metrics.tokens_per_second != null || metrics.output_tokens != null || metrics.total_duration_ms != null)
        ? `<div class="message-metrics">${metrics.output_tokens != null ? `${escapeHtml(metrics.output_tokens)} tokens` : ''}${metrics.tokens_per_second != null ? ` · ${escapeHtml(metrics.tokens_per_second)} tok/s` : ''}${metrics.total_duration_ms != null ? ` · ${(Number(metrics.total_duration_ms) / 1000).toFixed(2)} s` : ''}</div>` : '';
        const thinking = message.role === 'assistant' && runtime.thinking?.available ? `<details class="thinking-block"><summary>Thinking${runtime.thinking.duration_ms != null ? ` · ${(Number(runtime.thinking.duration_ms) / 1000).toFixed(1)} s` : ''}${runtime.thinking.tokens != null ? ` · ${runtime.thinking.tokens} tokens` : ''}</summary>${runtime.thinking.content ? `<p>${escapeHtml(runtime.thinking.content)}</p>` : ''}${runtime.thinking.budget != null ? `<small>Budget ${escapeHtml(runtime.thinking.budget)}</small>` : ''}</details>` : '';
-       const trace = document.documentElement.dataset.ui === 'developer' && message.role === 'assistant' && (runtime.diagnostic_error || message.trace?.length)
+       const trace = document.documentElement.dataset.ui === 'developer' && (runtime.diagnostic_error || message.trace?.length)
          ? `<details class="runtime-diagnostic"><summary>Diagnóstico · ${escapeHtml(runtime.diagnostic_error?.code || `${message.trace.length} eventos`)}</summary>${runtime.diagnostic_error ? `<p>${escapeHtml(runtime.diagnostic_error.stage)} · ${escapeHtml(runtime.diagnostic_error.code)}</p>` : ''}<ol>${(message.trace || []).map((item) => `<li><strong>${escapeHtml(item.type || 'EVENT')}</strong> · ${escapeHtml(item.name || item.metadata?.tool || item.metadata?.model || item.type || 'runtime')} · ${escapeHtml(item.status || 'unknown')}${item.duration_ms != null ? ` · ${escapeHtml(item.duration_ms)} ms` : ''}${item.metadata?.error_code ? ` · ${escapeHtml(item.metadata.error_code)}` : ''}</li>`).join('')}</ol></details>` : '';
       const toolbar = message.role === 'assistant' && message.id ? `<div class="message-toolbar"><button class="icon-button" data-copy-message="${escapeHtml(message.id)}" type="button" aria-label="Copy answer" title="Copy answer"><span aria-hidden="true">⧉</span></button><button class="icon-button" data-branch-message="${escapeHtml(message.id)}" type="button" aria-label="Branch from message" title="Branch from message"><span aria-hidden="true">⑂</span></button><button class="icon-button" data-details-message="${escapeHtml(message.id)}" type="button" aria-label="Show run details" title="Show run details"><span aria-hidden="true">ⓘ</span></button></div>` : '';
       const activity = message === state.messages.at(-1) && message.role === 'assistant' && state.activity ? `<div class="message-activity"><span class="activity-dot"></span>${escapeHtml(activityLabel(state.activity))}</div>` : '';
@@ -684,11 +684,11 @@ function updateStreamingThinking(content) {
 
 function renderApproval(approval) {
   const summary = approval.safe_summary || {};
-  const details = Object.entries(summary.details || {}).map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(value)}</div>`).join('');
+  const details = summary.arguments && Object.keys(summary.arguments).length ? `<pre>${escapeHtml(JSON.stringify(summary.arguments, null, 2))}</pre>` : Object.entries(summary.details || {}).map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong> ${escapeHtml(value)}</div>`).join('');
   const warning = summary.action === 'destructive' ? '<p class="approval-warning">This action may be destructive.</p>' : summary.action === 'unknown' ? '<p class="approval-warning">Tool behavior has not been classified.</p>' : '';
   const status = approval.status === 'pending' ? 'Waiting for approval' : approval.status === 'executing' ? 'Executing approved action' : approval.status === 'executed' ? 'Executed' : approval.status === 'rejected' ? 'Rejected' : approval.status === 'failed' ? 'Not executed' : approval.status;
   const actions = approval.status === 'pending' ? `<div class="approval-actions"><button type="button" class="text-button" ${state.approvalBusy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="reject">${state.approvalBusy ? 'Processing…' : 'Reject'}</button><button type="button" class="primary-button" ${state.approvalBusy ? 'disabled' : ''} data-approval-id="${escapeHtml(approval.id)}" data-approval-action="approve">${state.approvalBusy ? 'Processing…' : 'Approve exact call'}</button></div>` : '';
-  return `<section class="approval-card" aria-label="Tool approval"><strong>${escapeHtml(summary.tool_id || approval.tool_id)}</strong><span class="approval-status" role="status">${escapeHtml(status)}</span>${warning}${details ? `<div class="approval-details">${details}</div>` : ''}${approval.safe_error_category ? `<small>${escapeHtml(approval.safe_error_category)}</small>` : ''}${actions}</section>`;
+  return `<section class="approval-card" aria-label="Tool approval"><strong>${escapeHtml(summary.tool_id || approval.tool_id)}</strong><span class="approval-status" role="status">${escapeHtml(status)}</span>${summary.description ? `<p>${escapeHtml(summary.description)}</p>` : ''}${warning}${details ? `<div class="approval-details"><strong>Exact operation</strong>${details}</div>` : ''}${approval.safe_error_category ? `<small>${escapeHtml(approval.safe_error_category)}</small>` : ''}${actions}</section>`;
 }
 
 async function resolveApproval(id, decision) {
@@ -714,6 +714,11 @@ async function resolveApproval(id, decision) {
         if (!line) continue;
         const data = JSON.parse(line.slice(6));
         if (data.error) throw Error(data.error);
+        if (data.trace) {
+          const messageId = state.approvals.find((item) => item.id === id)?.message_id;
+          const turn = state.messages.find((message) => message.role === 'user' && message.id === messageId);
+          if (turn) { turn.trace ||= []; turn.trace.push(data.trace); }
+        }
         if (data.interaction) await presentInteraction(data.interaction);
         if (data.approval_required) {
           state.approvals.push({ ...data.approval_required, id: data.approval_required.approval_id, safe_summary: data.approval_required });
@@ -726,7 +731,8 @@ async function resolveApproval(id, decision) {
         }
         if (data.artifact && assistant) { assistant.artifacts.push(data.artifact); renderMessages(); }
         if (data.done) {
-          if (!assistant) { assistant = { role: 'assistant', content: '' }; state.messages.push(assistant); }
+          if (!assistant && answer.trim()) { assistant = { role: 'assistant', content: '' }; state.messages.push(assistant); }
+          if (!assistant) continue;
           Object.assign(assistant, { id: data.message_id, content: answer, provider_id: data.provider_id, model_id: data.model_id, sources: data.sources || [], artifacts: data.artifacts || [], runtime: data.runtime || {} });
           state.lastRuntime = data.runtime || null;
         }
@@ -938,7 +944,7 @@ async function send() {
             state.approvals.push({ ...pending, id: pending.approval_id, safe_summary: pending });
             renderMessages();
           }
-          if (data.trace) { const message = state.messages.at(-1); message.trace ||= []; message.trace.push({ type: data.trace.type, name: data.trace.name, status: data.trace.status, duration_ms: data.trace.duration_ms, metadata: Object.fromEntries(Object.entries(data.trace.metadata || {}).filter(([key]) => ['tool', 'model', 'error_code'].includes(key))) }); }
+          if (data.trace) { const message = [...state.messages].reverse().find((item) => item.role === 'user'); message.trace ||= []; message.trace.push({ type: data.trace.type, name: data.trace.name, status: data.trace.status, duration_ms: data.trace.duration_ms, metadata: Object.fromEntries(Object.entries(data.trace.metadata || {}).filter(([key]) => ['tool', 'model', 'error_code', 'action', 'policy_decision', 'execution_status'].includes(key))) }); }
           if (data.error) { failureCode = 'runtime_error'; throw Error(data.error); }
          if (data.interaction) await presentInteraction(data.interaction);
          if (data.status) toast(data.message);

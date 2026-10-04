@@ -23,7 +23,7 @@ assert.match(source, /if \(data\.trace\)[\s\S]*message\.trace\.push/);
 assert.match(source, /failureCode = 'stream_interrupted'/);
 assert.match(source, /runtime\.diagnostic_error = \{ stage: streamStage, code: failureCode \}/);
 assert.match(source, /document\.documentElement\.dataset\.ui === 'developer'[\s\S]*runtime-diagnostic/);
-assert.match(source, /\['tool', 'model', 'error_code'\]\.includes\(key\)/);
+assert.match(source, /\['tool', 'model', 'error_code', 'action', 'policy_decision', 'execution_status'\]\.includes\(key\)/);
 assert.match(source, /<details class="thinking-block"><summary>Thinking/);
 for (const tab of ['providers', 'general', 'knowledge', 'tools', 'mcp', 'decision']) {
   assert.match(html, new RegExp(`data-settings-tab="${tab}"`));
