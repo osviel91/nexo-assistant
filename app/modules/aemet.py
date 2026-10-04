@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.kernel import ModuleContext, ToolDefinition, ToolExecutionContext
+from app.tool_results import aemet_projector
 
 
 BASE_URL = "https://opendata.aemet.es/opendata"
@@ -139,4 +140,5 @@ def register_aemet_tool(context: ModuleContext, api_key: Callable[[], str | None
         "native",
         "aemet",
         action="read_only",
+        result_projector=aemet_projector,
     ))

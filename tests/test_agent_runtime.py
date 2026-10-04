@@ -183,11 +183,13 @@ class AgentRuntimeTests(unittest.TestCase):
             return {"value": "x" * 1000}
 
         responses = [[{"tool_calls": [{"index": 0, "id": str(i), "function": {"name": "test_tool", "arguments": "{}"}}]}] for i in range(4)]
+        responses.append([{"content": "Synthesized from collected results."}])
         adapter = Adapter(responses)
         registry = self.registry(handler)
         events = run(AgentRuntime(AgentRuntimeLimits(3, 100)), adapter, registry)
-        self.assertEqual(len(adapter.payloads), 4)
-        self.assertEqual(events[-1]["error"], "Se alcanzó el límite configurado de llamadas a herramientas.")
+        self.assertEqual(len(adapter.payloads), 5)
+        self.assertEqual(events[-1]["answer"], "Synthesized from collected results.")
+        self.assertEqual(len([payload for payload in adapter.payloads if payload.get("tools")]), 3)
         tool_message = next(message for message in adapter.payloads[1]["messages"] if message.get("role") == "tool")
         self.assertLessEqual(len(tool_message["content"]), 100)
 

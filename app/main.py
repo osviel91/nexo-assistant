@@ -34,6 +34,7 @@ from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor, ToolNotAvailableError
 from app.tool_selection import Selection, select_tools
+from app.turn_boundaries import history_for_turn
 from app.native_tools import register_native_tools
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
@@ -1592,7 +1593,9 @@ async def chat(req: ChatIn):
         model = c.execute("SELECT * FROM models WHERE provider_id=? AND id=?", (selected_provider_id, selected_model_id)).fetchone()
         if not model:
             raise HTTPException(400, "agent_model_unavailable" if profile_config else "Choose a model configured for this provider")
-        history = c.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)).fetchall()
+        history = c.execute("""SELECT m.role,m.content,
+            (SELECT r.status FROM runtime_runs r WHERE r.message_id=m.id ORDER BY r.started_at DESC LIMIT 1) AS runtime_status
+            FROM messages m WHERE m.conversation_id=? ORDER BY m.created_at,m.id""", (cid,)).fetchall()
         user_content: Any = req.content
         if req.attachments:
             parts: list[dict[str, Any]] = []
@@ -1649,7 +1652,7 @@ async def chat(req: ChatIn):
         }
         runtime_snapshot = {key: value for key, value in runtime_snapshot.items() if value is not None}
         c.execute("INSERT INTO runtime_runs(id,conversation_id,message_id,started_at,status,model,metadata) VALUES(?,?,?,?,?,?,?)", (run_id, cid, message_id, now(), "started", selected_model_id, json.dumps(runtime_snapshot)))
-        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+        messages = history_for_turn([dict(m) for m in history], req.content)
         messages.append({"role": "user", "content": user_content})
         url, key = provider["base_url"].rstrip("/") + "/chat/completions", provider["api_key"]
         model_capability_list = json.loads(model["capabilities"] or "[]")

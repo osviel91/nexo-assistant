@@ -6,7 +6,7 @@ from app.progress_guard import ProgressGuard, call_fingerprint
 
 def result(guard, name, arguments, output, status="ok"):
     identity = call_fingerprint(name, arguments)
-    guard.observe_call(identity)
+    guard.observe_call(identity, name, arguments)
     return guard.observe_result(output, status, 1)
 
 
@@ -50,6 +50,14 @@ class ProgressGuardTests(unittest.TestCase):
         self.assertTrue(decision["repeated_result"])
         self.assertFalse(guard.hard_stop)
 
+    def test_overlapping_searches_with_weak_evidence_growth_trigger_recovery(self):
+        guard = ProgressGuard()
+        result(guard, "mcp.search", {"query": "vault router topology"}, {"results": [{"id": "a"}, {"id": "b"}]})
+        result(guard, "mcp.search", {"query": "router topology wiring"}, {"results": [{"id": "a"}, {"id": "b"}, {"id": "c"}]})
+        decision = result(guard, "mcp.search", {"query": "vault router cabling"}, {"results": [{"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}]})
+        self.assertEqual(decision["action"], "recover")
+        self.assertEqual(guard.counters["evidence_resources_seen"], 4)
+
     def test_repeated_failure_and_cycle_are_recorded(self):
         guard = ProgressGuard()
         for _ in range(2):
@@ -77,11 +85,18 @@ class ProgressGuardTests(unittest.TestCase):
 
     def test_approval_snapshot_restores_pending_call_and_rejection_is_not_failure(self):
         guard = ProgressGuard()
-        guard.observe_call(call_fingerprint("write", {"path": "x"}))
+        guard.pending = guard.pending_call(call_fingerprint("write", {"path": "x"}), "mcp.write", {"path": "x"})
         resumed = ProgressGuard.restore(guard.snapshot())
         resumed.observe_resumed_result({"status": "rejected"}, "user_rejected")
         self.assertEqual(resumed.counters["failed_calls"], 0)
+        self.assertEqual(resumed.counters["tool_calls"], 0)
+        self.assertEqual(resumed.counters["approval_rejections"], 1)
+        guard = ProgressGuard()
+        guard.pending = guard.pending_call(call_fingerprint("write", {"path": "x"}), "mcp.write", {"path": "x"})
+        resumed = ProgressGuard.restore(guard.snapshot())
+        resumed.observe_resumed_result({"id": "created"}, "ok")
         self.assertEqual(resumed.counters["tool_calls"], 1)
+        self.assertEqual(resumed.history[-1]["family"], "write")
 
     def test_fingerprint_cost_is_local_and_state_is_bounded(self):
         started = time.perf_counter()

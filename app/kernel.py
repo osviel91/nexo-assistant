@@ -22,6 +22,7 @@ class ToolExecutionContext:
 
 
 ToolHandler = Callable[[ToolExecutionContext, dict[str, Any]], Awaitable[dict[str, Any]]]
+ToolResultProjector = Callable[[dict[str, Any], str, dict[str, Any], int], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class ToolDefinition:
     module_id: str = ""
     capabilities: tuple[str, ...] = ("tool-calling",)
     action: Literal["read_only", "mutating", "destructive", "unknown"] | None = None
+    result_projector: ToolResultProjector | None = None
 
 
 class ToolRegistry:

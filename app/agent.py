@@ -100,6 +100,9 @@ class AgentRuntime:
         messages = list(request.resume_messages if resuming else request.messages)
         if not resuming and system_instructions:
             messages.insert(0, {"role": "system", "content": system_instructions})
+        if not resuming and sum(message.get("role") == "user" for message in messages) > 1:
+            messages.insert(1 if system_instructions else 0, {"role": "system", "content":
+                "The latest user message defines the active task. Earlier turns are context, not unfinished instructions, unless the latest message clearly continues them."})
         tool_names = sorted(effective_tools.names)
         if tool_names and not resuming:
             guidance = [f"Available tools for this turn: {', '.join(tool_names)}.",
@@ -139,7 +142,7 @@ class AgentRuntime:
             event_id = request.event_sink.start_event(kind, name, metadata or {})
             request.event_sink.finish_event(event_id, "completed", metadata or {}, duration_ms)
 
-        for _ in range(max_tool_calls + 1):
+        for _ in range(max_tool_calls + 2):
             reason_started = time.perf_counter()
             reason_metadata = {"model": request.model.model_id, "round": tool_rounds + 1,
                                "grounding_applied": grounded_context is not None and bool(grounded_context.retrieval_results),
@@ -248,6 +251,18 @@ class AgentRuntime:
             if force_final:
                 messages.append({"role": "system", "content": HARD_STOP_HINT})
                 continue
+            if tool_call_count >= max_tool_calls:
+                messages.append({"role": "assistant", "content": round_content or None,
+                                 "tool_calls": [{"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}} for c in tool_calls.values()]})
+                for call in tool_calls.values():
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                     "content": "Tool-call budget is exhausted. Do not call more tools; answer using the evidence already collected."})
+                force_final = True
+                guard.hard_stop = True
+                guard.counters["forced_synthesis"] += 1
+                runtime_event("forced_synthesis", "Progress Guard", {"tool_calls": guard.counters.get("tool_calls", 0), "evidence_resources_seen": guard.counters.get("evidence_resources_seen", 0)})
+                messages.append({"role": "system", "content": HARD_STOP_HINT})
+                continue
             messages.append({
                 "role": "assistant",
                 "content": round_content or None,
@@ -256,8 +271,14 @@ class AgentRuntime:
             tool_rounds += 1
             for call in tool_calls.values():
                 if tool_call_count >= max_tool_calls:
-                    yield {"error": "Se alcanzó el límite configurado de llamadas a herramientas.", "error_code": "tool_call_limit"}
-                    return
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                     "content": "Tool-call budget is exhausted. Do not call more tools; answer using the evidence already collected."})
+                    force_final = True
+                    guard.hard_stop = True
+                    if not guard.counters.get("forced_synthesis"):
+                        guard.counters["forced_synthesis"] += 1
+                        runtime_event("forced_synthesis", "Progress Guard", {"tool_calls": guard.counters.get("tool_calls", 0), "evidence_resources_seen": guard.counters.get("evidence_resources_seen", 0)})
+                    continue
                 tool_call_count += 1
                 tools_used.append(call["name"])
                 tool_context = ToolExecutionContext(request.context.conversation_id, request.context.provider_id, request.context.model_id, tool_rounds, request.context.run_id)
@@ -271,15 +292,15 @@ class AgentRuntime:
                 runtime_event("TOOL_POLICY", call["name"], {"decision": decision.value, "round": tool_rounds})
                 call_identity = None
                 guard_started = time.perf_counter()
-                if guard.enabled and call["name"] != "native.render_artifact":
+                if guard.enabled and call["name"] not in {"native.render_artifact", "native.request_user_input"}:
                     try:
                         parsed_args = json.loads(call["arguments"] or "{}")
                         if isinstance(parsed_args, dict):
                             call_identity = call_fingerprint(call["name"], parsed_args)
                             if decision != PolicyDecision.ALLOW:
-                                guard.pending = {"call": call_identity}
+                                guard.pending = guard.pending_call(call_identity, call["name"], parsed_args)
                             else:
-                                guard.observe_call(call_identity)
+                                guard.observe_call(call_identity, call["name"], parsed_args)
                     except Exception:
                         guard.enabled = False
                 if guard.enabled:
@@ -288,6 +309,7 @@ class AgentRuntime:
                     if artifact_render_failures >= 2:
                         result = {"error": {"code": "artifact_retry_limit", "message": "El renderizador ha fallado dos veces seguidas. No vuelvas a invocarlo; explica el problema concreto y presenta los datos en texto."}}
                         status = "artifact_retry_limit"
+                arguments: dict[str, Any] = {}
                 if result is None:
                     try:
                         arguments = json.loads(call["arguments"] or "{}")
@@ -352,7 +374,7 @@ class AgentRuntime:
                                     }}
                                     return
                             else:
-                                result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
+                                    result = await request.tool_executor.invoke(effective_tools, call["name"], tool_context, arguments)
                         except (ValueError, TypeError, json.JSONDecodeError) as exc:
                             result = {"error": {"code": "invalid_arguments", "message": str(exc)[:300]}}
                             status = "invalid_arguments"
@@ -396,22 +418,34 @@ class AgentRuntime:
                         artifacts.append(artifact)
                         yield {"artifact": artifact}
                     result = {key: value for key, value in result.items() if key != "artifacts"}
-                canonical, pipeline_metadata = result_pipeline.process(result)
+                current_query = next((message.get("content", "") for message in reversed(messages) if message.get("role") == "user"), "")
+                if isinstance(current_query, list):
+                    current_query = " ".join(part.get("text", "") for part in current_query if isinstance(part, dict))
+                canonical, pipeline_metadata = result_pipeline.process(
+                    result, query=str(current_query), arguments=arguments if "arguments" in locals() and isinstance(arguments, dict) else {},
+                    projector=definition.result_projector if definition else None)
                 projection = pipeline_metadata.pop("projection", canonical)
-                runtime_event("TOOL_RESULT_PROJECTED", call["name"], {"projected_size": pipeline_metadata["projected_size"], "truncated": pipeline_metadata["truncated"]})
+                runtime_event("tool_result_projected", call["name"], {"original_size": pipeline_metadata["original_size"],
+                    "projected_size": pipeline_metadata["projected_size"], "truncated": pipeline_metadata["truncated"],
+                    "projection_strategy": pipeline_metadata["projection_strategy"],
+                    "original_record_count": pipeline_metadata["original_record_count"],
+                    "projected_record_count": pipeline_metadata["projected_record_count"],
+                    "fields_preserved_count": pipeline_metadata["fields_preserved_count"]})
                 progress_action = "allow"
                 if guard.enabled and call_identity:
                     prior_score = guard.score
                     guard_started = time.perf_counter()
                     try:
-                        progress = guard.observe_result(projection, status, duration_ms)
+                            progress = guard.observe_result(projection, status, duration_ms, truncated=pipeline_metadata["truncated"])
                     except Exception:
                         guard.enabled = False
                         logger.exception("progress guard failed open", extra={"conversation_id": request.context.conversation_id, "run_id": request.context.run_id})
                         progress = {"action": "allow", "delta": 0}
                     guard.counters["guard_overhead_ms"] += round((time.perf_counter() - guard_started) * 1000, 4)
                     progress_action = progress["action"]
-                    runtime_event("PROGRESS_EVALUATED", "Progress Guard", {"action": progress_action, "stagnation_score": guard.score})
+                    runtime_event("research_progress_evaluated", "Progress Guard", {"action": progress_action, "stagnation_score": guard.score,
+                        "evidence_resources_seen": guard.counters.get("evidence_resources_seen", 0), "low_progress_events": guard.counters.get("low_progress_events", 0),
+                        "repeated_truncation": guard.counters.get("repeated_truncation", 0)})
                     trace_metadata = {"tool_calls": guard.counters.get("tool_calls", 0), "unique_calls": guard.counters.get("unique_calls", 0),
                                       "unique_results": guard.counters.get("unique_results", 0), "exact_repeats": guard.counters.get("exact_repeats", 0),
                                       "repeated_results": guard.counters.get("repeated_results", 0), "cycles_detected": guard.counters.get("cycles_detected", 0),
@@ -422,13 +456,15 @@ class AgentRuntime:
                         request.event_sink.finish_event(recovery_event, "completed", trace_metadata, 0)
                     elif progress["action"] == "hard_stop":
                         force_final = True
+                        guard.counters["forced_synthesis"] += 1
+                        runtime_event("forced_synthesis", "Progress Guard", {"stagnation_score": guard.score})
                         stop_event = request.event_sink.start_event("progress_hard_stop", "Progress Guard", trace_metadata)
                         request.event_sink.finish_event(stop_event, "completed", trace_metadata, 0)
                     elif prior_score > guard.score:
                         recovered_event = request.event_sink.start_event("progress_recovered", "Progress Guard", trace_metadata)
                         request.event_sink.finish_event(recovered_event, "completed", trace_metadata, 0)
                 result_text = json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
-                diagnostic(logger, "tool_result_pipeline", tool=call["name"], original_size=pipeline_metadata["original_size"], projected_size=pipeline_metadata["projected_size"], compacted=pipeline_metadata["compacted"], truncated=pipeline_metadata["truncated"], structured_result=isinstance(canonical.get("structured_data"), (dict, list)))
+                diagnostic(logger, "tool_result_pipeline", tool=call["name"], original_size=pipeline_metadata["original_size"], projected_size=pipeline_metadata["projected_size"], compacted=pipeline_metadata["compacted"], truncated=pipeline_metadata["truncated"], projection_strategy=pipeline_metadata["projection_strategy"], original_record_count=pipeline_metadata["original_record_count"], projected_record_count=pipeline_metadata["projected_record_count"], fields_preserved_count=pipeline_metadata["fields_preserved_count"], structured_result=isinstance(canonical.get("structured_data", canonical.get("data")), (dict, list)))
                 diagnostic(logger, "tool_policy", tool=call["name"], source=definition.source if definition else "unknown", action=definition.action if definition else "unknown", policy_decision=decision.value, execution_attempted=status not in {"approval_required", "repeated_approval_required"}, execution_status=status, duration_ms=duration_ms)
                 request.event_sink.finish_event(event_id, event_status, {"tool": call["name"], "round": tool_rounds, "source": definition.source if definition else "unknown", "action": definition.action if definition else "unknown", "policy_decision": decision.value, "execution_attempted": status not in {"approval_required", "repeated_approval_required"}, "execution_status": status, "original_size": pipeline_metadata["original_size"], "projected_size": pipeline_metadata["projected_size"], "compacted": pipeline_metadata["compacted"], "truncated": pipeline_metadata["truncated"], "structured_result": isinstance(canonical.get("structured_data"), (dict, list))}, duration_ms)
                 if result.get("error"):
