@@ -1,4 +1,6 @@
 import asyncio
+from datetime import date, timedelta
+import json
 import unittest
 
 import httpx
@@ -6,6 +8,8 @@ from fastapi import FastAPI
 
 from app.kernel import ModuleContext, ToolExecutionContext
 from app.modules.aemet import compact_data, filter_records, register_aemet_tool
+from app.modules.aemet import MAX_RESPONSE_BYTES
+from app.tool_results import ToolResultPipeline
 
 
 class AemetTests(unittest.TestCase):
@@ -48,6 +52,67 @@ class AemetTests(unittest.TestCase):
 
         tool = self.make_tool(lambda request: httpx.Response(429))
         self.assertEqual(self.call(tool, {"path": "/api/test"})["error"]["code"], "rate_limited")
+
+    def test_large_forecast_reaches_aemet_projection_and_provider_continuation(self):
+        from app.kernel import ModuleRegistry, ToolDefinition
+        from app.tools import ExposurePolicy, ToolExecutor
+        from app.agent import AgentRunRequest, AgentRuntime
+        from app.agent_model import ModelStreamChunk
+        from app.tool_results import aemet_projector
+
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        forecast = [{"municipio": "Madrid", "id": "28079", "fecha": tomorrow,
+                     "prediccion": {"dia": [{"fecha": tomorrow, "temperatura": {"maxima": 24}}]},
+                     "observaciones": "Pronóstico municipal " + ("cielo despejado; " * 80)}]
+        forecast.extend({"municipio": f"Localidad {i}", "id": str(i), "fecha": tomorrow,
+                         "observaciones": "Pronóstico " + ("sin datos relevantes; " * 80)} for i in range(180))
+        body = json.dumps(forecast, ensure_ascii=False).encode()
+        self.assertGreater(len(body), 12_000)
+        self.assertLess(len(body), MAX_RESPONSE_BYTES)
+
+        def handler(request):
+            if request.url.path.endswith("/data"):
+                return httpx.Response(200, content=body)
+            return httpx.Response(200, json={"estado": 200, "datos": "https://opendata.aemet.es/data"})
+
+        aemet_tool = self.make_tool(handler)
+        pipeline_input = self.call(aemet_tool, {"path": "/api/prediccion/especifica/municipio/diaria/28079"})
+        self.assertEqual(pipeline_input["data"][0]["id"], "28079")
+
+        class Adapter:
+            model_id = "test"
+            payloads = []
+            async def stream(self, messages, tools, temperature=None):
+                self.payloads.append(messages)
+                if len(self.payloads) == 1:
+                    yield ModelStreamChunk(tool_calls=[{"index": 0, "id": "aemet-call", "function": {
+                        "name": "aemet.opendata", "arguments": '{"path":"/api/prediccion/especifica/municipio/diaria/28079"}'}}])
+                else:
+                    yield ModelStreamChunk(content="Pronóstico recibido.")
+
+        async def handler_tool(_context, _arguments):
+            return pipeline_input
+
+        registry = ModuleRegistry(FastAPI())
+        registry.context.tools.register(ToolDefinition("aemet.opendata", "AEMET", {"type": "object"}, handler_tool,
+            source="aemet", action="read_only", result_projector=aemet_projector))
+        adapter = Adapter()
+        async def run_agent():
+            tools = ExposurePolicy().resolve(registry.tool_catalog_view(), {"tool-calling"})
+            request = AgentRunRequest(adapter, [{"role": "user", "content": "¿Qué tiempo hará mañana en Madrid?"}], tools,
+                ToolExecutor(), ToolExecutionContext("c", "p", "m", 0))
+            return [event async for event in AgentRuntime().stream(request)]
+        events = asyncio.run(run_agent())
+        continuation = next(message["content"] for message in adapter.payloads[1] if message.get("role") == "tool")
+        self.assertIn('"id":"28079"', continuation)
+        self.assertIn(tomorrow, continuation)
+        self.assertEqual(events[-1]["answer"], "Pronóstico recibido.")
+
+    def test_data_http_error_keeps_safe_status_and_category(self):
+        def handler(request):
+            return httpx.Response(200, json={"datos": "https://opendata.aemet.es/data"}) if not request.url.path.endswith("/data") else httpx.Response(503)
+        error = self.call(self.make_tool(handler), {"path": "/api/test"})["error"]
+        self.assertEqual((error["code"], error["upstream_status"], error["upstream_category"]), ("aemet_data_error", 503, "http_error"))
 
     def test_filters_master_records_locally_by_municipality_name(self):
         records = [{"id": "28161", "nombre": "Valdemoro"}, {"id": "28079", "nombre": "Madrid"}]

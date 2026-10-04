@@ -99,7 +99,8 @@ def register_aemet_tool(context: ModuleContext, api_key: Callable[[], str | None
                 if response.status_code == 429:
                     return {"error": {"code": "rate_limited", "message": "AEMET ha limitado las consultas. No reintentes automáticamente; informa al usuario y espera antes de volver a consultar."}}
                 if response.status_code >= 400:
-                    return {"error": {"code": "aemet_http_error", "message": f"AEMET respondió HTTP {response.status_code}."}}
+                    return {"error": {"code": "aemet_http_error", "upstream_status": response.status_code,
+                                      "upstream_category": "http_error", "message": f"AEMET respondió HTTP {response.status_code}."}}
                 if len(response.content) > MAX_RESPONSE_BYTES:
                     return {"error": {"code": "response_too_large", "message": "La respuesta de AEMET supera el límite permitido."}}
                 try:
@@ -117,13 +118,15 @@ def register_aemet_tool(context: ModuleContext, api_key: Callable[[], str | None
                 if data_response.status_code == 429:
                     return {"error": {"code": "rate_limited", "message": "AEMET ha limitado las consultas. No reintentes automáticamente; informa al usuario y espera antes de volver a consultar."}}
                 if data_response.status_code >= 400:
-                    return {"error": {"code": "aemet_data_error", "message": f"La descarga de datos respondió HTTP {data_response.status_code}."}}
+                    return {"error": {"code": "aemet_data_error", "upstream_status": data_response.status_code,
+                                       "upstream_category": "http_error", "message": f"La descarga de datos respondió HTTP {data_response.status_code}."}}
                 if len(data_response.content) > MAX_RESPONSE_BYTES:
                     return {"error": {"code": "response_too_large", "message": "Los datos de AEMET superan el límite permitido."}}
                 try:
                     data = data_response.json()
                 except ValueError:
-                    data = data_response.text
+                    return {"error": {"code": "invalid_json", "upstream_status": data_response.status_code,
+                                      "upstream_category": "invalid_json", "message": "AEMET devolvió datos que no son JSON válido."}}
                 if filter_text:
                     data = filter_records(data, filter_text)
                 return {"data": compact_data(data), "metadata": {key: value for key, value in payload.items() if key != "datos"}}
