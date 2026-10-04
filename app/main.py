@@ -33,6 +33,7 @@ from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
 from app.migrations import migrate
 from app.tools import ExposurePolicy, ToolExecutor, ToolNotAvailableError
+from app.tool_selection import Selection, select_tools
 from app.native_tools import register_native_tools
 from app.runtime_trace import RuntimeEventSink, safe_metadata
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileResolver, AgentProfileService, ProfileNotFoundError, ProfileResolutionError, ProfileValidationError
@@ -1778,6 +1779,24 @@ async def chat(req: ChatIn):
                 available_tool_names = sorted(set(requested_tools or ()) & set(registered_tool_names)) if profile_config else registered_tool_names
                 effective_tools = exposure_policy.resolve(catalog, {"tool-calling"} if supports_tools else set(), requested_tools, allowed_tools)
                 effective_tool_names = [tool["function"]["name"] for tool in effective_tools.definitions()]
+                selector_context = " ".join(str(item["content"])[:500] for item in history[-4:] if item["role"] in {"user", "assistant"})
+                selection_event = event_sink.start_event("tool_selection_started", "Tool Selector", {"candidate_count": len(effective_tools.names)})
+                try:
+                    selection = select_tools(effective_tools, req.content, selector_context)
+                except Exception as error:
+                    diagnostic(logger, "tool_selection_failed", error_code=type(error).__name__)
+                    selection = Selection(effective_tools, "fallback", (), {}, True, False, 0.0, 0, 0)
+                effective_tools = selection.tools
+                event_sink.finish_event(selection_event, "completed", {
+                    "candidate_count": len(effective_tool_names), "selected_count": len(effective_tools.names),
+                    "duration_ms": selection.duration_ms, "selection_mode": selection.mode, "fallback": selection.fallback,
+                }, selection.duration_ms)
+                diagnostic(logger, "tool_selection", authorized_tool_count=len(effective_tool_names),
+                    selected_tool_count=len(effective_tools.names), authorized_tool_schema_chars=selection.authorized_schema_chars,
+                    selected_tool_schema_chars=selection.selected_schema_chars, selection_mode=selection.mode,
+                    discovery_intent=selection.discovery, fallback=selection.fallback, capabilities=list(selection.capabilities),
+                    duration_ms=selection.duration_ms)
+                selected_tool_names = sorted(effective_tools.names)
                 runtime_snapshot.update({
                     "model_capabilities": model_capability_list,
                     "model_tool_calling_supported": supports_tools,
@@ -1790,6 +1809,17 @@ async def chat(req: ChatIn):
                     "available_tool_count": len(available_tool_names),
                     "effective_tool_names": effective_tool_names,
                     "effective_tool_count": len(effective_tool_names),
+                    "selected_tool_names": selected_tool_names,
+                    "selected_tool_count": len(selected_tool_names),
+                    "authorized_tool_schema_chars": selection.authorized_schema_chars,
+                    "selected_tool_schema_chars": selection.selected_schema_chars,
+                    "tool_selection_enabled": selection.mode != "disabled",
+                    "tool_selection_mode": selection.mode,
+                    "tool_selection_capabilities": list(selection.capabilities),
+                    "tool_selection_fallback": selection.fallback,
+                    "tool_selection_discovery": selection.discovery,
+                    "tool_selection_reasons": {name: list(reason) for name, reason in selection.reasons.items()},
+                    "tool_selection_duration_ms": selection.duration_ms,
                     "excluded_tool_reasons": {name: ("not_registered_or_unavailable" if name not in registered_tool_names else
                         "tool_toggle_disabled" if name not in allowed_tools else "model_tool_calling_unsupported")
                         for name in (set(profile_config.requested_tool_names) - set(effective_tool_names))} if profile_config else {},
