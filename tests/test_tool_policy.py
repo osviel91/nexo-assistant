@@ -82,7 +82,7 @@ class ToolPolicyTests(unittest.TestCase):
             ])
             events = execute(registry, adapter, requested={"visible"})
             self.assertEqual(seen, [])
-            self.assertIn("tool_not_available", adapter.payloads[1]["messages"][-1]["content"])
+            self.assertIn("provider_requested_unexposed_tool", adapter.payloads[1]["messages"][-1]["content"])
             self.assertNotIn("secret", str([event.get("trace") for event in events if "trace" in event]))
 
     def test_model_without_tool_support_receives_no_definitions(self):

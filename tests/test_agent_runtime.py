@@ -131,7 +131,7 @@ class AgentRuntimeTests(unittest.TestCase):
         async def broken(context, arguments):
             raise RuntimeError("secret")
 
-        for name, arguments, code in (("missing", "{}", "tool_not_available"), ("test_tool", "not-json", "invalid_arguments"), ("test_tool", "{}", "tool_execution_error")):
+        for name, arguments, code in (("missing", "{}", "provider_requested_unexposed_tool"), ("test_tool", "not-json", "invalid_arguments"), ("test_tool", "{}", "tool_execution_error")):
             registry = self.registry(broken)
             adapter = Adapter([
                 [{"tool_calls": [{"index": 0, "id": "call", "function": {"name": name, "arguments": arguments}}]}],

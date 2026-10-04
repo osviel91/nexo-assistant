@@ -4,20 +4,27 @@ import unittest
 
 from fastapi import FastAPI
 
+from app.agent import AgentRunRequest, AgentRuntime
 from app.agent_model import OpenAICompatibleModelAdapter
 from app.kernel import ModuleRegistry, ToolDefinition, ToolExecutionContext
+from app.tools import EffectiveToolSet, ToolExecutor
 
 
 class Response:
     status_code = 200
 
-    def __init__(self, with_reasoning=False):
+    def __init__(self, with_reasoning=False, tool_name=None):
         self.with_reasoning = with_reasoning
+        self.tool_name = tool_name
 
     async def aiter_lines(self):
         if self.with_reasoning:
             yield 'data: ' + json.dumps({"choices": [{"delta": {"reasoning_content": "step one "}}]})
             yield 'data: ' + json.dumps({"choices": [{"delta": {"reasoning_content": "step two", "content": "answer"}}]})
+            yield "data: [DONE]"
+            return
+        if self.tool_name:
+            yield 'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call", "function": {"name": self.tool_name, "arguments": "{}"}}]}}]})
             yield "data: [DONE]"
             return
         yield 'data: ' + json.dumps({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
@@ -26,27 +33,53 @@ class Response:
 
 
 class Stream:
-    def __init__(self, with_reasoning=False):
+    def __init__(self, with_reasoning=False, tool_name=None):
         self.with_reasoning = with_reasoning
+        self.tool_name = tool_name
 
     async def __aenter__(self):
-        return Response(self.with_reasoning)
+        return Response(self.with_reasoning, self.tool_name)
 
     async def __aexit__(self, *args):
         return None
 
 
 class Client:
-    def __init__(self, with_reasoning=False):
+    def __init__(self, with_reasoning=False, tool_names=()):
         self.calls = []
         self.with_reasoning = with_reasoning
+        self.tool_names = iter(tool_names)
 
     def stream(self, method, url, headers, json):
         self.calls.append((method, url, json))
-        return Stream(self.with_reasoning)
+        return Stream(self.with_reasoning, next(self.tool_names, None))
 
 
 class ProviderSerializationTests(unittest.TestCase):
+    def test_selected_tools_cross_provider_boundary_and_resolve_for_execution(self):
+        for name in ("native.get_current_datetime", "aemet.opendata"):
+            with self.subTest(name=name):
+                seen = []
+
+                async def handler(_context, arguments):
+                    seen.append(arguments)
+                    return {"ok": True}
+
+                tool = ToolDefinition(name, "selected", {"type": "object", "properties": {}}, handler, action="read_only")
+                client = Client(tool_names=[name])
+                adapter = OpenAICompatibleModelAdapter(client, "https://provider.example/v1/chat/completions", {}, "Tiel")
+                selected = EffectiveToolSet((tool,))
+
+                async def run():
+                    context = ToolExecutionContext("conversation", "provider", "Tiel", 0)
+                    request = AgentRunRequest(adapter, [{"role": "user", "content": "¿Qué tiempo hará mañana en Madrid?"}], selected, ToolExecutor(), context)
+                    return [event async for event in AgentRuntime().stream(request)]
+
+                events = asyncio.run(run())
+                self.assertEqual([entry["function"]["name"] for entry in client.calls[0][2]["tools"]], [name])
+                self.assertEqual(seen, [{}])
+                self.assertEqual(events[-1]["tools_used"], [name])
+
     def test_chat_completions_request_contains_web_search_schema(self):
         registry = ModuleRegistry(FastAPI())
 

@@ -288,7 +288,7 @@ class AgentRuntime:
                 status = "ok"
                 result = None
                 definition = effective_tools.definition(call["name"])
-                decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.ALLOW
+                decision = PolicyEvaluator().evaluate(definition) if definition else PolicyDecision.DENY
                 runtime_event("TOOL_POLICY", call["name"], {"decision": decision.value, "round": tool_rounds})
                 call_identity = None
                 guard_started = time.perf_counter()
@@ -324,7 +324,10 @@ class AgentRuntime:
                         try:
                             execution_started = time.perf_counter()
                             execution_event_id = request.event_sink.start_event("TOOL_EXECUTION_STARTED", call["name"], {"round": tool_rounds})
-                            if call["name"] == "native.request_user_input":
+                            if definition is None:
+                                result = {"error": {"code": "provider_requested_unexposed_tool", "message": "La herramienta no está disponible para esta ejecución."}}
+                                status = "tool_not_exposed_for_run"
+                            elif call["name"] == "native.request_user_input":
                                 dialog = normalize_dialog(arguments.get("dialog"))
                                 if not request.interaction_handler:
                                     result = {"error": {"code": "interaction_unavailable", "message": "User interaction is unavailable in this run."}}
