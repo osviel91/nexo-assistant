@@ -118,6 +118,55 @@ class AemetTests(unittest.TestCase):
         records = [{"id": "28161", "nombre": "Valdemoro"}, {"id": "28079", "nombre": "Madrid"}]
         self.assertEqual(filter_records(records, "valdemoro"), [records[0]])
 
+    def test_semantic_forecast_resolves_madrid_and_uses_one_model_call(self):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        requests = []
+        def handler(request):
+            requests.append(request)
+            if request.url.path.endswith("/maestro/municipios"):
+                return httpx.Response(200, json={"datos": "https://opendata.aemet.es/catalogue"})
+            if request.url.path.endswith("/catalogue"):
+                return httpx.Response(200, json=[{"id": "28079", "nombre": "Madrid"}])
+            if request.url.path.endswith("/municipio/diaria/28079"):
+                return httpx.Response(200, json={"datos": "https://opendata.aemet.es/forecast"})
+            return httpx.Response(200, json=[{"fecha": tomorrow, "temperatura": {"maxima": 24}}])
+        tool = self.make_tool(handler)
+        self.assertEqual(tool.parameters["properties"]["operation"]["enum"], ["forecast_daily", "raw"])
+        result = self.call(tool, {"operation": "forecast_daily", "location": "Madrid", "period": "tomorrow"})
+        self.assertEqual(result["structured_data"]["location"]["municipality_code"], "28079")
+        self.assertEqual(result["structured_data"]["forecast"][0]["fecha"], tomorrow)
+        self.assertEqual(len(requests), 4)  # Catalogue metadata+data, forecast metadata+data.
+
+    def test_explicit_code_skips_catalogue_and_unknown_location_is_bounded(self):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        seen = []
+        def handler(request):
+            seen.append(request.url.path)
+            return httpx.Response(200, json={"datos": "https://opendata.aemet.es/data"}) if not request.url.path.endswith("/data") else httpx.Response(200, json=[{"fecha": tomorrow}])
+        tool = self.make_tool(handler)
+        result = self.call(tool, {"operation": "forecast_daily", "municipality_code": "28079", "date": tomorrow})
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(result["structured_data"]["location"]["municipality_code"], "28079")
+
+        unknown = self.make_tool(lambda request: httpx.Response(200, json={"datos": "https://opendata.aemet.es/catalogue"}) if request.url.path.endswith("/maestro/municipios") else httpx.Response(200, json=[]))
+        error = self.call(unknown, {"operation": "forecast_daily", "location": "No existe", "period": "tomorrow"})["error"]
+        self.assertEqual(error["code"], "location_not_found")
+        self.assertEqual(error["candidates"], [])
+
+    def test_semantic_failures_are_actionable_and_ambiguity_does_not_guess(self):
+        for status in (404, 500, 503):
+            tool = self.make_tool(lambda request, status=status: httpx.Response(status))
+            error = self.call(tool, {"operation": "forecast_daily", "municipality_code": "28079", "period": "tomorrow"})["error"]
+            self.assertEqual((error["code"], error["upstream_status"]), ("upstream_http_error", status))
+
+        def ambiguous(request):
+            if request.url.path.endswith("/maestro/municipios"):
+                return httpx.Response(200, json={"datos": "https://opendata.aemet.es/catalogue"})
+            return httpx.Response(200, json=[{"id": "01001", "nombre": "San José"}, {"id": "02002", "nombre": "San Jose"}])
+        error = self.call(self.make_tool(ambiguous), {"operation": "forecast_daily", "location": "SAN JOSE", "period": "tomorrow"})["error"]
+        self.assertEqual(error["code"], "location_ambiguous")
+        self.assertEqual([item["municipality_code"] for item in error["candidates"]], ["01001", "02002"])
+
     def test_settings_store_token_without_returning_it_and_allow_clear(self):
         from app import main
         from fastapi.testclient import TestClient
