@@ -176,6 +176,143 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             main.module_registry.context.tools._tools.clear()
             main.module_registry.context.tools._tools.update(old_tools)
 
+    def test_profile_authorization_bounds_selector_and_tool_execution(self):
+        from app import main
+        from app.kernel import ToolDefinition
+        from app.native_tools import register_native_tools
+
+        old_db, old_tools = main.DB_PATH, main.module_registry.context.tools._tools.copy()
+        old_profiles, old_resolver = main.agent_profiles, main.agent_profile_resolver
+        old_client, old_selector = main.httpx.AsyncClient, main.select_tools
+        main.DB_PATH = self.path
+        executed = []
+        selections = []
+
+        def handler(name):
+            async def invoke(_context, _arguments):
+                executed.append(name)
+                return {"ok": True}
+            return invoke
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def aiter_lines(self):
+                if not any(message.get("role") == "tool" for message in self.payload["messages"]):
+                    calls = [
+                        (0, "call-hidden", "module.hidden.export"),
+                        (1, "call-forbidden", "mcp.forbidden.delete"),
+                    ]
+                    delta = {"tool_calls": [{
+                        "index": index, "id": call_id, "type": "function",
+                        "function": {"name": name, "arguments": "{}"},
+                    } for index, call_id, name in calls]}
+                    yield "data: " + json.dumps({"choices": [{"delta": delta}]})
+                else:
+                    yield "data: " + json.dumps({"choices": [{"delta": {"content": "Finished without executing unexposed tools."}}]})
+                yield "data: [DONE]"
+
+        class Stream:
+            def __init__(self, payload):
+                self.response = Response(payload)
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *args):
+                return None
+
+        class Client:
+            payloads = []
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def stream(self, method, url, headers, json):
+                self.payloads.append(json)
+                return Stream(json)
+
+        try:
+            registry = main.module_registry.context.tools
+            registry._tools.clear()
+            definitions = (
+                ("module.allowed.lookup", "Find an allowed record", "module", "allowed"),
+                ("mcp.allowed.search", "Search allowed knowledge", "mcp", "allowed"),
+                ("module.hidden.export", "Export hidden records", "module", "hidden"),
+                ("mcp.forbidden.delete", "Delete forbidden records", "mcp", "forbidden"),
+            )
+            register_native_tools(main.module_registry.context)
+            for name, description, source, module_id in definitions:
+                registry.register(ToolDefinition(
+                    name, description, {"type": "object", "properties": {}},
+                    handler(name), source, module_id, action="read_only",
+                ))
+            main.agent_profiles = AgentProfileService(AgentProfileRepository(main.db, main.now), main.module_registry.tool_catalog)
+            main.agent_profile_resolver = AgentProfileResolver(main.agent_profiles.repository)
+            allowed_names = {"module.allowed.lookup", "mcp.allowed.search"}
+            profile = main.agent_profiles.create(self.profile(tool_names=tuple(sorted(allowed_names))))
+            requested = set(main.agent_profile_resolver.resolve(profile["id"]).requested_tool_names)
+            registered = {tool.name for tool in registry.registered_tools()}
+            native = {tool.name for tool in registry.registered_tools() if tool.source == "native"}
+            available = (requested | native) & registered
+
+            select = main.select_tools
+
+            def capture_selection(authorized, query, recent_context="", **kwargs):
+                result = select(authorized, query, recent_context, **kwargs)
+                selections.append((set(authorized.names), set(result.tools.names)))
+                return result
+
+            main.select_tools = capture_selection
+            main.httpx.AsyncClient = Client
+            response = asyncio.run(main.chat(main.ChatIn(
+                provider_id="p", model_id="wrong",
+                content="Use module.allowed.lookup and mcp.allowed.search",
+                execution_mode="agent", agent_profile_id=profile["id"],
+            )))
+            body = asyncio.run(self.collect(response.body_iterator))
+            payload = Client.payloads[0]
+            exposed_to_model = {tool["function"]["name"] for tool in payload["tools"]}
+            authorized, selected = selections[0]
+            unselected_module_mcp = {"module.hidden.export", "mcp.forbidden.delete"}
+            native_definitions = {tool.name: tool for tool in registry.registered_tools() if tool.source == "native"}
+            packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+            denied_calls = [
+                packet["trace"] for packet in packets
+                if packet.get("trace", {}).get("status") == "tool_not_exposed_for_run"
+            ]
+            deltas = "".join(packet.get("delta", "") for packet in packets)
+
+            self.assertEqual(requested, allowed_names)
+            self.assertEqual(available, requested | native)
+            self.assertEqual(authorized, available)
+            self.assertTrue(allowed_names.issubset(selected))
+            self.assertLessEqual(selected, authorized)
+            self.assertTrue(selected - allowed_names <= native)
+            self.assertTrue(all(native_definitions[name].action == "read_only" for name in selected & native))
+            self.assertEqual(exposed_to_model, selected)
+            self.assertTrue(unselected_module_mcp.isdisjoint(available | authorized | selected | exposed_to_model))
+            self.assertEqual(executed, [])
+            self.assertEqual(len(denied_calls), 2)
+            self.assertIn("Finished without executing unexposed tools.", deltas)
+            self.assertGreaterEqual(len(Client.payloads), 2)
+        finally:
+            main.httpx.AsyncClient = old_client
+            main.select_tools = old_selector
+            main.DB_PATH = old_db
+            main.agent_profiles, main.agent_profile_resolver = old_profiles, old_resolver
+            main.module_registry.context.tools._tools.clear()
+            main.module_registry.context.tools._tools.update(old_tools)
+
     async def collect(self, iterator):
         chunks = []
         async for chunk in iterator:

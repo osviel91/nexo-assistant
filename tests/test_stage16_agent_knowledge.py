@@ -5,9 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from app.agent_profiles import AgentProfileInput, AgentProfileRepository, AgentProfileService
 from app.chunking import ChunkingConfig
 from app.embeddings import EmbeddingBatch
+from app.grounding import KnowledgeOutcome
 from app.ingestion import NotebookIngestionService
 from app.migrations import migrate
 from app.notebooks import NotebookInput, NotebookRepository, NotebookService
@@ -155,6 +158,31 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
                 self.assertTrue(bound_research["runtime"]["grounding_applied"])
                 self.assertEqual(bound_research["citations"][0]["source_id"], source["id"])
                 self.assertIn("LEY DE LA PERVERSIDAD DE LA NATURALEZA", bound_research["payload"]["messages"][1]["content"])
+
+                second_notebook = main.notebooks.create(NotebookInput("Explicit selection"))
+                main.agent_profiles.update(research["id"], {
+                    "notebook_ids": (notebook["id"], second_notebook["id"]),
+                })
+                ambiguous_content = "ambiguous multi-notebook profile request"
+                with self.assertRaises(HTTPException) as error:
+                    asyncio.run(main.chat(main.ChatIn(
+                        provider_id="p", model_id="Raw", content=ambiguous_content,
+                        execution_mode="agent", agent_profile_id=research["id"],
+                    )))
+                self.assertEqual(error.exception.status_code, 409)
+                self.assertEqual(error.exception.detail, "agent_multiple_notebooks_unsupported")
+                with main.db() as database:
+                    self.assertEqual(database.execute(
+                        "SELECT COUNT(*) FROM conversations WHERE title=?", (ambiguous_content,)
+                    ).fetchone()[0], 0)
+
+                explicitly_selected = self.run_chat(
+                    main, "Use the explicitly selected notebook", "agent", research["id"], second_notebook["id"],
+                )
+                self.assertEqual(explicitly_selected["runtime"]["notebook_id"], second_notebook["id"])
+                self.assertEqual(explicitly_selected["runtime"]["notebook_resolution_source"], "request")
+                self.assertEqual(explicitly_selected["runtime"]["knowledge_outcome"], KnowledgeOutcome.KNOWLEDGE_UNAVAILABLE.value)
+                self.assertNotIn("amethyst", explicitly_selected["answer"])
 
                 bound_chat = self.run_chat(main, "five", "chat", None, notebook["id"])
                 inherited_chat = self.run_chat(main, "six", "chat", None, self.UNSET, bound_chat["conversation_id"])

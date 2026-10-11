@@ -7,6 +7,47 @@ from app.migrations import MIGRATIONS, migrate
 
 
 class MigrationTests(unittest.TestCase):
+    def test_legacy_agent_profile_survives_current_migrations_without_invented_notebooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-agent.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+                for version, migration in MIGRATIONS[:21]:
+                    migration(connection)
+                    connection.execute("INSERT INTO schema_migrations VALUES (?, 'now')", (version,))
+                connection.execute("INSERT INTO providers VALUES ('p','Provider','http://provider','','now')")
+                connection.execute("INSERT INTO models(id,provider_id,label) VALUES ('m','p','Model')")
+                connection.execute("INSERT INTO notebooks VALUES ('n','Notebook','','now','now')")
+                connection.execute(
+                    """INSERT INTO agent_profiles
+                    (id,name,description,provider_id,model_id,system_instructions,model_parameters,enabled,created_at,updated_at)
+                    VALUES ('a','Research','legacy profile','p','m','Keep these instructions','{}',1,'now','now')"""
+                )
+                connection.execute("INSERT INTO agent_profile_tools VALUES ('a','mcp.docs.search')")
+
+                migrate(connection)
+
+                profile = connection.execute(
+                    "SELECT id,name,system_instructions,max_tool_calls FROM agent_profiles WHERE id='a'"
+                ).fetchone()
+                tools = connection.execute(
+                    "SELECT tool_name FROM agent_profile_tools WHERE agent_profile_id='a' ORDER BY tool_name"
+                ).fetchall()
+                notebook_table = connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_profile_notebooks'"
+                ).fetchone()[0]
+                bindings = connection.execute(
+                    "SELECT COUNT(*) FROM agent_profile_notebooks WHERE agent_profile_id='a'"
+                ).fetchone()[0]
+                version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+
+            self.assertEqual(profile, ('a', 'Research', 'Keep these instructions', 10))
+            self.assertEqual(tools, [('mcp.docs.search',)])
+            self.assertEqual(notebook_table, 1)
+            self.assertEqual(bindings, 0)
+            self.assertEqual(version, 28)
+
     def test_fresh_database_is_created_and_migration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fresh.sqlite3"
