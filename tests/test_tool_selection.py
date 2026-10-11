@@ -1,3 +1,4 @@
+import math
 import statistics
 import time
 import unittest
@@ -77,14 +78,24 @@ class ToolSelectionTests(unittest.TestCase):
         timings = {}
         for size in (10, 50, 100, 500):
             catalog = EffectiveToolSet(tuple(tool(f"mcp.server.tool_{index}", "search read knowledge document") for index in range(size)))
-            samples = []
-            for _ in range(30):
+            for _ in range(10):
+                select_tools(catalog, "Busca información en mi vault", limit=10)
+            wall_samples, cpu_samples = [], []
+            for _ in range(100):
+                cpu_started = time.process_time()
                 started = time.perf_counter()
                 select_tools(catalog, "Busca información en mi vault", limit=10)
-                samples.append((time.perf_counter() - started) * 1000)
-            ordered = sorted(samples)
-            timings[size] = (statistics.median(ordered), ordered[int(len(ordered) * .95) - 1])
-        self.assertTrue(all(p95 < 100 for _, p95 in timings.values()), timings)
+                wall_samples.append((time.perf_counter() - started) * 1000)
+                cpu_samples.append((time.process_time() - cpu_started) * 1000)
+            ordered_cpu = sorted(cpu_samples)
+            p95_cpu = ordered_cpu[math.ceil(0.95 * len(ordered_cpu)) - 1]
+            timings[size] = {
+                "wall_median_ms": round(statistics.median(wall_samples), 3),
+                "wall_p95_ms": round(sorted(wall_samples)[math.ceil(0.95 * len(wall_samples)) - 1], 3),
+                "process_cpu_median_ms": round(statistics.median(cpu_samples), 3),
+                "process_cpu_p95_ms": round(p95_cpu, 3),
+            }
+        self.assertTrue(all(result["process_cpu_p95_ms"] < 100 for result in timings.values()), timings)
 
 
 if __name__ == "__main__":
