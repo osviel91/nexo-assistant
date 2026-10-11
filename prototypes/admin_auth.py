@@ -368,6 +368,31 @@ class AdminAuthStore:
         with self._connection() as connection:
             return connection.execute("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0]
 
+    def status(self, now: float | None = None) -> dict[str, int | bool]:
+        database = Path(self.path)
+        if not database.exists():
+            return {"initialized": False, "active_sessions": 0}
+        timestamp = time.time() if now is None else now
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            connection.row_factory = sqlite3.Row
+            version = connection.execute("SELECT version FROM auth_schema_version WHERE id=1").fetchone()
+            state = connection.execute("SELECT initialized FROM auth_state WHERE id=1").fetchone()
+            admin = connection.execute("SELECT 1 FROM auth_admin WHERE id=1").fetchone()
+            guard = connection.execute("SELECT 1 FROM auth_login_guard WHERE id=1").fetchone()
+            if version is None or version["version"] != 1 or state is None or guard is None or bool(state["initialized"]) != bool(admin):
+                raise AuthUnavailable()
+            active = connection.execute("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL AND idle_expires_at>? AND absolute_expires_at>?",
+                                        (timestamp, timestamp)).fetchone()[0]
+            return {"initialized": bool(state["initialized"]), "active_sessions": active}
+        except sqlite3.Error as error:
+            logger.warning("auth_storage_error")
+            raise AuthUnavailable() from error
+        finally:
+            if connection is not None:
+                connection.close()
+
 
 def authorize(principal: Principal, permission: str, *, expected_kind: str) -> None:
     if principal.kind != expected_kind:
@@ -392,3 +417,13 @@ def bootstrap_from_console(store: AdminAuthStore) -> None:
     if not hmac.compare_digest(password.encode(), confirmation.encode()):
         raise ValueError("passphrases do not match")
     store.bootstrap_local(username, password)
+
+
+def reset_password_from_console(store: AdminAuthStore) -> None:
+    """Reset credentials locally; callers must enforce the host access boundary."""
+    store.initialize()
+    password = getpass("New administrator passphrase: ")
+    confirmation = getpass("Confirm new passphrase: ")
+    if not hmac.compare_digest(password.encode(), confirmation.encode()):
+        raise ValueError("passphrases do not match")
+    store.reset_password_local(password)
