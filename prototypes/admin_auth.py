@@ -237,10 +237,8 @@ class AdminAuthStore:
             admin = connection.execute("SELECT username,password_hash FROM auth_admin WHERE id=1").fetchone()
             guard = connection.execute("SELECT failures,window_started_at,locked_until FROM auth_login_guard WHERE id=1").fetchone()
             if state is None or not state["initialized"] or admin is None or guard is None:
-                self._event(connection, "login_rejected", timestamp)
                 rejected = True
             elif timestamp < guard["locked_until"]:
-                self._event(connection, "login_rate_limited", timestamp)
                 rejected = True
             else:
                 failures, window_start = guard["failures"], guard["window_started_at"]
@@ -265,7 +263,6 @@ class AdminAuthStore:
                                         timestamp + self.idle_ttl, timestamp + self.absolute_ttl))
                     self._event(connection, "login_succeeded", timestamp)
         if rejected:
-            logger.info("auth_event=login_rejected")
             raise AuthFailure("authentication_failed", 401)
         logger.info("auth_event=login_succeeded")
         return LoginSession(token, csrf, min(timestamp + self.idle_ttl, timestamp + self.absolute_ttl))

@@ -76,8 +76,11 @@ class AdminAuthCoreTests(unittest.TestCase):
         for timestamp in (2, 3):
             with self.assertRaisesRegex(AuthFailure, "authentication_failed"):
                 self.auth.login("admin", "wrong fake password", now=timestamp)
-        with self.assertRaisesRegex(AuthFailure, "authentication_failed"):
-            self.auth.login("admin", ADMIN, now=7)
+        events_when_locked = len(self.auth.security_events())
+        for timestamp in range(4, 8):
+            with self.assertRaisesRegex(AuthFailure, "authentication_failed"):
+                self.auth.login("admin", ADMIN, now=timestamp)
+        self.assertEqual(len(self.auth.security_events()), events_when_locked)
         session = self.login(now=8)
         self.assertTrue(session.token)
         self.assertIn(("login_failed", 3.0), self.auth.security_events())

@@ -3,7 +3,7 @@
 - Estado: core aislado implementado y probado; detenido para revisión
 - Base de implementación: `7e861b2` (decisiones Stage 15B.3B-0 consolidadas)
 - Estado al inicio: HEAD `4ad1aaf0c5bfe5dc95d25e99bf01da0684b03bd9`; `main`, cuatro commits ahead
-- Estado al cierre: QA focal y quality gate pasaron; commit de consolidación pendiente
+- Estado al cierre de la etapa: core base consolidado en `43fcbf5`; QA posterior separado
 - Alcance: núcleo reusable, SQLite dedicada de prototipo y contratos FastAPI no montados
 - NO desplegar ni exponer; no hay activación de rutas de NEXO
 - Stage 15B.3B-2 y Stage 15C: no iniciadas / bloqueadas
@@ -67,7 +67,7 @@ Tests montan el router únicamente en una app FastAPI efímera, con HTTPS de Tes
 `tests/test_stage15b3b1_auth_core.py` cubre:
 
 - bootstrap local, confirmación por consola, one-shot y ausencia de endpoint HTTP de bootstrap;
-- contraseña incorrecta, respuesta genérica, rate limit persistente y recuperación tras lockout; cambio de username no evade el contador y ventana inválida se rechaza;
+- contraseña incorrecta, respuesta genérica, rate limit persistente y recuperación tras lockout; cambio de username no evade el contador, ventana inválida se rechaza y peticiones ya bloqueadas no inflan el ledger;
 - login/logout, store recreado sobre mismo archivo, idle y absolute expiry;
 - CSRF ausente/inválido/válido, renovación y header; permiso no declarado denegado;
 - revocación individual/global y revocación de sesiones tras reset local;
@@ -119,4 +119,4 @@ Resultados ejecutados:
 - Estado previo a este registro: sólo los cuatro archivos nuevos de esta etapa, sin modificaciones a archivos existentes, sin staging.
 - No se ejecutó `./scripts/nexo smoke`, no se abrió ni migró la base NEXO y no hubo despliegue.
 
-No se hizo commit de esta implementación. El commit independiente de 15B.3B-0 (`7e861b2`) se conserva. El stash histórico permanece sin cambios.
+La base del core se consolidó en `43fcbf5` (`test: validate isolated administrative authentication core`); los cambios QA posteriores se consolidan por separado en `test: harden administrative authentication lockout behavior`. El commit independiente de 15B.3B-0 (`7e861b2`) se conserva. El stash histórico permanece sin cambios.
