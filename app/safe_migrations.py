@@ -20,6 +20,7 @@ from app import migrations
 
 
 HISTORICAL_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29
 LOCK_SUFFIX = ".migration.lock"
 JOURNAL_NAME = ".nexo.sqlite3.promotion.json"
 FAULT_HOOK = Callable[[str], None]
@@ -89,8 +90,89 @@ class TransactionalMigration:
     validate_output: Callable[[sqlite3.Connection], None]
 
 
-# CP2-B.1 introduces no future schema. CP2-B.2 may register code-owned specs here.
-TRANSACTIONAL_MIGRATIONS: tuple[TransactionalMigration, ...] = ()
+ADMIN_SCHEMA_STATEMENTS = (
+    "CREATE TABLE auth_state (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL CHECK(state IN ('schema_installed','bootstrap_pending','bootstrap_completed')), policy_version INTEGER NOT NULL CHECK(policy_version>0), bootstrapped_at TEXT, CHECK((state IN ('schema_installed','bootstrap_pending') AND bootstrapped_at IS NULL) OR (state='bootstrap_completed' AND bootstrapped_at IS NOT NULL)))",
+    "INSERT INTO auth_state(id,state,policy_version,bootstrapped_at) VALUES(1,'schema_installed',1,NULL)",
+    "CREATE TABLE auth_users (id TEXT PRIMARY KEY, username TEXT NOT NULL, username_normalized TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL CHECK(length(password_hash)>0), status TEXT NOT NULL CHECK(status IN ('active','disabled')), created_at REAL NOT NULL, password_changed_at REAL NOT NULL)",
+    "CREATE TABLE auth_user_permissions (user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, permission TEXT NOT NULL CHECK(length(permission)>0 AND instr(permission,'*')=0), PRIMARY KEY(user_id,permission))",
+    "CREATE INDEX idx_auth_user_permissions_permission ON auth_user_permissions(permission,user_id)",
+    "CREATE TABLE auth_sessions (token_hash BLOB PRIMARY KEY CHECK(length(token_hash)=32), csrf_hash BLOB NOT NULL CHECK(length(csrf_hash)=32), user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, created_at REAL NOT NULL, last_seen_at REAL NOT NULL, idle_expires_at REAL NOT NULL, absolute_expires_at REAL NOT NULL, revoked_at REAL, CHECK(idle_expires_at<=absolute_expires_at), CHECK(revoked_at IS NULL OR revoked_at>=created_at))",
+    "CREATE INDEX idx_auth_sessions_user ON auth_sessions(user_id,revoked_at)",
+    "CREATE INDEX idx_auth_sessions_expiry ON auth_sessions(revoked_at,idle_expires_at,absolute_expires_at)",
+    "CREATE TABLE auth_login_guard (subject TEXT PRIMARY KEY, failures INTEGER NOT NULL CHECK(failures>=0), window_started_at REAL NOT NULL, locked_until REAL NOT NULL CHECK(locked_until>=0))",
+    "INSERT INTO auth_login_guard(subject,failures,window_started_at,locked_until) VALUES('administrator',0,0,0)",
+    "CREATE TABLE auth_security_events (id INTEGER PRIMARY KEY, event_type TEXT NOT NULL CHECK(event_type IN ('bootstrap_completed','login_failed','login_rate_limited','login_succeeded','session_expired','logout','session_revoked','all_sessions_revoked','password_reset_local')), actor_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL, created_at REAL NOT NULL, correlation_id TEXT)",
+    "CREATE INDEX idx_auth_security_events_created ON auth_security_events(created_at,id)",
+    "CREATE TRIGGER auth_security_events_no_update BEFORE UPDATE ON auth_security_events BEGIN SELECT RAISE(ABORT, 'security events are append-only'); END",
+    "CREATE TRIGGER auth_security_events_no_delete BEFORE DELETE ON auth_security_events BEGIN SELECT RAISE(ABORT, 'security events are append-only'); END",
+)
+
+
+def _admin_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for version, migration in migrations.MIGRATIONS:
+        migration(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (version,))
+    connection.execute("INSERT INTO schema_migrations VALUES(29, 'manifest')")
+    for statement in ADMIN_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+    if user_preferences:
+        connection.execute("CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL)")
+    return capture_schema_manifest(connection)
+
+
+@lru_cache(maxsize=2)
+def expected_admin_schema_manifest(user_preferences: bool = False) -> SchemaManifest:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        return _admin_schema_manifest(connection, user_preferences)
+    finally:
+        connection.close()
+
+
+def _validate_admin_schema(connection: sqlite3.Connection) -> None:
+    preferences = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_preferences'").fetchone()
+    validate_schema_manifest(connection, expected_admin_schema_manifest(bool(preferences)))
+    rows = connection.execute("SELECT state,bootstrapped_at FROM auth_state WHERE id=1").fetchall()
+    if len(rows) != 1:
+        raise SchemaCompatibilityError("administrative initialization state is missing or duplicated")
+    state, bootstrapped_at = rows[0]
+    if state not in {"schema_installed", "bootstrap_pending", "bootstrap_completed"}:
+        raise SchemaCompatibilityError("administrative initialization state is unknown")
+    if (state == "bootstrap_completed") != (bootstrapped_at is not None):
+        raise SchemaCompatibilityError("administrative initialization state is inconsistent")
+    guards = connection.execute("SELECT subject,failures,window_started_at,locked_until FROM auth_login_guard").fetchall()
+    if (len(guards) != 1 or guards[0][0] != "administrator"
+            or any(value < 0 for value in guards[0][1:])):
+        raise SchemaCompatibilityError("administrative login guard is missing or invalid")
+    if state != "bootstrap_completed" and any(connection.execute(
+            f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            for table in ("auth_users", "auth_user_permissions", "auth_sessions", "auth_security_events")):
+        raise SchemaCompatibilityError("unbootstrapped administrative state contains identity data")
+    if state == "bootstrap_completed":
+        bootstrap = connection.execute("""SELECT actor_user_id FROM auth_security_events
+            WHERE event_type='bootstrap_completed'""").fetchall()
+        if (len(bootstrap) != 1 or not bootstrap[0][0]
+                or not connection.execute("SELECT 1 FROM auth_users WHERE id=? AND status='active'",
+                                          (bootstrap[0][0],)).fetchone()
+                or not connection.execute("SELECT 1 FROM auth_user_permissions WHERE user_id=?",
+                                          (bootstrap[0][0],)).fetchone()):
+            raise SchemaCompatibilityError("completed administrative bootstrap is incomplete")
+
+
+def _expected_manifest(version: int, user_preferences: bool = False) -> SchemaManifest:
+    if version == CURRENT_SCHEMA_VERSION:
+        return expected_admin_schema_manifest(user_preferences)
+    return expected_schema_manifest(version, user_preferences)
+
+
+TRANSACTIONAL_MIGRATIONS: tuple[TransactionalMigration, ...] = (
+    TransactionalMigration(29, ADMIN_SCHEMA_STATEMENTS,
+                           lambda db: validate_schema_manifest(db, expected_schema_manifest(
+                               28, bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='user_preferences'").fetchone()))),
+                           _validate_admin_schema),
+)
 
 
 class DatabaseLease:
@@ -144,7 +226,7 @@ def validate_runtime_database(database: str | Path) -> DatabaseState:
     if _journal_path(path).exists() or _journal_path(path).is_symlink():
         raise MigrationRecoveryRequired("offline migration recovery is incomplete")
     state = inspect_database(path, fingerprint_data=False)
-    if state.version != HISTORICAL_SCHEMA_VERSION:
+    if state.version not in (HISTORICAL_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
         raise SchemaCompatibilityError("database schema is not the supported runtime version")
     return state
 
@@ -323,6 +405,8 @@ def _apply_transactional_migration(connection: sqlite3.Connection, lease: Databa
         if fault_hook:
             fault_hook("after_ledger")
         connection.commit()
+        if fault_hook:
+            fault_hook("after_commit")
         return True
     except BaseException:
         connection.rollback()
@@ -371,7 +455,7 @@ class SafeMigrationEngine:
             if source_exists:
                 _require_delete_journal_source(self.database)
                 source = inspect_database(self.database, fingerprint_data=False)
-                if source.version == HISTORICAL_SCHEMA_VERSION and not TRANSACTIONAL_MIGRATIONS:
+                if source.version == CURRENT_SCHEMA_VERSION:
                     return MigrationResult(source.version, source.version, None, False)
                 _require_delete_journal_source(self.database)
             else:
@@ -404,7 +488,7 @@ class SafeMigrationEngine:
                     for spec in TRANSACTIONAL_MIGRATIONS:
                         _apply_transactional_migration(
                             stage_connection, offline_lease, spec.version, spec.statements,
-                            spec.validate_previous, spec.validate_output)
+                            spec.validate_previous, spec.validate_output, fault_hook)
                 finally:
                     stage_connection.close()
                 _fsync_file(staging)
@@ -432,7 +516,7 @@ class SafeMigrationEngine:
                 if fault_hook:
                     fault_hook("before_replace")
                 if source_exists and _data_fingerprint(
-                        source_connection, expected_schema_manifest(source.version, source.user_preferences)) != source.data_digest:
+                source_connection, _expected_manifest(source.version, source.user_preferences)) != source.data_digest:
                     raise DatabaseInUse("database changed after backup")
                 if not source_exists and self.database.exists():
                     raise DatabaseInUse("database appeared during fresh staging")
@@ -596,12 +680,14 @@ def _inspect_connection(connection: sqlite3.Connection, *, fingerprint_data: boo
             raise SchemaCompatibilityError("migration ledger is malformed") from None
         if not versions or versions != tuple(range(1, versions[-1] + 1)):
             raise SchemaCompatibilityError("migration ledger is empty, gapped, or unordered")
-        if versions[-1] > HISTORICAL_SCHEMA_VERSION:
+        if versions[-1] > CURRENT_SCHEMA_VERSION:
             raise SchemaCompatibilityError("database schema version is newer than this release")
         version = versions[-1]
     preferences = "user_preferences" in tables
-    manifest = expected_schema_manifest(version, preferences)
+    manifest = _expected_manifest(version, preferences)
     validate_schema_manifest(connection, manifest)
+    if version == CURRENT_SCHEMA_VERSION:
+        _validate_admin_schema(connection)
     integrity, foreign_keys = _database_check(connection)
     if integrity != "ok" or foreign_keys:
         raise SchemaCompatibilityError("database integrity or foreign-key validation failed")
