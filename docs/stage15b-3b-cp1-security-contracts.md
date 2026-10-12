@@ -105,6 +105,8 @@ Tras CP2-B.1, los contratos de migración/ledger-esquema/validación estructural
 
 CP2-B.2b-2B.0 añade evidencia `prototype-verified` del contrato sintético de auditoría de asignación histórica y migración v31. No cambia el estado de `bootstrap_requires_verified_schema_and_backup`, no demuestra bootstrap ni ownership, y no aporta evidencia `runtime-verified` u `operational-verified`.
 
+CP2-B.2b-2B.1 añade pruebas `prototype-verified` del subprocedimiento de asignación/invalidación sobre fixtures SQLite temporales y marcadas. No acredita fencing externo, autorización real, consultas ownership-aware, bootstrap inicial, seguridad del runtime ni preparación operacional; no eleva ningún contrato a `runtime-verified` u `operational-verified`.
+
 No existe flag de bypass de autenticación o recuperación. Un resultado de pruebas CP1 no satisface automáticamente ningún gate runtime ni operacional.
 
 ## 7. Estado Y Dependencias
