@@ -19,3 +19,9 @@
 - Providers must expose an OpenAI-compatible API base URL, normally ending in `/v1`; model discovery calls `GET /models` and chat calls `/chat/completions`.
 - In Docker, provider URLs must be reachable from the container. `localhost` refers to the Nexo container, not the host or an inference machine.
 - API keys stay server-side in SQLite and are intentionally not returned to the browser; preserve that boundary when changing provider or chat APIs.
+
+## Software Docs Governance
+
+- For architecture-impacting work, follow the SHARED -> MY WORK -> validate -> proposal -> human review/promotion -> verify SHARED lifecycle in `docs/coding-agent.md`.
+- Keep one active MY WORK for dependent increments. Do not start the next dependent increment until the prior architecture is promoted and verified.
+- Never write directly to SHARED, review/approve a proposal, promote, or archive MY WORK without explicit human authorization.
