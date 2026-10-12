@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.interactions import normalize_dialog, validate_values
+from nexo_db_fixture import prepare_nexo_database
 
 
 class InteractionTests(unittest.TestCase):
@@ -29,6 +30,7 @@ class InteractionTests(unittest.TestCase):
             old_db = main.DB_PATH
             main.DB_PATH = Path(directory) / "interactions.sqlite3"
             try:
+                prepare_nexo_database(main)
                 main.startup()
                 conversation_id, run_id = str(uuid.uuid4()), str(uuid.uuid4())
                 with main.db() as connection:
@@ -95,6 +97,7 @@ class InteractionTests(unittest.TestCase):
             old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
             old_tools = main.module_registry.context.tools._tools.copy()
             main.DB_PATH = Path(directory) / "chat-interaction.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             main.module_registry.context.tools._tools.clear()
             register_native_tools(main.module_registry.context)

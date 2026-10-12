@@ -15,6 +15,7 @@ from app.native_tools import register_native_tools
 from app.agent import AgentRunRequest, AgentRuntime
 from app.agent_model import ModelStreamChunk
 from app.tools import ExposurePolicy, ToolExecutor
+from nexo_db_fixture import prepare_nexo_database
 
 
 class Repo:
@@ -64,6 +65,7 @@ class MCPTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_path, old_factory = main.DB_PATH, main.mcp_manager.client_factory
             main.DB_PATH = Path(directory) / "mcp-auth.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             seen = []
             client = FakeClient([{"name": "read", "inputSchema": {"type": "object"}}], SimpleNamespace(content=[], structured_content=None, is_error=False))
@@ -95,6 +97,7 @@ class MCPTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_path, old_factory = main.DB_PATH, main.mcp_manager.client_factory
             main.DB_PATH = Path(directory) / "mcp-bulk.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             client = FakeClient([{"name": "one", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}}, {"name": "two", "inputSchema": {"type": "object"}}])
             main.mcp_manager.client_factory = lambda *_: client

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.artifacts import ArtifactError, sandbox_document, validate_artifact
 from app.kernel import ModuleContext, ToolExecutionContext
 from app.native_tools import register_native_tools
+from nexo_db_fixture import prepare_nexo_database
 
 
 class ArtifactTests(unittest.TestCase):
@@ -79,6 +80,7 @@ class ArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             previous = main.DB_PATH
             main.DB_PATH = Path(directory) / "artifacts.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             artifact = validate_artifact({"type": "metrics", "title": "Latency", "data": [{"label": "p50", "value": 12}]})
             with main.db() as connection:

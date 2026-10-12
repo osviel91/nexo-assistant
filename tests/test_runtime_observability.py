@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from nexo_db_fixture import prepare_nexo_database
 
 
 class RuntimeObservabilityTests(unittest.TestCase):
@@ -12,6 +13,7 @@ class RuntimeObservabilityTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.old_db = main.DB_PATH
         main.DB_PATH = Path(self.directory.name) / "runtime.sqlite3"
+        prepare_nexo_database(main)
         main.startup()
         with main.db() as connection:
             connection.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)", ("c", "Test", main.now(), main.now()))

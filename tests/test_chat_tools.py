@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.kernel import ToolDefinition
+from nexo_db_fixture import prepare_nexo_database
 
 
 class FakeResponse:
@@ -138,6 +139,7 @@ class ChatToolTests(unittest.TestCase):
             old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
             old_tools = main.module_registry.context.tools._tools.copy()
             main.DB_PATH = Path(directory) / "agent-mcp.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             main.module_registry.context.tools._tools.clear()
             register_native_tools(main.module_registry.context)
@@ -173,6 +175,7 @@ class ChatToolTests(unittest.TestCase):
             old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
             old_tools = main.module_registry.context.tools._tools.copy()
             main.DB_PATH = Path(directory) / "agent-boundary.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             main.module_registry.context.tools._tools.clear()
             register_native_tools(main.module_registry.context)
@@ -253,6 +256,7 @@ class ChatToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_db = main.DB_PATH
             main.DB_PATH = Path(directory) / "tool-settings.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             try:
                 with TestClient(main.app) as client:
@@ -273,6 +277,7 @@ class ChatToolTests(unittest.TestCase):
             old_db, old_client = main.DB_PATH, main.httpx.AsyncClient
             old_tools = main.module_registry.context.tools._tools.copy()
             main.DB_PATH = Path(directory) / "text-tools.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             with main.db() as connection:
                 connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))
@@ -319,6 +324,7 @@ class ChatToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_db = main.DB_PATH
             main.DB_PATH = Path(directory) / "test.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             with main.db() as connection:
                 connection.execute("INSERT INTO providers VALUES(?,?,?,?,?)", ("p", "Test", "http://provider", "", main.now()))

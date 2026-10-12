@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from nexo_db_fixture import prepare_nexo_database
 
 
 class RerankerSettingsTests(unittest.TestCase):
@@ -11,6 +12,7 @@ class RerankerSettingsTests(unittest.TestCase):
             previous = main.DB_PATH
             main.DB_PATH = Path(directory) / "settings.sqlite3"
             try:
+                prepare_nexo_database(main)
                 main.startup()
                 with main.db() as connection:
                     connection.execute("INSERT INTO providers VALUES('p','P','https://p.test/v1','','now')")

@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from nexo_db_fixture import prepare_nexo_database
 
 
 class ShadowObservationTests(unittest.TestCase):
@@ -13,6 +14,7 @@ class ShadowObservationTests(unittest.TestCase):
             old_db = main.DB_PATH
             main.DB_PATH = Path(directory) / "trace.sqlite3"
             try:
+                prepare_nexo_database(main)
                 main.startup()
                 first = main._insert_trace_event("conversation-1", "message-1", "DECIDE", "running", {"model": "laya"})
                 main._insert_trace_event("conversation-1", "message-1", "ACT", "success", {"tool": "web_search"}, 12)
@@ -43,6 +45,7 @@ class ShadowObservationTests(unittest.TestCase):
             service = FakeShadow()
             main.module_registry.context.services["decision-shadow"] = service
             try:
+                prepare_nexo_database(main)
                 main.startup()
                 async def run():
                     execution_future = asyncio.get_running_loop().create_future()

@@ -23,6 +23,7 @@ from prototypes.security_contracts import (
     OPERATIONAL_REQUIREMENTS,
     RUNTIME_REQUIREMENTS,
     MIGRATION_REQUIREMENTS,
+    MIGRATION_EVIDENCE,
     OWNERSHIP_DOMAINS,
     OWNERSHIP_ACCEPTANCE,
     SSE_CHECKPOINTS,
@@ -144,6 +145,17 @@ class SecurityContractTests(unittest.TestCase):
         self.assertIn("stream_start", EFFECT_COUNTERS)
 
     def test_integration_and_activation_gates_are_distinct_and_closed_by_default(self):
+        self.assertEqual(set(MIGRATION_EVIDENCE), set(MIGRATION_REQUIREMENTS))
+        self.assertEqual(MIGRATION_EVIDENCE["storage_failure_has_no_anonymous_fallback"],
+                         "prototype-verified")
+        self.assertEqual(MIGRATION_EVIDENCE["bootstrap_requires_verified_schema_and_backup"],
+                         "prototype-verified")
+        self.assertEqual({name for name, level in MIGRATION_EVIDENCE.items()
+                          if level == "runtime-verified"}, {
+            "incomplete_migration_fails_closed", "ledger_commits_with_schema",
+            "schema_validated_beyond_version", "unknown_future_version_rejected",
+            "incompatible_restore_fails_closed",
+        })
         self.assertEqual(EVIDENCE_LEVELS, ("pending", "prototype-verified", "runtime-verified", "operational-verified"))
         prototype = {name: "prototype-verified" for name in
                      INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS + MIGRATION_REQUIREMENTS + OPERATIONAL_REQUIREMENTS}

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from nexo_db_fixture import prepare_nexo_database
 
 
 class ConversationUXTests(unittest.TestCase):
@@ -12,6 +13,7 @@ class ConversationUXTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.old_db = main.DB_PATH
         main.DB_PATH = Path(self.directory.name) / "ux.sqlite3"
+        prepare_nexo_database(main)
         main.startup()
 
     def tearDown(self):

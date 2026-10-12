@@ -32,10 +32,12 @@ class Stage11BDefaultTests(unittest.TestCase):
             previous_path = main.DB_PATH
             main.DB_PATH = path
             try:
+                main.startup()
                 self.assertEqual(main.embedding_configuration().reranker_candidate_limit, 20)
                 with sqlite3.connect(path) as connection:
                     self.assertEqual(connection.execute("SELECT reranker_candidate_limit FROM embedding_configurations WHERE id='c'").fetchone()[0], 20)
             finally:
+                main.shutdown()
                 main.DB_PATH = previous_path
 
 

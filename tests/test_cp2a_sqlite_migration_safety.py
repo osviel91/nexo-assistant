@@ -714,7 +714,11 @@ else:
     def test_main_db_pragmas_are_measured_on_temporary_path(self):
         script = """
 import json, sqlite3
-from app.main import db
+from app import main, migrations
+with sqlite3.connect(main.DB_PATH) as setup:
+    migrations.migrate(setup)
+main.startup()
+db = main.db
 connection=db()
 print(json.dumps({'sqlite':sqlite3.sqlite_version,
  'journal':connection.execute('PRAGMA journal_mode').fetchone()[0],
@@ -729,7 +733,8 @@ connection.close()
         self.assertEqual(json.loads(result.stdout), {
             "sqlite": sqlite3.sqlite_version, "journal": "delete", "foreign_keys": 1, "busy_timeout": 5000,
         })
-        self.assertEqual({item.name for item in data_dir.iterdir()}, {"notebook-sources", "nexo.sqlite3"})
+        self.assertEqual({item.name for item in data_dir.iterdir()},
+                         {"notebook-sources", "nexo.sqlite3", "nexo.sqlite3.migration.lock"})
 
     def test_cp1_migration_gates_remain_blocked_by_prototype_only_evidence(self):
         evidence = {requirement: "prototype-verified" for requirement in MIGRATION_REQUIREMENTS}

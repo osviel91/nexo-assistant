@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.capabilities import normalize_model_capabilities, preserve_model_capabilities
-from app.migrations import migrate
+from nexo_db_fixture import prepare_nexo_database
 
 
 class CapabilityTests(unittest.TestCase):
@@ -39,8 +39,9 @@ class CapabilityTests(unittest.TestCase):
             old_path = main.DB_PATH
             main.DB_PATH = path
             try:
+                prepare_nexo_database(main)
+                main.startup()
                 with main.db() as connection:
-                    migrate(connection)
                     connection.execute("INSERT INTO providers VALUES ('a', 'oMLX', 'http://a', '', 'now')")
                     connection.execute("INSERT INTO providers VALUES ('b', 'Other', 'http://b', '', 'now')")
                     connection.execute("INSERT INTO models VALUES ('embedding', 'a', 'embedding', '[]')")
@@ -70,6 +71,7 @@ class CapabilityTests(unittest.TestCase):
                     persisted = connection.execute("SELECT capabilities FROM models WHERE provider_id='a'").fetchone()[0]
                 self.assertEqual(json.loads(persisted), ["embedding", "reranking"])
             finally:
+                main.shutdown()
                 main.DB_PATH = old_path
 
 

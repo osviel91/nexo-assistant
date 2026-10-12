@@ -36,6 +36,7 @@ class Stage8AValidationTests(unittest.TestCase):
 
         old_db, old_profiles = main.DB_PATH, main.agent_profiles
         main.DB_PATH = self.path
+        main.startup()
         main.agent_profiles = self.service
         try:
             profile = self.service.create(AgentProfileInput("Research", provider_id="p", model_id="m", system_instructions="Soul"))
@@ -47,6 +48,7 @@ class Stage8AValidationTests(unittest.TestCase):
                 self.assertEqual(database.execute("SELECT content FROM messages WHERE id='message'").fetchone()[0], "historical")
                 self.assertIsNotNone(database.execute("SELECT id FROM notebooks WHERE id='n'").fetchone())
         finally:
+            main.shutdown()
             main.DB_PATH, main.agent_profiles = old_db, old_profiles
 
     def test_delete_conversation_does_not_delete_agent_or_notebook(self):
@@ -54,6 +56,7 @@ class Stage8AValidationTests(unittest.TestCase):
 
         old_db, old_profiles = main.DB_PATH, main.agent_profiles
         main.DB_PATH = self.path
+        main.startup()
         main.agent_profiles = self.service
         try:
             profile = self.service.create(AgentProfileInput("Research", provider_id="p", model_id="m"))
@@ -68,6 +71,7 @@ class Stage8AValidationTests(unittest.TestCase):
                 self.assertIsNotNone(database.execute("SELECT id FROM agent_profiles WHERE id=?", (profile["id"],)).fetchone())
                 self.assertIsNotNone(database.execute("SELECT id FROM notebooks WHERE id='n'").fetchone())
         finally:
+            main.shutdown()
             main.DB_PATH, main.agent_profiles = old_db, old_profiles
 
     def test_agent_mode_requires_profile_and_chat_cannot_apply_one(self):
@@ -75,6 +79,7 @@ class Stage8AValidationTests(unittest.TestCase):
 
         old_db = main.DB_PATH
         main.DB_PATH = self.path
+        main.startup()
         try:
             with self.assertRaisesRegex(Exception, "agent_profile_required"):
                 main.update_conversation("c", main.ConversationPatch(execution_mode="agent"))
@@ -84,6 +89,7 @@ class Stage8AValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "agent_profile_not_found"):
                 main.update_conversation("c", main.ConversationPatch(execution_mode="chat", agent_profile_id="legacy"))
         finally:
+            main.shutdown()
             main.DB_PATH = old_db
 
 

@@ -99,7 +99,9 @@ Pendiente: autorización antes de cada escritura/provider/RAG/tool/MCP real, per
 
 `activation_blockers()` es cerrado por defecto y vuelve a exigir literalmente evidencia `runtime-verified` para todos los requisitos de integración/runtime, además de `operational-verified` para HTTPS/topología, backup/restore, recuperación administrativa y aprobación explícita. Un éxito sintético no puede satisfacerlos; completar integration-ready tampoco promueve ningún requisito operacional.
 
-El gate de activación incluye además los contratos de migración `incomplete_migration_fails_closed`, `ledger_commits_with_schema`, `schema_validated_beyond_version`, `unknown_future_version_rejected`, `storage_failure_has_no_anonymous_fallback`, `incompatible_restore_fails_closed` y `bootstrap_requires_verified_schema_and_backup`. Cada uno requiere su propia evidencia `runtime-verified`; un ensayo de harness en CP2-A permanece `prototype-verified` y no despeja esos bloqueos.
+El gate de activación incluye además los contratos de migración `incomplete_migration_fails_closed`, `ledger_commits_with_schema`, `schema_validated_beyond_version`, `unknown_future_version_rejected`, `storage_failure_has_no_anonymous_fallback`, `incompatible_restore_fails_closed` y `bootstrap_requires_verified_schema_and_backup`. Cada uno requiere evidencia propia `runtime-verified`; un ensayo de harness no la promueve automáticamente. El estado de evidencia observado por contrato se registra explícitamente en `MIGRATION_EVIDENCE` y también distingue un runtime temporal de una instalación operacional.
+
+Tras CP2-B.1, los contratos de migración/ledger-esquema/validación estructural/versión futura/restore están `runtime-verified` sólo para el startup y motor integrados ejecutados contra SQLite temporal. El contrato de storage-error/no-fallback y el de bootstrap permanecen `prototype-verified`; no hay bootstrap administrativo integrado ni auth en NEXO. Los siete estados no equivalen a `operational-verified`.
 
 No existe flag de bypass de autenticación o recuperación. Un resultado de pruebas CP1 no satisface automáticamente ningún gate runtime ni operacional.
 

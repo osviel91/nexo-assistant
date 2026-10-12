@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from app import approvals, main
+from nexo_db_fixture import prepare_nexo_database
 
 
 class ApprovalTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class ApprovalTests(unittest.TestCase):
             original = main.DB_PATH
             main.DB_PATH = Path(directory) / "approvals.sqlite3"
             try:
+                prepare_nexo_database(main)
                 main.startup()
                 conversation_id, run_id, message_id = (str(uuid.uuid4()) for _ in range(3))
                 with main.db() as connection:

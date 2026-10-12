@@ -10,6 +10,7 @@ from app.kernel import ModuleContext, ToolExecutionContext
 from app.modules.aemet import compact_data, filter_records, register_aemet_tool
 from app.modules.aemet import MAX_RESPONSE_BYTES
 from app.tool_results import ToolResultPipeline
+from nexo_db_fixture import prepare_nexo_database
 
 
 class AemetTests(unittest.TestCase):
@@ -176,6 +177,7 @@ class AemetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_db = main.DB_PATH
             main.DB_PATH = Path(directory) / "settings.sqlite3"
+            prepare_nexo_database(main)
             main.startup()
             try:
                 with TestClient(main.app) as client:

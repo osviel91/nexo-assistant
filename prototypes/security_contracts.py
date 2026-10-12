@@ -190,8 +190,15 @@ MIGRATION_REQUIREMENTS = (
     "storage_failure_has_no_anonymous_fallback", "incompatible_restore_fails_closed",
     "bootstrap_requires_verified_schema_and_backup",
 )
-
-
+MIGRATION_EVIDENCE = {
+    "incomplete_migration_fails_closed": "runtime-verified",
+    "ledger_commits_with_schema": "runtime-verified",
+    "schema_validated_beyond_version": "runtime-verified",
+    "unknown_future_version_rejected": "runtime-verified",
+    "storage_failure_has_no_anonymous_fallback": "prototype-verified",
+    "incompatible_restore_fails_closed": "runtime-verified",
+    "bootstrap_requires_verified_schema_and_backup": "prototype-verified",
+}
 class SyntheticEffectHarness:
     """Counters and inert fake boundaries for isolated acceptance tests."""
 

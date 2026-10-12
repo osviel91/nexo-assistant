@@ -72,6 +72,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
         old_db, old_tools = main.DB_PATH, main.module_registry.context.tools._tools.copy()
         old_profiles, old_resolver = main.agent_profiles, main.agent_profile_resolver
         main.DB_PATH = self.path
+        main.startup()
         seen = []
 
         async def visible(_context, arguments):
@@ -171,6 +172,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertNotIn("provider-secret", json.dumps(metadata))
         finally:
             main.httpx.AsyncClient = old_client
+            main.shutdown()
             main.DB_PATH = old_db
             main.agent_profiles, main.agent_profile_resolver = old_profiles, old_resolver
             main.module_registry.context.tools._tools.clear()
@@ -185,6 +187,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
         old_profiles, old_resolver = main.agent_profiles, main.agent_profile_resolver
         old_client, old_selector = main.httpx.AsyncClient, main.select_tools
         main.DB_PATH = self.path
+        main.startup()
         executed = []
         selections = []
 
@@ -308,6 +311,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
         finally:
             main.httpx.AsyncClient = old_client
             main.select_tools = old_selector
+            main.shutdown()
             main.DB_PATH = old_db
             main.agent_profiles, main.agent_profile_resolver = old_profiles, old_resolver
             main.module_registry.context.tools._tools.clear()

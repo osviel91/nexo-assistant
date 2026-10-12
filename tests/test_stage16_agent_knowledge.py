@@ -16,6 +16,7 @@ from app.migrations import migrate
 from app.notebooks import NotebookInput, NotebookRepository, NotebookService
 from app.retrieval import RetrievalService
 from app.vector_index import SQLiteVectorIndex
+from nexo_db_fixture import prepare_nexo_database
 
 
 class Embeddings:
@@ -78,6 +79,7 @@ class Stage16AgentKnowledgeTests(unittest.TestCase):
             old_notebooks, old_ingestion, old_retrieval = main.notebooks, main.ingestion, main.retrieval_service
             main.DB_PATH = root / "nexo.sqlite3"
             main.httpx.AsyncClient = Client
+            prepare_nexo_database(main)
             main.startup()
             try:
                 with main.db() as database:

@@ -31,7 +31,7 @@ from app.modules.mcp import MCPManager, validate_server
 from app.modules.aemet import register_aemet_tool
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
-from app.migrations import migrate
+from app.safe_migrations import DatabaseLease, acquire_runtime_lease, validate_runtime_database
 from app.tools import ExposurePolicy, ToolExecutor, ToolNotAvailableError
 from app.tool_selection import Selection, select_tools
 from app.turn_boundaries import history_for_turn
@@ -66,6 +66,7 @@ register_native_tools(module_registry.context)
 register_aemet_tool(module_registry.context, lambda: aemet_api_key())
 exposure_policy = ExposurePolicy()
 shadow_tasks: set[asyncio.Task[None]] = set()
+runtime_database_lease: DatabaseLease | None = None
 enabled_modules = enabled_module_ids()
 if "attachments" in enabled_modules:
     module_registry.register(AttachmentsModule())
@@ -91,6 +92,9 @@ if "decision-runtime" in enabled_modules:
 
 
 def db() -> sqlite3.Connection:
+    if (runtime_database_lease is None or runtime_database_lease._fd is None
+            or runtime_database_lease.database != DB_PATH.absolute()):
+        raise RuntimeError("SQLite runtime lease is not active")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -244,9 +248,21 @@ def configured_vector_store(local_index: SQLiteVectorIndex):
 
 @app.on_event("startup")
 def startup() -> None:
-    with db() as c:
-        migrate(c)
-    module_registry.startup()
+    try:
+        global runtime_database_lease
+        expected_path = DB_PATH.absolute()
+        if runtime_database_lease and runtime_database_lease.database != expected_path:
+            runtime_database_lease.close()
+            runtime_database_lease = None
+        if runtime_database_lease is None:
+            runtime_database_lease = acquire_runtime_lease(DB_PATH)
+        app.state.sqlite_schema = validate_runtime_database(DB_PATH)
+        module_registry.startup()
+    except Exception:
+        if runtime_database_lease is not None:
+            runtime_database_lease.close()
+            runtime_database_lease = None
+        raise
     try:
         asyncio.get_running_loop().create_task(_refresh_all_provider_capabilities())
     except RuntimeError:
@@ -256,6 +272,7 @@ def startup() -> None:
 @app.on_event("shutdown")
 def shutdown() -> None:
     module_registry.shutdown()
+    # Keep SH until worker exit so a leftover task/connection cannot race promotion.
 
 
 class ProviderIn(BaseModel):
@@ -607,7 +624,6 @@ class EmbeddingConfigurationIn(BaseModel):
 
 def embedding_configuration() -> EmbeddingConfiguration | None:
     with db() as connection:
-        migrate(connection)
         row = connection.execute("SELECT * FROM embedding_configurations ORDER BY config_version DESC LIMIT 1").fetchone()
         if row:
             return EmbeddingConfiguration(**dict(row))
@@ -632,7 +648,6 @@ def embedding_configuration() -> EmbeddingConfiguration | None:
 
 def knowledge_health() -> dict[str, int]:
     with db() as connection:
-        migrate(connection)
         rows = connection.execute("SELECT indexing_status, COUNT(*) AS count FROM notebook_sources GROUP BY indexing_status").fetchall()
         totals = connection.execute("SELECT COUNT(*) AS documents, COALESCE(SUM(chunk_count),0) AS chunks, COALESCE(SUM(vector_count),0) AS vectors FROM notebook_sources WHERE status='ready'").fetchone()
     counts = {row["indexing_status"]: row["count"] for row in rows}
