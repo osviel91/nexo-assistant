@@ -91,8 +91,8 @@ class OwnershipPreparationTests(unittest.TestCase):
         before = database.read_bytes()
         mtime = database.stat().st_mtime_ns
         report = inspect_ownership_preparation(database)
-        self.assertEqual(report["schema_version"], 30)
-        self.assertEqual(report["ledger"], {"rows": 30, "contiguous": True, "latest": 30})
+        self.assertEqual(report["schema_version"], 31)
+        self.assertEqual(report["ledger"], {"rows": 31, "contiguous": True, "latest": 31})
         self.assertEqual(report["integrity"], {"integrity_check": "ok", "foreign_key_violations": 0})
         self.assertEqual(report["administrative_state"]["state"], "bootstrap_completed")
         self.assertEqual(report["resource_counts"]["conversations"], 1)
@@ -123,7 +123,7 @@ class OwnershipPreparationTests(unittest.TestCase):
         self.assertNotIn("dark", repr(report))
         self.assertEqual(database.read_bytes(), before)
         self.assertEqual(database.stat().st_mtime_ns, mtime)
-        self.assertEqual(inspect_database(database).version, 30)
+        self.assertEqual(inspect_database(database).version, 31)
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute("SELECT value FROM user_preferences "
                                                  "WHERE key='last_chat_model'").fetchone()[0], "legacy")
@@ -149,7 +149,7 @@ class OwnershipPreparationTests(unittest.TestCase):
         self.assertEqual(no_admin["administrative_state"]["state"], "schema_installed")
         self.assertIn("bootstrap_or_active_user_missing", no_admin["blockers"])
         self.assertIn("unowned_direct_resources_remain", report["blockers"])
-        self.assertEqual(inspect_database(database).version, 30)
+        self.assertEqual(inspect_database(database).version, 31)
 
     def test_relationship_anomalies_and_structural_ambiguities_are_blockers(self):
         database = self._database("relationships")
@@ -188,7 +188,7 @@ class OwnershipPreparationTests(unittest.TestCase):
 
         future = self._database("future-ledger")
         with sqlite3.connect(future) as connection:
-            connection.execute("INSERT INTO schema_migrations VALUES(31,'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(32,'future')")
         with self.assertRaises(SchemaCompatibilityError):
             inspect_ownership_preparation(future)
 

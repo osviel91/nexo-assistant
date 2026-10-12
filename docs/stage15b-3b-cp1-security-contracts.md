@@ -103,6 +103,8 @@ El gate de activación incluye además los contratos de migración `incomplete_m
 
 Tras CP2-B.1, los contratos de migración/ledger-esquema/validación estructural/versión futura/restore están `runtime-verified` sólo para el startup y motor integrados ejecutados contra SQLite temporal. El contrato de storage-error/no-fallback y el de bootstrap permanecen `prototype-verified`; no hay bootstrap administrativo integrado ni auth en NEXO. Los siete estados no equivalen a `operational-verified`.
 
+CP2-B.2b-2B.0 añade evidencia `prototype-verified` del contrato sintético de auditoría de asignación histórica y migración v31. No cambia el estado de `bootstrap_requires_verified_schema_and_backup`, no demuestra bootstrap ni ownership, y no aporta evidencia `runtime-verified` u `operational-verified`.
+
 No existe flag de bypass de autenticación o recuperación. Un resultado de pruebas CP1 no satisface automáticamente ningún gate runtime ni operacional.
 
 ## 7. Estado Y Dependencias

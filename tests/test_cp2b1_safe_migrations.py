@@ -98,10 +98,10 @@ class SafeMigrationIntegrationTests(unittest.TestCase):
                 result = SafeMigrationEngine(data_dir).migrate()
 
                 self.assertEqual((result.source_version, result.target_version, result.changed),
-                                 (version, 30, True))
+                                 (version, 31, True))
                 self.assertIsNotNone(result.backup_path)
                 self.assertEqual(inspect_database(result.backup_path).version, version)
-                self.assertEqual(validate_runtime_database(source).version, 30)
+                self.assertEqual(validate_runtime_database(source).version, 31)
                 with database(source) as connection:
                     self.assertEqual(connection.execute(
                         "SELECT name FROM providers WHERE id='fixture-provider'").fetchone()[0], "synthetic")
@@ -121,10 +121,10 @@ class SafeMigrationIntegrationTests(unittest.TestCase):
         source = data_dir / "nexo.sqlite3"
         before = source.read_bytes()
         second = engine.migrate()
-        self.assertEqual((first.source_version, first.target_version, first.changed), (0, 30, True))
-        self.assertEqual((second.source_version, second.target_version, second.changed), (30, 30, False))
+        self.assertEqual((first.source_version, first.target_version, first.changed), (0, 31, True))
+        self.assertEqual((second.source_version, second.target_version, second.changed), (31, 31, False))
         self.assertEqual(source.read_bytes(), before)
-        self.assertEqual(validate_runtime_database(source).version, 30)
+        self.assertEqual(validate_runtime_database(source).version, 31)
 
     def test_failure_after_staging_leaves_original_bytes_unchanged(self):
         data_dir = self.root / "staging-failure"
@@ -220,7 +220,7 @@ sys.stdin.read(1)
             worker.send_signal(signal.SIGKILL)
             self.assertEqual(worker.wait(timeout=10), -signal.SIGKILL)
             worker.communicate(timeout=10)
-            self.assertEqual(SafeMigrationEngine(data_dir).migrate().target_version, 30)
+            self.assertEqual(SafeMigrationEngine(data_dir).migrate().target_version, 31)
         finally:
             if worker.poll() is None:
                 worker.kill()
@@ -379,9 +379,9 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
 
     @unittest.skipUnless(os.name == "posix", "promotion SIGKILL synchronization requires POSIX")
     def test_next_process_recovers_and_validates_active_generation_after_sigkill(self):
-        for stage, expected in (("before_replace", "27 30 True"),
-                                ("after_replace", "30 30 False"),
-                                ("after_validation", "30 30 False")):
+        for stage, expected in (("before_replace", "27 31 True"),
+                                ("after_replace", "31 31 False"),
+                                ("after_validation", "31 31 False")):
             with self.subTest(stage=stage):
                 data_dir = self.root / stage
                 data_dir.mkdir()
@@ -419,12 +419,12 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
                 self.assertEqual(recovery_process.returncode, 0, recovery_process.stderr)
                 self.assertEqual(recovery_process.stdout.strip(), expected)
                 self.assertFalse(journal.exists())
-                self.assertEqual(validate_runtime_database(source).version, 30)
+                self.assertEqual(validate_runtime_database(source).version, 31)
                 with database(source) as connection:
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                     self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
                     self.assertEqual(tuple(row[0] for row in connection.execute(
-                        "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 31)))
+                        "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 32)))
                     self.assertEqual(connection.execute("SELECT name FROM providers "
                                                         "WHERE id='fixture-provider'").fetchone()[0], "synthetic")
                     self.assertEqual(connection.execute("SELECT state FROM auth_state WHERE id=1").fetchone()[0],
@@ -495,7 +495,7 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
         self.assertFalse(orphan.exists())
         self.assertIsNotNone(result.backup_path)
         self.assertEqual(inspect_database(result.backup_path).version, 27)
-        self.assertEqual(validate_runtime_database(source).version, 30)
+        self.assertEqual(validate_runtime_database(source).version, 31)
 
     def test_incompatible_runtime_states_never_start_api_or_mutate_database(self):
         cases = ("old", "future", "ledger-gap", "partial", "unledgered")
@@ -512,7 +512,7 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
                 elif case == "future":
                     SafeMigrationEngine(data_dir).migrate()
                     with sqlite3.connect(source) as connection:
-                        connection.execute("INSERT INTO schema_migrations VALUES(31, 'future')")
+                        connection.execute("INSERT INTO schema_migrations VALUES(32, 'future')")
                 else:
                     create_historical_database(source, 28)
                     with sqlite3.connect(source) as connection:
@@ -565,7 +565,7 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
                 validate_schema_manifest(connection, manifest)
 
     def test_new_migration_contract_is_lease_only_and_registered(self):
-        self.assertEqual(tuple(item.version for item in TRANSACTIONAL_MIGRATIONS), (29, 30))
+        self.assertEqual(tuple(item.version for item in TRANSACTIONAL_MIGRATIONS), (29, 30, 31))
         data_dir = self.root / "synthetic-future"
         data_dir.mkdir()
         source = data_dir / "base.sqlite3"
@@ -628,7 +628,7 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
         create_historical_database(source, 28)
         SafeMigrationEngine(data_dir).migrate()
         with sqlite3.connect(source) as connection:
-            connection.execute("INSERT INTO schema_migrations VALUES(31, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(32, 'future')")
         future_bytes = source.read_bytes()
         old_db = main.DB_PATH
         main.DB_PATH = source

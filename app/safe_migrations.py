@@ -21,7 +21,8 @@ from app import migrations
 
 HISTORICAL_SCHEMA_VERSION = 28
 ADMIN_SCHEMA_VERSION = 29
-CURRENT_SCHEMA_VERSION = 30
+OWNERSHIP_SCHEMA_VERSION = 30
+CURRENT_SCHEMA_VERSION = 31
 LOCK_SUFFIX = ".migration.lock"
 JOURNAL_NAME = ".nexo.sqlite3.promotion.json"
 FAULT_HOOK = Callable[[str], None]
@@ -116,6 +117,23 @@ OWNERSHIP_SCHEMA_STATEMENTS = (
     "CREATE TABLE auth_user_preferences (user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, key TEXT NOT NULL CHECK(length(key)>0), value TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(user_id,key))",
 )
 
+HISTORICAL_AUDIT_SCHEMA_STATEMENTS = (
+    "DROP INDEX idx_auth_security_events_created",
+    "ALTER TABLE auth_security_events RENAME TO auth_security_events_v30",
+    "CREATE TABLE auth_security_events (id INTEGER PRIMARY KEY, event_type TEXT NOT NULL CHECK(event_type IN ('bootstrap_completed','login_failed','login_rate_limited','login_succeeded','session_expired','logout','session_revoked','all_sessions_revoked','password_reset_local','historical_ownership_assigned')), actor_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL, created_at REAL NOT NULL, correlation_id TEXT)",
+    "INSERT INTO auth_security_events(id,event_type,actor_user_id,created_at,correlation_id) SELECT id,event_type,actor_user_id,created_at,correlation_id FROM auth_security_events_v30",
+    "DROP TABLE auth_security_events_v30",
+    "CREATE INDEX idx_auth_security_events_created ON auth_security_events(created_at,id)",
+    "CREATE TRIGGER auth_security_events_no_update BEFORE UPDATE ON auth_security_events BEGIN SELECT RAISE(ABORT, 'security events are append-only'); END",
+    "CREATE TRIGGER auth_security_events_no_delete BEFORE DELETE ON auth_security_events BEGIN SELECT RAISE(ABORT, 'security events are append-only'); END",
+    "CREATE TABLE auth_historical_ownership_operations (operation_id TEXT PRIMARY KEY CHECK(length(operation_id)>0), target_user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE RESTRICT, created_at REAL NOT NULL, conversations_count INTEGER NOT NULL CHECK(conversations_count>=0), notebooks_count INTEGER NOT NULL CHECK(notebooks_count>=0), inventory_sha256 TEXT NOT NULL CHECK(length(inventory_sha256)=64), assignment_manifest_sha256 TEXT NOT NULL CHECK(length(assignment_manifest_sha256)=64), backup_id TEXT NOT NULL CHECK(length(backup_id)>0), backup_sha256 TEXT NOT NULL CHECK(length(backup_sha256)=64), sqlite_generation TEXT NOT NULL CHECK(length(sqlite_generation)>0), audit_contract_version INTEGER NOT NULL CHECK(audit_contract_version=1), status TEXT NOT NULL CHECK(status='committed'))",
+    "CREATE TRIGGER auth_historical_ownership_operations_no_update BEFORE UPDATE ON auth_historical_ownership_operations BEGIN SELECT RAISE(ABORT, 'ownership operations are append-only'); END",
+    "CREATE TRIGGER auth_historical_ownership_operations_no_delete BEFORE DELETE ON auth_historical_ownership_operations BEGIN SELECT RAISE(ABORT, 'ownership operations are append-only'); END",
+    "CREATE UNIQUE INDEX idx_auth_security_events_historical_operation ON auth_security_events(correlation_id) WHERE event_type='historical_ownership_assigned'",
+    "CREATE TRIGGER auth_security_events_require_historical_operation BEFORE INSERT ON auth_security_events WHEN NEW.event_type='historical_ownership_assigned' AND NOT EXISTS (SELECT 1 FROM auth_historical_ownership_operations WHERE operation_id=NEW.correlation_id AND target_user_id=NEW.actor_user_id AND created_at=NEW.created_at AND status='committed') BEGIN SELECT RAISE(ABORT, 'historical ownership operation is incomplete'); END",
+    "CREATE TRIGGER auth_historical_ownership_operations_create_event AFTER INSERT ON auth_historical_ownership_operations BEGIN INSERT INTO auth_security_events(event_type,actor_user_id,created_at,correlation_id) VALUES('historical_ownership_assigned',NEW.target_user_id,NEW.created_at,NEW.operation_id); END",
+)
+
 
 def _admin_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
     connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
@@ -132,8 +150,16 @@ def _admin_schema_manifest(connection: sqlite3.Connection, user_preferences: boo
 
 def _ownership_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
     _admin_schema_manifest(connection, user_preferences)
-    connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (CURRENT_SCHEMA_VERSION,))
+    connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (OWNERSHIP_SCHEMA_VERSION,))
     for statement in OWNERSHIP_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+    return capture_schema_manifest(connection)
+
+
+def _historical_audit_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
+    _ownership_schema_manifest(connection, user_preferences)
+    connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (CURRENT_SCHEMA_VERSION,))
+    for statement in HISTORICAL_AUDIT_SCHEMA_STATEMENTS:
         connection.execute(statement)
     return capture_schema_manifest(connection)
 
@@ -154,6 +180,16 @@ def expected_ownership_schema_manifest(user_preferences: bool = False) -> Schema
     connection.execute("PRAGMA foreign_keys=ON")
     try:
         return _ownership_schema_manifest(connection, user_preferences)
+    finally:
+        connection.close()
+
+
+@lru_cache(maxsize=2)
+def expected_historical_audit_schema_manifest(user_preferences: bool = False) -> SchemaManifest:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        return _historical_audit_schema_manifest(connection, user_preferences)
     finally:
         connection.close()
 
@@ -198,6 +234,12 @@ def _validate_ownership_schema(connection: sqlite3.Connection) -> None:
     _validate_admin_data(connection)
 
 
+def _validate_historical_audit_schema(connection: sqlite3.Connection) -> None:
+    preferences = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_preferences'").fetchone()
+    validate_schema_manifest(connection, expected_historical_audit_schema_manifest(bool(preferences)))
+    _validate_admin_data(connection)
+
+
 def _validate_ownership_migration_output(connection: sqlite3.Connection) -> None:
     _validate_ownership_schema(connection)
     if (connection.execute("SELECT 1 FROM conversations WHERE owner_user_id IS NOT NULL LIMIT 1").fetchone()
@@ -210,6 +252,8 @@ def _expected_manifest(version: int, user_preferences: bool = False) -> SchemaMa
     if version == ADMIN_SCHEMA_VERSION:
         return expected_admin_schema_manifest(user_preferences)
     if version == CURRENT_SCHEMA_VERSION:
+        return expected_historical_audit_schema_manifest(user_preferences)
+    if version == OWNERSHIP_SCHEMA_VERSION:
         return expected_ownership_schema_manifest(user_preferences)
     return expected_schema_manifest(version, user_preferences)
 
@@ -223,6 +267,10 @@ TRANSACTIONAL_MIGRATIONS: tuple[TransactionalMigration, ...] = (
                            lambda db: validate_schema_manifest(db, expected_admin_schema_manifest(
                                bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='user_preferences'").fetchone()))),
                            _validate_ownership_migration_output),
+    TransactionalMigration(31, HISTORICAL_AUDIT_SCHEMA_STATEMENTS,
+                           lambda db: validate_schema_manifest(db, expected_ownership_schema_manifest(
+                               bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='user_preferences'").fetchone()))),
+                           _validate_historical_audit_schema),
 )
 
 
@@ -277,7 +325,8 @@ def validate_runtime_database(database: str | Path) -> DatabaseState:
     if _journal_path(path).exists() or _journal_path(path).is_symlink():
         raise MigrationRecoveryRequired("offline migration recovery is incomplete")
     state = inspect_database(path, fingerprint_data=False)
-    if state.version not in (HISTORICAL_SCHEMA_VERSION, ADMIN_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
+    if state.version not in (HISTORICAL_SCHEMA_VERSION, ADMIN_SCHEMA_VERSION,
+                             OWNERSHIP_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
         raise SchemaCompatibilityError("database schema is not the supported runtime version")
     return state
 
@@ -537,6 +586,8 @@ class SafeMigrationEngine:
                     stage_connection.execute("PRAGMA foreign_keys=ON")
                     migrations.migrate(stage_connection)
                     for spec in TRANSACTIONAL_MIGRATIONS:
+                        if spec.version <= source.version:
+                            continue
                         _apply_transactional_migration(
                             stage_connection, offline_lease, spec.version, spec.statements,
                             spec.validate_previous, spec.validate_output, fault_hook)
@@ -739,8 +790,10 @@ def _inspect_connection(connection: sqlite3.Connection, *, fingerprint_data: boo
     validate_schema_manifest(connection, manifest)
     if version == ADMIN_SCHEMA_VERSION:
         _validate_admin_schema(connection)
-    elif version == CURRENT_SCHEMA_VERSION:
+    elif version == OWNERSHIP_SCHEMA_VERSION:
         _validate_ownership_schema(connection)
+    elif version == CURRENT_SCHEMA_VERSION:
+        _validate_historical_audit_schema(connection)
     integrity, foreign_keys = _database_check(connection)
     if integrity != "ok" or foreign_keys:
         raise SchemaCompatibilityError("database integrity or foreign-key validation failed")

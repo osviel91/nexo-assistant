@@ -20,7 +20,7 @@ from app.safe_migrations import (
     SchemaCompatibilityError,
     TRANSACTIONAL_MIGRATIONS,
     _apply_transactional_migration,
-    expected_ownership_schema_manifest,
+    expected_historical_audit_schema_manifest,
     inspect_database,
     validate_schema_manifest,
     validate_runtime_database,
@@ -100,8 +100,8 @@ class OwnershipSchemaMigrationTests(unittest.TestCase):
                                     "user_preferences")}
 
         result = SafeMigrationEngine(data_dir).migrate()
-        self.assertEqual((result.source_version, result.target_version), (29, 30))
-        self.assertEqual(validate_runtime_database(database).version, 30)
+        self.assertEqual((result.source_version, result.target_version), (29, 31))
+        self.assertEqual(validate_runtime_database(database).version, 31)
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -116,7 +116,7 @@ class OwnershipSchemaMigrationTests(unittest.TestCase):
                 "SELECT owner_user_id FROM notebooks WHERE id='notebook-1'").fetchone()[0])
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM auth_user_preferences").fetchone()[0], 0)
             self.assertEqual(tuple(row[0] for row in connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 31)))
+                "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 32)))
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 0)
             connection.execute("PRAGMA foreign_keys=ON")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -158,14 +158,14 @@ class OwnershipSchemaMigrationTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT value FROM user_preferences "
                                                  "WHERE key='last_chat_model'").fetchone()[0], "fixture-model")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
-        self.assertEqual(inspect_database(database).version, 30)
+        self.assertEqual(inspect_database(database).version, 31)
 
     def test_v30_manifest_captures_owner_columns_foreign_keys_indexes_and_constraints(self):
         data_dir = self.root / "manifest"
         data_dir.mkdir()
         database = data_dir / "nexo.sqlite3"
         SafeMigrationEngine(data_dir).migrate()
-        expected = expected_ownership_schema_manifest()
+        expected = expected_historical_audit_schema_manifest()
         tables = {table.name: table for table in expected.tables}
         for table_name in ("conversations", "notebooks"):
             table = tables[table_name]
@@ -290,7 +290,7 @@ class OwnershipSchemaMigrationTests(unittest.TestCase):
             ("changed-index", ("DROP INDEX idx_conversations_owner_updated",
                                "CREATE INDEX idx_conversations_owner_updated ON conversations(updated_at)")),
             ("missing-table", ("DROP TABLE auth_user_preferences",)),
-            ("future-ledger", ("INSERT INTO schema_migrations VALUES(31,'future')",)),
+            ("future-ledger", ("INSERT INTO schema_migrations VALUES(32,'future')",)),
         )
         for name, statements in mutations:
             with self.subTest(name=name):
@@ -319,7 +319,7 @@ class OwnershipSchemaMigrationTests(unittest.TestCase):
             SafeMigrationEngine(data_dir).migrate(fault_hook=fail_after_first_owner_column)
         self.assertEqual(database.read_bytes(), original)
         self.assertEqual(inspect_database(database).version, 29)
-        self.assertEqual(SafeMigrationEngine(data_dir).migrate().target_version, 30)
+        self.assertEqual(SafeMigrationEngine(data_dir).migrate().target_version, 31)
 
     def test_sigkill_around_v30_commit_reopens_with_atomic_schema_data_and_ledger(self):
         for barrier, expected_version in (("after_ledger", 29), ("after_commit", 30)):
@@ -367,8 +367,8 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault_hook=stop)
                                                              "WHERE key='last_chat_model'").fetchone()[0],
                                          "fixture-model")
                 result = SafeMigrationEngine(data_dir).migrate()
-                self.assertEqual(result.target_version, 30)
-                self.assertEqual(inspect_database(database).version, 30)
+                self.assertEqual(result.target_version, 31)
+                self.assertEqual(inspect_database(database).version, 31)
                 with sqlite3.connect(database) as connection:
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                     self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -402,7 +402,7 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault_hook=pause)
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
-        self.assertEqual(inspect_database(database).version, 30)
+        self.assertEqual(inspect_database(database).version, 31)
 
     def test_sigkill_before_and_after_promotion_recovers_v30_with_all_rows_and_ledger(self):
         for barrier, promoted in (("before_replace", False), ("after_replace", True)):
@@ -427,17 +427,17 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault_hook=stop)
                 self.assertTrue((data_dir / ".nexo.sqlite3.promotion.json").exists())
                 with self.assertRaises(MigrationRecoveryRequired):
                     validate_runtime_database(database)
-                self.assertEqual(inspect_database(database).version, 30 if promoted else 29)
+                self.assertEqual(inspect_database(database).version, 31 if promoted else 29)
 
                 result = SafeMigrationEngine(data_dir).migrate()
-                self.assertEqual((result.target_version, result.changed), (30, promoted is False))
+                self.assertEqual((result.target_version, result.changed), (31, promoted is False))
                 self.assertFalse((data_dir / ".nexo.sqlite3.promotion.json").exists())
-                self.assertEqual(inspect_database(database).version, 30)
+                self.assertEqual(inspect_database(database).version, 31)
                 with sqlite3.connect(database) as connection:
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                     self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
                     self.assertEqual(tuple(row[0] for row in connection.execute(
-                        "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 31)))
+                        "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 32)))
                     for table in ("conversations", "notebooks", "messages", "runtime_runs", "runtime_events",
                                   "notebook_sources", "canonical_documents", "canonical_spans", "document_chunks"):
                         self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 1)
@@ -460,15 +460,15 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault_hook=stop)
                 create_historical_database(database, 28, preferences=True)
             self.assertEqual(validate_runtime_database(database).version, version)
             result = SafeMigrationEngine(data_dir).migrate()
-            self.assertEqual(result.target_version, 30)
+            self.assertEqual(result.target_version, 31)
             backup_input = self.root / f"backup-input-v{version}.sqlite3"
             backup = self.root / f"backup-v{version}.sqlite3"
             restored = self.root / f"restore-v{version}.sqlite3"
             shutil.copyfile(database, backup_input)
             backup_database(backup_input, backup)
             restore_database(backup, restored)
-            self.assertEqual(inspect_database(restored).version, 30)
-            self.assertEqual(inspect_database(backup).version, 30)
+            self.assertEqual(inspect_database(restored).version, 31)
+            self.assertEqual(inspect_database(backup).version, 31)
 
 
 if __name__ == "__main__":

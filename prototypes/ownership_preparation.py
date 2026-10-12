@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
-from app.safe_migrations import ADMIN_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, inspect_database
+from app.safe_migrations import ADMIN_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, OWNERSHIP_SCHEMA_VERSION, inspect_database
 from prototypes.admin_persistence import _temporary_database_path
 
 
@@ -39,8 +39,8 @@ def inspect_ownership_preparation(path: str | Path) -> dict:
     database = _temporary_database_path(path)
     _require_synthetic_fixture(database)
     state = inspect_database(database, fingerprint_data=False)
-    if state.version not in (ADMIN_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
-        raise ValueError("ownership preparation requires schema v29 or v30")
+    if state.version not in (ADMIN_SCHEMA_VERSION, OWNERSHIP_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
+        raise ValueError("ownership preparation requires schema v29, v30, or v31")
 
     uri = database.as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
