@@ -184,6 +184,12 @@ OPERATIONAL_REQUIREMENTS = (
     "https_and_topology_verified", "backup_restore_verified", "admin_recovery_available",
     "operational_approval",
 )
+MIGRATION_REQUIREMENTS = (
+    "incomplete_migration_fails_closed", "ledger_commits_with_schema",
+    "schema_validated_beyond_version", "unknown_future_version_rejected",
+    "storage_failure_has_no_anonymous_fallback", "incompatible_restore_fails_closed",
+    "bootstrap_requires_verified_schema_and_backup",
+)
 
 
 class SyntheticEffectHarness:
@@ -217,7 +223,7 @@ def integration_blockers(evidence: dict[str, str]) -> tuple[str, ...]:
 
 
 def activation_blockers(evidence: dict[str, str]) -> tuple[str, ...]:
-    required = INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS + OPERATIONAL_REQUIREMENTS
+    required = INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS + MIGRATION_REQUIREMENTS + OPERATIONAL_REQUIREMENTS
     return tuple(name for name in required
                  if evidence.get(name) != ("operational-verified" if name in OPERATIONAL_REQUIREMENTS
                                            else "runtime-verified"))

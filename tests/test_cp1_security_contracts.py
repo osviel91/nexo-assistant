@@ -22,6 +22,7 @@ from prototypes.security_contracts import (
     INTEGRATION_REQUIREMENTS,
     OPERATIONAL_REQUIREMENTS,
     RUNTIME_REQUIREMENTS,
+    MIGRATION_REQUIREMENTS,
     OWNERSHIP_DOMAINS,
     OWNERSHIP_ACCEPTANCE,
     SSE_CHECKPOINTS,
@@ -145,14 +146,15 @@ class SecurityContractTests(unittest.TestCase):
     def test_integration_and_activation_gates_are_distinct_and_closed_by_default(self):
         self.assertEqual(EVIDENCE_LEVELS, ("pending", "prototype-verified", "runtime-verified", "operational-verified"))
         prototype = {name: "prototype-verified" for name in
-                     INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS + OPERATIONAL_REQUIREMENTS}
+                     INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS + MIGRATION_REQUIREMENTS + OPERATIONAL_REQUIREMENTS}
         self.assertEqual(integration_blockers(prototype), INTEGRATION_REQUIREMENTS)
         self.assertTrue(activation_blockers(prototype))
         self.assertTrue(integration_blockers({"integration_acceptance_tests_pass": True}))
         runtime = {name: "runtime-verified" for name in INTEGRATION_REQUIREMENTS + RUNTIME_REQUIREMENTS}
         self.assertEqual(integration_blockers(runtime), ())
-        self.assertEqual(activation_blockers(runtime), OPERATIONAL_REQUIREMENTS)
-        ready = runtime | {name: "operational-verified" for name in OPERATIONAL_REQUIREMENTS}
+        self.assertEqual(activation_blockers(runtime), MIGRATION_REQUIREMENTS + OPERATIONAL_REQUIREMENTS)
+        ready = runtime | {name: "runtime-verified" for name in MIGRATION_REQUIREMENTS}
+        ready.update({name: "operational-verified" for name in OPERATIONAL_REQUIREMENTS})
         self.assertEqual(activation_blockers(ready), ())
         self.assertEqual(len(activation_blockers({name: True for name in ready})), len(ready))
 

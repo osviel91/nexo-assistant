@@ -99,6 +99,8 @@ Pendiente: autorización antes de cada escritura/provider/RAG/tool/MCP real, per
 
 `activation_blockers()` es cerrado por defecto y vuelve a exigir literalmente evidencia `runtime-verified` para todos los requisitos de integración/runtime, además de `operational-verified` para HTTPS/topología, backup/restore, recuperación administrativa y aprobación explícita. Un éxito sintético no puede satisfacerlos; completar integration-ready tampoco promueve ningún requisito operacional.
 
+El gate de activación incluye además los contratos de migración `incomplete_migration_fails_closed`, `ledger_commits_with_schema`, `schema_validated_beyond_version`, `unknown_future_version_rejected`, `storage_failure_has_no_anonymous_fallback`, `incompatible_restore_fails_closed` y `bootstrap_requires_verified_schema_and_backup`. Cada uno requiere su propia evidencia `runtime-verified`; un ensayo de harness en CP2-A permanece `prototype-verified` y no despeja esos bloqueos.
+
 No existe flag de bypass de autenticación o recuperación. Un resultado de pruebas CP1 no satisface automáticamente ningún gate runtime ni operacional.
 
 ## 7. Estado Y Dependencias
