@@ -20,7 +20,8 @@ from app import migrations
 
 
 HISTORICAL_SCHEMA_VERSION = 28
-CURRENT_SCHEMA_VERSION = 29
+ADMIN_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 LOCK_SUFFIX = ".migration.lock"
 JOURNAL_NAME = ".nexo.sqlite3.promotion.json"
 FAULT_HOOK = Callable[[str], None]
@@ -107,17 +108,33 @@ ADMIN_SCHEMA_STATEMENTS = (
     "CREATE TRIGGER auth_security_events_no_delete BEFORE DELETE ON auth_security_events BEGIN SELECT RAISE(ABORT, 'security events are append-only'); END",
 )
 
+OWNERSHIP_SCHEMA_STATEMENTS = (
+    "ALTER TABLE conversations ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE RESTRICT",
+    "ALTER TABLE notebooks ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE RESTRICT",
+    "CREATE INDEX idx_conversations_owner_updated ON conversations(owner_user_id,updated_at DESC,id DESC)",
+    "CREATE INDEX idx_notebooks_owner_updated ON notebooks(owner_user_id,updated_at)",
+    "CREATE TABLE auth_user_preferences (user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, key TEXT NOT NULL CHECK(length(key)>0), value TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(user_id,key))",
+)
+
 
 def _admin_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
     connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     for version, migration in migrations.MIGRATIONS:
         migration(connection)
         connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (version,))
-    connection.execute("INSERT INTO schema_migrations VALUES(29, 'manifest')")
+    connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (ADMIN_SCHEMA_VERSION,))
     for statement in ADMIN_SCHEMA_STATEMENTS:
         connection.execute(statement)
     if user_preferences:
         connection.execute("CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL)")
+    return capture_schema_manifest(connection)
+
+
+def _ownership_schema_manifest(connection: sqlite3.Connection, user_preferences: bool) -> SchemaManifest:
+    _admin_schema_manifest(connection, user_preferences)
+    connection.execute("INSERT INTO schema_migrations VALUES(?, 'manifest')", (CURRENT_SCHEMA_VERSION,))
+    for statement in OWNERSHIP_SCHEMA_STATEMENTS:
+        connection.execute(statement)
     return capture_schema_manifest(connection)
 
 
@@ -131,9 +148,23 @@ def expected_admin_schema_manifest(user_preferences: bool = False) -> SchemaMani
         connection.close()
 
 
+@lru_cache(maxsize=2)
+def expected_ownership_schema_manifest(user_preferences: bool = False) -> SchemaManifest:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        return _ownership_schema_manifest(connection, user_preferences)
+    finally:
+        connection.close()
+
+
 def _validate_admin_schema(connection: sqlite3.Connection) -> None:
     preferences = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_preferences'").fetchone()
     validate_schema_manifest(connection, expected_admin_schema_manifest(bool(preferences)))
+    _validate_admin_data(connection)
+
+
+def _validate_admin_data(connection: sqlite3.Connection) -> None:
     rows = connection.execute("SELECT state,bootstrapped_at FROM auth_state WHERE id=1").fetchall()
     if len(rows) != 1:
         raise SchemaCompatibilityError("administrative initialization state is missing or duplicated")
@@ -161,9 +192,25 @@ def _validate_admin_schema(connection: sqlite3.Connection) -> None:
             raise SchemaCompatibilityError("completed administrative bootstrap is incomplete")
 
 
+def _validate_ownership_schema(connection: sqlite3.Connection) -> None:
+    preferences = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_preferences'").fetchone()
+    validate_schema_manifest(connection, expected_ownership_schema_manifest(bool(preferences)))
+    _validate_admin_data(connection)
+
+
+def _validate_ownership_migration_output(connection: sqlite3.Connection) -> None:
+    _validate_ownership_schema(connection)
+    if (connection.execute("SELECT 1 FROM conversations WHERE owner_user_id IS NOT NULL LIMIT 1").fetchone()
+            or connection.execute("SELECT 1 FROM notebooks WHERE owner_user_id IS NOT NULL LIMIT 1").fetchone()
+            or connection.execute("SELECT 1 FROM auth_user_preferences LIMIT 1").fetchone()):
+        raise SchemaCompatibilityError("ownership migration unexpectedly assigned historical data")
+
+
 def _expected_manifest(version: int, user_preferences: bool = False) -> SchemaManifest:
-    if version == CURRENT_SCHEMA_VERSION:
+    if version == ADMIN_SCHEMA_VERSION:
         return expected_admin_schema_manifest(user_preferences)
+    if version == CURRENT_SCHEMA_VERSION:
+        return expected_ownership_schema_manifest(user_preferences)
     return expected_schema_manifest(version, user_preferences)
 
 
@@ -172,6 +219,10 @@ TRANSACTIONAL_MIGRATIONS: tuple[TransactionalMigration, ...] = (
                            lambda db: validate_schema_manifest(db, expected_schema_manifest(
                                28, bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='user_preferences'").fetchone()))),
                            _validate_admin_schema),
+    TransactionalMigration(30, OWNERSHIP_SCHEMA_STATEMENTS,
+                           lambda db: validate_schema_manifest(db, expected_admin_schema_manifest(
+                               bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='user_preferences'").fetchone()))),
+                           _validate_ownership_migration_output),
 )
 
 
@@ -226,7 +277,7 @@ def validate_runtime_database(database: str | Path) -> DatabaseState:
     if _journal_path(path).exists() or _journal_path(path).is_symlink():
         raise MigrationRecoveryRequired("offline migration recovery is incomplete")
     state = inspect_database(path, fingerprint_data=False)
-    if state.version not in (HISTORICAL_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
+    if state.version not in (HISTORICAL_SCHEMA_VERSION, ADMIN_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
         raise SchemaCompatibilityError("database schema is not the supported runtime version")
     return state
 
@@ -686,8 +737,10 @@ def _inspect_connection(connection: sqlite3.Connection, *, fingerprint_data: boo
     preferences = "user_preferences" in tables
     manifest = _expected_manifest(version, preferences)
     validate_schema_manifest(connection, manifest)
-    if version == CURRENT_SCHEMA_VERSION:
+    if version == ADMIN_SCHEMA_VERSION:
         _validate_admin_schema(connection)
+    elif version == CURRENT_SCHEMA_VERSION:
+        _validate_ownership_schema(connection)
     integrity, foreign_keys = _database_check(connection)
     if integrity != "ok" or foreign_keys:
         raise SchemaCompatibilityError("database integrity or foreign-key validation failed")

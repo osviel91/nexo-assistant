@@ -22,13 +22,13 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def assert_v29_integrity(self, database):
-        self.assertEqual(inspect_database(database).version, 29)
+    def assert_v30_integrity(self, database):
+        self.assertEqual(inspect_database(database).version, 30)
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertEqual(tuple(row[0] for row in connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 30)))
+                "SELECT version FROM schema_migrations ORDER BY version")), tuple(range(1, 31)))
             self.assertEqual(connection.execute("SELECT state,bootstrapped_at FROM auth_state WHERE id=1").fetchone(),
                              ("schema_installed", None))
             self.assertEqual(connection.execute("SELECT failures,window_started_at,locked_until "
@@ -36,10 +36,14 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
                              (0, 0.0, 0.0))
             for table in ("auth_users", "auth_user_permissions", "auth_sessions", "auth_security_events"):
                 self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM auth_user_preferences").fetchone()[0], 0)
+            for table in ("conversations", "notebooks"):
+                self.assertEqual(connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE owner_user_id IS NOT NULL").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT name FROM providers WHERE id='fixture-provider'").fetchone()[0],
                              "synthetic")
 
-    def test_fresh_and_v28_bases_upgrade_to_empty_bootstrap_pending_v29(self):
+    def test_fresh_and_v28_bases_upgrade_to_empty_bootstrap_pending_v30(self):
         for base in ("fresh", "v28"):
             with self.subTest(base=base):
                 data_dir = self.root / base
@@ -48,8 +52,8 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
                 if base == "v28":
                     create_historical_database(database, 28)
                 result = SafeMigrationEngine(data_dir).migrate()
-                self.assertEqual((result.source_version, result.target_version), (0 if base == "fresh" else 28, 29))
-                self.assertEqual(inspect_database(database).version, 29)
+                self.assertEqual((result.source_version, result.target_version), (0 if base == "fresh" else 28, 30))
+                self.assertEqual(inspect_database(database).version, 30)
                 with sqlite3.connect(database) as connection:
                     self.assertEqual(connection.execute("SELECT state FROM auth_state").fetchone()[0], "schema_installed")
                     for table in ("auth_users", "auth_user_permissions", "auth_sessions", "auth_security_events"):
@@ -107,7 +111,7 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
                                "WHERE subject='administrator'")
             connection.execute("INSERT INTO auth_sessions VALUES(?,?,?,?,?,?,?,?)",
                                (b't' * 32, b'c' * 32, 'u', 1, 1, 2, 3, 2))
-        self.assertEqual(inspect_database(database).version, 29)
+        self.assertEqual(inspect_database(database).version, 30)
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute("SELECT failures,window_started_at,locked_until "
                                                  "FROM auth_login_guard").fetchone(), (3, 10.0, 20.0))
@@ -136,7 +140,7 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
                 with self.assertRaises(SchemaCompatibilityError):
                     inspect_database(database)
 
-    def test_incomplete_v29_and_extra_objects_fail_schema_validation(self):
+    def test_incomplete_v30_and_extra_objects_fail_schema_validation(self):
         for change in ("DROP TABLE auth_sessions", "DROP INDEX idx_auth_sessions_user",
                        "CREATE TABLE unexpected_admin_object(id INTEGER)"):
             with self.subTest(change=change):
@@ -149,7 +153,7 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
                 with self.assertRaises(SchemaCompatibilityError):
                     inspect_database(database)
 
-    def test_v29_backup_restore_and_security_event_append_only(self):
+    def test_v30_backup_restore_and_security_event_append_only(self):
         data_dir = self.root / "backup"
         data_dir.mkdir()
         database = data_dir / "nexo.sqlite3"
@@ -160,7 +164,7 @@ class AdministrativeSchemaMigrationTests(unittest.TestCase):
         shutil.copyfile(database, synthetic_source)
         backup_database(synthetic_source, backup)
         restore_database(backup, restored)
-        self.assertEqual(inspect_database(restored).version, 29)
+        self.assertEqual(inspect_database(restored).version, 30)
         with sqlite3.connect(restored) as connection:
             connection.execute("INSERT INTO auth_security_events(event_type,created_at) VALUES('login_failed',1)")
             with self.assertRaises(sqlite3.IntegrityError):
@@ -230,8 +234,8 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault_hook=stop)
                                          "schema_installed")
                         self.assertEqual(connection.execute("SELECT COUNT(*) FROM auth_users").fetchone()[0], 0)
                 result = SafeMigrationEngine(data_dir).migrate()
-                self.assertEqual(result.target_version, 29)
-                self.assert_v29_integrity(database)
+                self.assertEqual(result.target_version, 30)
+                self.assert_v30_integrity(database)
 
 
 if __name__ == "__main__":
