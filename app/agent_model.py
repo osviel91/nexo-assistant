@@ -29,7 +29,9 @@ class ModelStreamChunk:
 
 
 class ModelAdapterError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class _TextToolCallParser:
@@ -138,7 +140,7 @@ class OpenAICompatibleModelAdapter:
             async with self.client.stream("POST", self.url, headers=self.headers, json=payload) as response:
                 if response.status_code >= 400:
                     diagnostic(logger, "provider_response", status=response.status_code, finish_reason=None, tool_calls_present=False, tool_call_names=[])
-                    raise ModelAdapterError(f"Provider HTTP {response.status_code}")
+                    raise ModelAdapterError(f"Provider HTTP {response.status_code}", status_code=response.status_code)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue

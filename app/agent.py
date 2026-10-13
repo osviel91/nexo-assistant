@@ -191,8 +191,11 @@ class AgentRuntime:
                         current["arguments"] += function.get("arguments", "") or ""
             except ModelAdapterError as exc:
                 duration_ms = round((time.perf_counter() - reason_started) * 1000, 2)
-                request.event_sink.finish_event(reason_event_id, "failed", {**reason_metadata, "error_code": "provider_failure"}, duration_ms)
-                yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {**reason_metadata, "run_id": request.context.run_id}}}
+                error_metadata = {**reason_metadata, "error_code": "provider_failure"}
+                if exc.status_code is not None:
+                    error_metadata["provider_status"] = exc.status_code
+                request.event_sink.finish_event(reason_event_id, "failed", error_metadata, duration_ms)
+                yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {**error_metadata, "run_id": request.context.run_id}}}
                 yield {"error": "provider_failure" if request.profile_id else str(exc)}
                 return
 

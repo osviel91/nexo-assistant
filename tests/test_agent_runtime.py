@@ -166,6 +166,26 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertNotIn("content", json.dumps(trace))
         self.assertNotIn("secret", json.dumps(trace))
 
+    def test_provider_http_status_is_in_failure_trace(self):
+        class BrokenAdapter:
+            model_id = "model"
+
+            async def stream(self, messages, tools, temperature=None):
+                raise ModelAdapterError("Provider HTTP 400", status_code=400)
+                yield
+
+        async def collect():
+            context = ToolExecutionContext("conversation", "provider", "model", 0)
+            tools = ExposurePolicy().resolve(self.registry(lambda *_: {}).tool_catalog_view(), set())
+            request = AgentRunRequest(BrokenAdapter(), [{"role": "user", "content": "x"}], tools,
+                                      ToolExecutor(), context, profile_id="agent")
+            return [event async for event in AgentRuntime().stream(request)]
+
+        events = asyncio.run(collect())
+        trace = next(event["trace"] for event in events if "trace" in event)
+        self.assertEqual(trace["metadata"]["provider_status"], 400)
+        self.assertEqual(events[-1]["error"], "provider_failure")
+
     def test_shadow_branch_cannot_change_agent_payload(self):
         async def handler(context, arguments):
             return {}
