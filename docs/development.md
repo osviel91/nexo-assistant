@@ -1,16 +1,16 @@
 # Development Workflow
 
-NEXO uses Python 3.12+, a pinned `requirements.txt`, static browser assets,
-SQLite, and Docker Compose for the optional Qdrant integration. There was no
-CI or canonical command before Stage 10F; local setup was an ad hoc venv plus
-`pip install` and individual test commands.
+NEXO uses Python 3.12+, pinned runtime dependencies in `requirements.txt`,
+test/development dependencies in `requirements-dev.txt`, static browser assets,
+SQLite, and Docker Compose for the optional Qdrant integration. The Docker image
+installs only `requirements.txt`; `./scripts/nexo bootstrap` installs both sets.
 
 ## Canonical commands
 
 Run these from the repository root:
 
 ```sh
-./scripts/nexo bootstrap       # create/update .venv and install pinned dependencies
+./scripts/nexo bootstrap       # create/update .venv and install pinned runtime + development dependencies
 ./scripts/nexo dev             # bootstrap and run Uvicorn on port 8787
 ./scripts/nexo test            # backend pytest suite plus all frontend .mjs tests
 ./scripts/nexo test-backend    # Python tests only
