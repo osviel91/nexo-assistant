@@ -6,7 +6,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import uuid
 from pathlib import Path
@@ -125,6 +127,153 @@ class SafeMigrationIntegrationTests(unittest.TestCase):
         self.assertEqual((second.source_version, second.target_version, second.changed), (31, 31, False))
         self.assertEqual(source.read_bytes(), before)
         self.assertEqual(validate_runtime_database(source).version, 31)
+
+    def test_initialize_if_missing_builds_fresh_database_and_is_idempotent(self):
+        data_dir = self.root / "fresh-startup"
+        data_dir.mkdir()
+        (data_dir / "notebook-sources").mkdir()
+        engine = SafeMigrationEngine(data_dir)
+
+        first = engine.initialize_if_missing()
+        source = data_dir / "nexo.sqlite3"
+        before = source.read_bytes()
+        second = engine.initialize_if_missing()
+
+        self.assertEqual((first.source_version, first.target_version, first.changed), (0, 31, True))
+        self.assertEqual((second.source_version, second.target_version, second.changed), (31, 31, False))
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_initialize_if_missing_never_migrates_existing_supported_database(self):
+        data_dir = self.root / "existing-v28"
+        data_dir.mkdir()
+        source = data_dir / "nexo.sqlite3"
+        create_historical_database(source, 28)
+        before = source.read_bytes()
+
+        result = SafeMigrationEngine(data_dir).initialize_if_missing()
+
+        self.assertEqual((result.source_version, result.target_version, result.changed), (28, 28, False))
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(inspect_database(source).version, 28)
+
+    def test_initialize_if_missing_rejects_persistent_state_without_database(self):
+        data_dir = self.root / "ambiguous-fresh"
+        source_dir = data_dir / "notebook-sources"
+        source_dir.mkdir(parents=True)
+        marker = source_dir / "orphan.txt"
+        marker.write_text("synthetic orphan")
+
+        with self.assertRaises(MigrationRecoveryRequired):
+            SafeMigrationEngine(data_dir).initialize_if_missing()
+
+        self.assertFalse((data_dir / "nexo.sqlite3").exists())
+        self.assertEqual(marker.read_text(), "synthetic orphan")
+
+    def test_initialize_if_missing_rejects_sidecars_without_database(self):
+        data_dir = self.root / "sidecar-without-database"
+        data_dir.mkdir()
+        wal = data_dir / "nexo.sqlite3-wal"
+        wal.write_bytes(b"orphan sidecar")
+
+        with self.assertRaises(MigrationRecoveryRequired):
+            SafeMigrationEngine(data_dir).initialize_if_missing()
+
+        self.assertFalse((data_dir / "nexo.sqlite3").exists())
+        self.assertEqual(wal.read_bytes(), b"orphan sidecar")
+
+    def test_concurrent_fresh_initializers_produce_one_valid_database(self):
+        data_dir = self.root / "concurrent-fresh"
+        data_dir.mkdir()
+        barrier = threading.Barrier(4)
+
+        def initialize():
+            barrier.wait()
+            return SafeMigrationEngine(data_dir).initialize_if_missing()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: initialize(), range(4)))
+
+        self.assertEqual(sum(result.changed for result in results), 1)
+        self.assertEqual({result.target_version for result in results}, {31})
+        self.assertEqual(inspect_database(data_dir / "nexo.sqlite3").version, 31)
+
+    def test_fresh_initializer_recovers_sigkill_before_and_after_replace(self):
+        script = """import signal,sys
+from app.safe_migrations import SafeMigrationEngine
+def pause(stage):
+    if stage == sys.argv[2]:
+        print('READY', flush=True)
+        signal.pause()
+SafeMigrationEngine(sys.argv[1]).initialize_if_missing(fault_hook=pause)
+"""
+        for phase, expected_changed in (("before_replace", True), ("after_replace", False)):
+            with self.subTest(phase=phase):
+                data_dir = self.root / f"fresh-crash-{phase}"
+                data_dir.mkdir()
+                process = subprocess.Popen(
+                    [sys.executable, "-c", script, str(data_dir), phase],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                try:
+                    wait_ready(process)
+                    process.send_signal(signal.SIGKILL)
+                    self.assertEqual(process.wait(timeout=10), -signal.SIGKILL)
+                    process.communicate(timeout=10)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+                    process.communicate(timeout=10)
+
+                result = SafeMigrationEngine(data_dir).initialize_if_missing()
+                self.assertEqual(result.target_version, 31)
+                self.assertEqual(result.changed, expected_changed)
+                self.assertEqual(inspect_database(data_dir / "nexo.sqlite3").version, 31)
+                self.assertFalse((data_dir / ".nexo.sqlite3.promotion.json").exists())
+
+    def test_runtime_startup_initializes_empty_database_and_restart_is_read_only(self):
+        data_dir = self.root / "runtime-fresh"
+        data_dir.mkdir()
+        source = data_dir / "nexo.sqlite3"
+        script = """import sqlite3
+from app import main
+from app.safe_migrations import validate_runtime_database
+main.startup()
+print(validate_runtime_database(main.DB_PATH).version)
+with main.db() as connection:
+    print(connection.execute('SELECT state FROM auth_state WHERE id=1').fetchone()[0])
+"""
+        env = os.environ.copy() | {
+            "NEXO_DATA_DIR": str(data_dir),
+            "NEXO_MODULES": "attachments",
+            "NEXO_VECTOR_STORE": "local",
+        }
+        for _ in range(2):
+            result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).parents[1],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["31", "schema_installed"])
+        self.assertEqual(validate_runtime_database(source).version, 31)
+
+    def test_runtime_startup_rejects_nonempty_directory_without_database(self):
+        data_dir = self.root / "runtime-orphan"
+        source_dir = data_dir / "notebook-sources"
+        source_dir.mkdir(parents=True)
+        marker = source_dir / "orphan.txt"
+        marker.write_text("synthetic orphan")
+        script = "from app import main; main.startup()"
+        env = os.environ.copy() | {
+            "NEXO_DATA_DIR": str(data_dir),
+            "NEXO_MODULES": "attachments",
+            "NEXO_VECTOR_STORE": "local",
+        }
+
+        result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).parents[1],
+                                env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((data_dir / "nexo.sqlite3").exists())
+        self.assertTrue(marker.exists())
 
     def test_failure_after_staging_leaves_original_bytes_unchanged(self):
         data_dir = self.root / "staging-failure"
@@ -323,19 +472,59 @@ SafeMigrationEngine(sys.argv[1]).migrate(fault)
             main.shutdown()
             main.DB_PATH = old_db
 
-    def test_startup_fails_closed_when_sqlite_storage_is_missing(self):
+    def test_startup_initializes_missing_sqlite_and_restart_does_not_migrate(self):
         data_dir = self.root / "missing-storage"
         data_dir.mkdir()
         source = data_dir / "nexo.sqlite3"
         old_db = main.DB_PATH
         main.DB_PATH = source
         try:
-            with self.assertRaises(SchemaCompatibilityError):
-                main.startup()
-            self.assertFalse(source.exists())
+            main.startup()
+            self.assertEqual(validate_runtime_database(source).version, 31)
+            with main.db() as connection:
+                self.assertEqual(connection.execute("SELECT state FROM auth_state WHERE id=1").fetchone()[0],
+                                 "schema_installed")
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM auth_users").fetchone()[0], 0)
+            before_restart = source.read_bytes()
+            main.startup()
+            self.assertEqual(source.read_bytes(), before_restart)
         finally:
             main.shutdown()
+            if (main.runtime_database_lease is not None
+                    and main.runtime_database_lease.database == source.absolute()):
+                main.runtime_database_lease.close()
+                main.runtime_database_lease = None
             main.DB_PATH = old_db
+
+    def test_runtime_startup_rejects_existing_wal_database_without_changing_it(self):
+        data_dir = self.root / "runtime-wal"
+        data_dir.mkdir()
+        source = data_dir / "nexo.sqlite3"
+        create_historical_database(source, 28)
+        connection = sqlite3.connect(source, isolation_level=None)
+        try:
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+            connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.execute("INSERT INTO providers VALUES('wal-row','synthetic','https://invalid/','','fixture')")
+            original = source.read_bytes()
+            wal_path = Path(str(source) + "-wal")
+            wal_bytes = wal_path.read_bytes()
+            old_db = main.DB_PATH
+            main.DB_PATH = source
+            try:
+                with self.assertRaises(DatabaseInUse):
+                    main.startup()
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(wal_path.read_bytes(), wal_bytes)
+            finally:
+                main.shutdown()
+                if (main.runtime_database_lease is not None
+                        and main.runtime_database_lease.database == source.absolute()):
+                    main.runtime_database_lease.close()
+                    main.runtime_database_lease = None
+                main.DB_PATH = old_db
+        finally:
+            connection.close()
 
     def test_startup_and_http_settings_reads_do_not_migrate_persistent_database(self):
         data_dir = self.root / "no-http-migrations"

@@ -14,6 +14,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import struct
+import time
 import uuid
 
 from app import migrations
@@ -33,6 +34,10 @@ class SafeMigrationError(RuntimeError):
 
 
 class DatabaseInUse(SafeMigrationError):
+    pass
+
+
+class DatabaseLeaseBusy(DatabaseInUse):
     pass
 
 
@@ -298,7 +303,7 @@ class DatabaseLease:
             self.close()
             if isinstance(error, SafeMigrationError):
                 raise
-            raise DatabaseInUse("database has an active NEXO runtime or migrator") from None
+            raise DatabaseLeaseBusy("database has an active NEXO runtime or migrator") from None
         return self
 
     def close(self) -> None:
@@ -324,6 +329,7 @@ def validate_runtime_database(database: str | Path) -> DatabaseState:
     path = Path(database).absolute()
     if _journal_path(path).exists() or _journal_path(path).is_symlink():
         raise MigrationRecoveryRequired("offline migration recovery is incomplete")
+    _require_delete_journal_source(path)
     state = inspect_database(path, fingerprint_data=False)
     if state.version not in (HISTORICAL_SCHEMA_VERSION, ADMIN_SCHEMA_VERSION,
                              OWNERSHIP_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
@@ -543,10 +549,39 @@ class SafeMigrationEngine:
         if self.database.is_symlink():
             raise SafeMigrationError("database symlinks are not accepted")
 
-    def migrate(self, fault_hook: Callable[[str], None] | None = None) -> MigrationResult:
+    def initialize_if_missing(self, fault_hook: Callable[[str], None] | None = None) -> MigrationResult:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                return self.migrate(fault_hook, only_if_missing=True)
+            except DatabaseLeaseBusy:
+                if self.database.is_symlink():
+                    raise SchemaCompatibilityError("database symlinks are not accepted") from None
+                journal = _journal_path(self.database)
+                if self.database.exists() and not journal.exists() and not journal.is_symlink():
+                    state = validate_runtime_database(self.database)
+                    return MigrationResult(state.version, state.version, None, False)
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+
+    def migrate(self, fault_hook: Callable[[str], None] | None = None, *,
+                only_if_missing: bool = False) -> MigrationResult:
         with DatabaseLease(self.database, exclusive=True) as offline_lease:
-            self._recover_interrupted_locked()
-            self._cleanup_orphan_staging()
+            if only_if_missing:
+                journal = _journal_path(self.database)
+                if journal.exists() or journal.is_symlink():
+                    self._recover_interrupted_locked()
+                if self.database.is_symlink():
+                    raise SchemaCompatibilityError("database symlinks are not accepted")
+                if self.database.exists():
+                    _require_delete_journal_source(self.database)
+                    state = validate_runtime_database(self.database)
+                    return MigrationResult(state.version, state.version, None, False)
+                self._require_fresh_install_state()
+            else:
+                self._recover_interrupted_locked()
+                self._cleanup_orphan_staging()
             if self.database.is_symlink():
                 raise SchemaCompatibilityError("database symlinks are not accepted")
             if self.database.exists() and self.database.stat().st_size == 0:
@@ -649,6 +684,23 @@ class SafeMigrationEngine:
                 if source_connection is not None:
                     source_connection.rollback()
                     source_connection.close()
+
+    def _require_fresh_install_state(self) -> None:
+        if _has_sidecars(self.database):
+            raise MigrationRecoveryRequired("SQLite sidecars exist without a canonical database")
+        for artifact in (self.data_dir.glob(".nexo.sqlite3.stage.*.sqlite3"),
+                         self.data_dir.glob(".nexo.sqlite3.backup.*.sqlite3")):
+            if next(artifact, None) is not None:
+                raise MigrationRecoveryRequired("migration artifacts exist without a canonical database")
+
+        lock_path = self.database.with_name(self.database.name + LOCK_SUFFIX)
+        source_dir = self.data_dir / "notebook-sources"
+        for path in self.data_dir.iterdir():
+            if path == lock_path:
+                continue
+            if path == source_dir and path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+                continue
+            raise MigrationRecoveryRequired("data directory contains persistent state; refusing initialization")
 
     def recover(self) -> str:
         with DatabaseLease(self.database, exclusive=True):
@@ -824,13 +876,25 @@ def _database_check(connection: sqlite3.Connection) -> tuple[str, tuple[tuple, .
     return integrity, foreign_keys
 
 
+def _has_sidecars(database: Path) -> bool:
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            Path(str(database) + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
 def _require_no_sidecars(database: Path) -> None:
-    if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+    if _has_sidecars(database):
         raise DatabaseInUse("SQLite sidecars must be absent before promotion")
 
 
 def _require_delete_journal_source(database: Path) -> None:
     _require_no_sidecars(database)
+    if database.is_symlink() or not database.is_file() or database.stat().st_size == 0:
+        raise SchemaCompatibilityError("SQLite database file is unavailable or empty")
     with database.open("rb") as source:
         header = source.read(20)
     if len(header) < 20 or header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":

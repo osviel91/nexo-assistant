@@ -31,7 +31,13 @@ from app.modules.mcp import MCPManager, validate_server
 from app.modules.aemet import register_aemet_tool
 from app.modules.web_search_searxng import WebSearchSearxngModule
 from app.modules.decision_runtime import DecisionRuntimeModule
-from app.safe_migrations import DatabaseLease, acquire_runtime_lease, validate_runtime_database
+from app.safe_migrations import (
+    DatabaseLease,
+    DatabaseLeaseBusy,
+    SafeMigrationEngine,
+    acquire_runtime_lease,
+    validate_runtime_database,
+)
 from app.tools import ExposurePolicy, ToolExecutor, ToolNotAvailableError
 from app.tool_selection import Selection, select_tools
 from app.turn_boundaries import history_for_turn
@@ -254,8 +260,19 @@ def startup() -> None:
         if runtime_database_lease and runtime_database_lease.database != expected_path:
             runtime_database_lease.close()
             runtime_database_lease = None
+        if (runtime_database_lease is None and DB_PATH.name == "nexo.sqlite3"
+                and not DB_PATH.exists()):
+            SafeMigrationEngine(DB_PATH.parent).initialize_if_missing()
         if runtime_database_lease is None:
-            runtime_database_lease = acquire_runtime_lease(DB_PATH)
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    runtime_database_lease = acquire_runtime_lease(DB_PATH)
+                    break
+                except DatabaseLeaseBusy:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
         app.state.sqlite_schema = validate_runtime_database(DB_PATH)
         module_registry.startup()
     except Exception:
