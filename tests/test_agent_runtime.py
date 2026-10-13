@@ -64,6 +64,37 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertNotIn("arguments", json.dumps(trace_events))
         self.assertIn("tools", adapter.payloads[0])
 
+    def test_provider_safe_tool_names_map_back_to_registered_tools(self):
+        calls = []
+
+        async def handler(_context, arguments):
+            calls.append(arguments)
+            return {"content": "result"}
+
+        class Adapter:
+            model_id = "model"
+
+            def __init__(self):
+                self.payloads = []
+
+            async def stream(self, messages, tools, temperature=None):
+                self.payloads.append(tools)
+                if len(self.payloads) == 1:
+                    yield ModelStreamChunk(tool_calls=[{"index": 0, "id": "call", "function": {
+                        "name": "nexo_tool_0", "arguments": "{}"}}])
+                else:
+                    yield ModelStreamChunk(content="answer")
+
+        registry = self.registry(handler)
+        registry.context.tools.unregister("test_tool")
+        registry.context.tools.register(ToolDefinition("native.test_tool", "test", {"type": "object"}, handler, action="read_only"))
+        adapter = Adapter()
+        events = run(AgentRuntime(), adapter, registry)
+
+        self.assertEqual(adapter.payloads[0][0]["function"]["name"], "nexo_tool_0")
+        self.assertEqual(calls, [{}])
+        self.assertEqual(events[-1]["answer"], "answer")
+
     def test_progress_guard_failures_fail_open_before_and_after_tool_call(self):
         from app.progress_guard import ProgressGuard
 

@@ -76,7 +76,7 @@ class ProviderSerializationTests(unittest.TestCase):
                     return [event async for event in AgentRuntime().stream(request)]
 
                 events = asyncio.run(run())
-                self.assertEqual([entry["function"]["name"] for entry in client.calls[0][2]["tools"]], [name])
+                self.assertEqual([entry["function"]["name"] for entry in client.calls[0][2]["tools"]], ["nexo_tool_0"])
                 self.assertEqual(seen, [{}])
                 self.assertEqual(events[-1]["tools_used"], [name])
 

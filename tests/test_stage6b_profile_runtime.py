@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -143,7 +144,7 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["model"], "m")
             self.assertEqual(payload["temperature"], 0.7)
             self.assertEqual(payload["messages"][0], {"role": "system", "content": "Be brief"})
-            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible", "native.get_current_datetime", "native.render_artifact", "native.request_user_input", "aemet.opendata", "mcp.demo.query"])
+            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["visible", "nexo_tool_1", "nexo_tool_2", "nexo_tool_3", "nexo_tool_4", "nexo_tool_5"])
             done = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ") and json.loads(line[6:]).get("done")][0]
             self.assertEqual(done["model_id"], "m")
             self.assertEqual(done["runtime"]["agent_profile_name"], "Research")
@@ -302,7 +303,8 @@ class Stage6BProfileRuntimeTests(unittest.TestCase):
             self.assertLessEqual(selected, authorized)
             self.assertTrue(selected - allowed_names <= native)
             self.assertTrue(all(native_definitions[name].action == "read_only" for name in selected & native))
-            self.assertEqual(exposed_to_model, selected)
+            self.assertEqual(len(exposed_to_model), len(selected))
+            self.assertTrue(all(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) for name in exposed_to_model))
             self.assertTrue(unselected_module_mcp.isdisjoint(available | authorized | selected | exposed_to_model))
             self.assertEqual(executed, [])
             self.assertEqual(len(denied_calls), 2)

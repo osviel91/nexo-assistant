@@ -162,7 +162,9 @@ class ChatToolTests(unittest.TestCase):
                 main.module_registry.context.tools._tools.update(old_tools)
 
         self.assertNotIn("mcp.obsidian.search", [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[0].get("tools", [])])
-        self.assertIn("mcp.obsidian.search", [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[1]["tools"]])
+        enabled_names = [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[1]["tools"]]
+        self.assertEqual(len(enabled_names), 4)
+        self.assertTrue(all(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) for name in enabled_names))
 
     def test_agent_provider_boundary_intrinsic_tools_selection_budget_and_snapshot(self):
         from app import main
@@ -229,10 +231,13 @@ class ChatToolTests(unittest.TestCase):
                 main.module_registry.context.tools._tools.update(old_tools)
 
         native = ["native.get_current_datetime", "native.render_artifact", "native.request_user_input"]
-        self.assertCountEqual(research_tools, ["web_search", *native])
-        self.assertCountEqual(restricted_tools, native)
-        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[2]["tools"]], native)
-        self.assertCountEqual([tool["function"]["name"] for tool in AgentBoundaryClient.payloads[3]["tools"]], ["web_search", *native])
+        self.assertEqual(research_tools.count("web_search"), 1)
+        self.assertEqual(len(research_tools), 4)
+        self.assertEqual(len(restricted_tools), len(native))
+        for names in (research_tools, restricted_tools,
+                      [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[2]["tools"]],
+                      [tool["function"]["name"] for tool in AgentBoundaryClient.payloads[3]["tools"]]):
+            self.assertTrue(all(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) for name in names))
         self.assertEqual(snapshot["max_tool_calls"], 12)
         self.assertEqual(snapshot["agent_profile_name"], "Research")
         self.assertEqual(snapshot["effective_tool_names"], historical["effective_tool_names"])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -155,6 +156,17 @@ class AgentRuntime:
                 runtime_event("PROVIDER_CONTINUATION_STARTED", request.model.model_id, {"round": tool_rounds + 1})
             yield {"activity": {"type": "REASON", "status": "running", "round": tool_rounds + 1}}
             definitions = effective_tools.definitions()
+            used_tool_names = {item["function"]["name"] for item in definitions}
+            tool_name_aliases: dict[str, str] = {}
+            for index, definition in enumerate(definitions):
+                name = definition["function"]["name"]
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
+                    alias = f"nexo_tool_{index}"
+                    while alias in used_tool_names:
+                        alias += "_"
+                    definition["function"]["name"] = alias
+                    used_tool_names.add(alias)
+                    tool_name_aliases[alias] = name
             diagnostic(logger, "agent_runtime", **{
                 "tools_available": len(definitions),
                 "tools_exposed": len(definitions),
@@ -198,6 +210,9 @@ class AgentRuntime:
                 yield {"trace": {"type": "REASON", "duration_ms": duration_ms, "status": "error", "metadata": {**error_metadata, "run_id": request.context.run_id}}}
                 yield {"error": "provider_failure" if request.profile_id else str(exc)}
                 return
+
+            for call in tool_calls.values():
+                call["name"] = tool_name_aliases.get(call["name"], call["name"])
 
             diagnostic(logger, "provider_response", **{
                 "status": 200,
