@@ -22,3 +22,10 @@ assert.doesNotMatch(renderMarkdown('<img src=x onerror=alert(1)>'), /<img(?:\s|>
 assert.equal(renderMarkdown(raw), renderMarkdown(raw));
 assert.match(renderMarkdown('**bold'), /\*\*bold/);
 assert.match(renderMarkdown('```python\nprint("hello")'), /<pre data-language="python">/);
+
+const table = renderMarkdown([
+  '| Consulta probada | Resultado |',
+  '|---|---|',
+  '| Valdemoro · hoy | Error: *respuesta demasiado grande* |',
+].join('\n'));
+assert.match(table, /<table><thead><tr><th>Consulta probada<\/th><th>Resultado<\/th><\/tr><\/thead><tbody><tr><td>Valdemoro · hoy<\/td><td>Error: <em>respuesta demasiado grande<\/em><\/td><\/tr><\/tbody><\/table>/);

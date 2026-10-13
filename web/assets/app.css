@@ -166,6 +166,10 @@ kbd { margin-left: auto; padding: 2px 5px; border: 1px solid var(--border); bord
 .artifact-metrics strong { font-size: 18px; }
 .artifact iframe { display: block; width: 100%; min-height: 240px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: white; }
 .message-content p { margin: 0 0 14px; }
+.message-content .markdown-table-wrap { max-width: 100%; margin: 0 0 14px; overflow-x: auto; }
+.message-content table { width: 100%; border-collapse: collapse; font-size: .92em; }
+.message-content th, .message-content td { padding: 7px 9px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+.message-content th { background: var(--surface-raised); color: var(--text); }
 .message-content h1, .message-content h2, .message-content h3, .message-content h4 { margin: 20px 0 8px; color: var(--text); line-height: 1.25; letter-spacing: -.025em; }
 .message-content h1 { font-size: 1.45em; }.message-content h2 { font-size: 1.28em; }.message-content h3 { font-size: 1.12em; }.message-content h4 { font-size: 1em; }
 .message-content ul, .message-content ol { margin: 0 0 14px; padding-left: 1.35em; }.message-content li + li { margin-top: 5px; }

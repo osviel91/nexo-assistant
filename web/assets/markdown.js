@@ -23,6 +23,11 @@ function renderInlineMarkdown(value) {
   return text.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)]);
 }
 
+function tableCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replace(/\\\|/g, '|'));
+}
+
 export function renderMarkdown(value) {
   const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n');
   const output = [];
@@ -39,6 +44,21 @@ export function renderMarkdown(value) {
       const language = fence[1] ? ` data-language="${escapeHtml(fence[1])}"` : '';
       output.push(`<pre${language}><code>${escapeHtml(code.join('\n'))}</code></pre>`);
       continue;
+    }
+    if (line.includes('|') && lines[index + 1]?.includes('|')) {
+      const headers = tableCells(line);
+      const separators = tableCells(lines[index + 1]);
+      if (headers.length > 1 && headers.length === separators.length && separators.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+        index += 2;
+        const rows = [];
+        while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+          const cells = tableCells(lines[index]);
+          rows.push(headers.map((_, cellIndex) => cells[cellIndex] || ''));
+          index += 1;
+        }
+        output.push(`<div class="markdown-table-wrap"><table><thead><tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+        continue;
+      }
     }
     const heading = line.match(/^ {0,3}(#{1,4})\s+(.+?)\s*#*$/);
     if (heading) { output.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2])}</h${heading[1].length}>`); index += 1; continue; }
