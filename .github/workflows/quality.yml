@@ -2,19 +2,127 @@ name: Quality
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      migration_gate: ${{ steps.migrations.outputs.migration_gate }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
       - run: ./scripts/nexo bootstrap
       - run: ./scripts/nexo check
+      - name: Validate Compose files
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.portainer.yml config --quiet
+      - name: Build application image
+        run: docker build --tag nexo-chat:ci .
+      - name: Classify SQLite migration changes
+        id: migrations
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" | python scripts/deployment_eligibility.py --base-known >> "$GITHUB_OUTPUT"
+          else
+            python scripts/deployment_eligibility.py >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      commit: ${{ steps.contract.outputs.commit }}
+      image: ${{ steps.contract.outputs.image }}
+      digest: ${{ steps.contract.outputs.digest }}
+      ci_result: ${{ steps.contract.outputs.ci_result }}
+      deployment_eligible: ${{ steps.contract.outputs.deployment_eligible }}
+      migration_gate: ${{ steps.contract.outputs.migration_gate }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Prepare immutable image reference
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Record publication contract
+        id: contract
+        env:
+          COMMIT: ${{ github.sha }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          MIGRATION_GATE: ${{ needs.check.outputs.migration_gate }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          contract = {
+              "commit": os.environ["COMMIT"],
+              "image": os.environ["IMAGE"],
+              "tag": f"sha-{os.environ['COMMIT']}",
+              "digest": os.environ["DIGEST"],
+              "ci_result": "success",
+              "migration_gate": os.environ["MIGRATION_GATE"],
+              "deployment_eligible": False,
+              "eligibility_reasons": [
+                  "Portainer deployment is disabled pending Qdrant stack separation",
+                  "production SQLite compatibility is unknown and requires S1-E",
+              ],
+          }
+          Path("release-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate"):
+                  output.write(f"{key}={contract[key]}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## GHCR publication contract\n\n")
+              summary.write(f"- Commit: `{contract['commit']}`\n")
+              summary.write(f"- Image: `{contract['image']}@{contract['digest']}`\n")
+              summary.write(f"- CI: `{contract['ci_result']}`\n")
+              summary.write(f"- Migration gate: `{contract['migration_gate']}`\n")
+              summary.write("- Deployment eligible: `false`\n")
+          PY
+      - name: Upload publication contract
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nexo-release-contract-${{ github.sha }}
+          path: release-contract.json
+          if-no-files-found: error
