@@ -22,13 +22,19 @@ def classify_migration_changes(paths: list[str], *, base_known: bool) -> str:
     return "no-migration-files-changed"
 
 
+def is_deployment_eligible(migration_gate: str, production_schema_version: str) -> bool:
+    return migration_gate == "no-migration-files-changed" and production_schema_version == "31"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-known", action="store_true")
+    parser.add_argument("--production-schema-version", default="")
     args = parser.parse_args()
     paths = sys.stdin.read().splitlines()
-    print(f"migration_gate={classify_migration_changes(paths, base_known=args.base_known)}")
-    print("deployment_eligible=false")
+    migration_gate = classify_migration_changes(paths, base_known=args.base_known)
+    print(f"migration_gate={migration_gate}")
+    print(f"deployment_eligible={str(is_deployment_eligible(migration_gate, args.production_schema_version)).lower()}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.deployment_eligibility import classify_migration_changes
+from scripts.deployment_eligibility import classify_migration_changes, is_deployment_eligible
 
 
 class DeploymentEligibilityTests(unittest.TestCase):
@@ -19,6 +19,13 @@ class DeploymentEligibilityTests(unittest.TestCase):
             classify_migration_changes(["app/main.py", "web/index.html"], base_known=True),
             "no-migration-files-changed",
         )
+
+    def test_deployment_eligibility_requires_known_v31_and_unchanged_migrations(self):
+        self.assertTrue(is_deployment_eligible("no-migration-files-changed", "31"))
+        self.assertFalse(is_deployment_eligible("unknown", "31"))
+        self.assertFalse(is_deployment_eligible("review-required", "31"))
+        self.assertFalse(is_deployment_eligible("no-migration-files-changed", ""))
+        self.assertFalse(is_deployment_eligible("no-migration-files-changed", "32"))
 
 
 if __name__ == "__main__":
