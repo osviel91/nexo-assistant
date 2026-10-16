@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: Confirm a production deployment of the current main commit
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -38,11 +45,11 @@ jobs:
       - name: Classify SQLite migration changes
         id: migrations
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || vars.NEXO_PRODUCTION_COMMIT }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -o pipefail
-          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null && git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
             git diff --name-only "$BASE_SHA" "$HEAD_SHA" | python scripts/deployment_eligibility.py --base-known >> "$GITHUB_OUTPUT"
           else
             python scripts/deployment_eligibility.py >> "$GITHUB_OUTPUT"
@@ -51,7 +58,7 @@ jobs:
   publish:
     needs: check
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -62,6 +69,7 @@ jobs:
       ci_result: ${{ steps.contract.outputs.ci_result }}
       deployment_eligible: ${{ steps.contract.outputs.deployment_eligible }}
       migration_gate: ${{ steps.contract.outputs.migration_gate }}
+      deployment_lock: ${{ steps.contract.outputs.deployment_lock }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare immutable image reference
@@ -91,11 +99,22 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
           MIGRATION_GATE: ${{ needs.check.outputs.migration_gate }}
+          PRODUCTION_SCHEMA_VERSION: ${{ vars.NEXO_PRODUCTION_SCHEMA_VERSION }}
         run: |
           python - <<'PY'
           import json
           import os
           from pathlib import Path
+          from scripts.deployment_eligibility import is_deployment_eligible
+
+          migration_gate = os.environ["MIGRATION_GATE"]
+          schema_version = os.environ["PRODUCTION_SCHEMA_VERSION"]
+          deployment_eligible = is_deployment_eligible(migration_gate, schema_version)
+          reasons = []
+          if migration_gate != "no-migration-files-changed":
+              reasons.append(f"migration gate is {migration_gate}")
+          if schema_version != "31":
+              reasons.append(f"production schema version is {schema_version or 'unknown'}, expected 31")
 
           contract = {
               "commit": os.environ["COMMIT"],
@@ -103,16 +122,15 @@ jobs:
               "tag": f"sha-{os.environ['COMMIT']}",
               "digest": os.environ["DIGEST"],
               "ci_result": "success",
-              "migration_gate": os.environ["MIGRATION_GATE"],
-              "deployment_eligible": False,
-              "eligibility_reasons": [
-                  "Portainer deployment is disabled pending Qdrant stack separation",
-                  "production SQLite compatibility is unknown and requires S1-E",
-              ],
+              "migration_gate": migration_gate,
+              "production_schema_version": schema_version or "unknown",
+              "deployment_eligible": deployment_eligible,
+              "deployment_lock": "hard-disabled",
+              "eligibility_reasons": reasons,
           }
           Path("release-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate"):
+              for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate", "deployment_lock"):
                   output.write(f"{key}={contract[key]}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("## GHCR publication contract\n\n")
@@ -120,7 +138,11 @@ jobs:
               summary.write(f"- Image: `{contract['image']}@{contract['digest']}`\n")
               summary.write(f"- CI: `{contract['ci_result']}`\n")
               summary.write(f"- Migration gate: `{contract['migration_gate']}`\n")
-              summary.write("- Deployment eligible: `false`\n")
+              summary.write(f"- Production schema version: `{contract['production_schema_version']}`\n")
+              summary.write(f"- Deployment eligible: `{str(contract['deployment_eligible']).lower()}`\n")
+              summary.write("- Deployment lock: `hard-disabled`\n")
+              if reasons:
+                  summary.write("- Eligibility blockers: " + ", ".join(f"`{reason}`" for reason in reasons) + "\n")
           PY
       - name: Upload publication contract
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -128,3 +150,47 @@ jobs:
           name: nexo-release-contract-${{ github.sha }}
           path: release-contract.json
           if-no-files-found: error
+
+  deploy:
+    needs: [check, publish]
+    # Hard lock: only a reviewed code change can remove `false`; push/merge events remain excluded.
+    if: ${{ false && github.event_name == 'workflow_dispatch' && inputs.confirm_production_deploy && github.ref == 'refs/heads/main' && needs.publish.outputs.deployment_eligible == 'true' && needs.publish.outputs.migration_gate == 'no-migration-files-changed' }}
+    runs-on: ubuntu-latest
+    environment: nexo-production
+    concurrency:
+      group: nexo-portainer-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Recheck release gates and reject stale dispatches
+        env:
+          DEPLOYMENT_ELIGIBLE: ${{ needs.publish.outputs.deployment_eligible }}
+          MIGRATION_GATE: ${{ needs.publish.outputs.migration_gate }}
+          DEPLOY_SHA: ${{ github.sha }}
+          PRODUCTION_SHA: ${{ vars.NEXO_PRODUCTION_COMMIT }}
+        run: |
+          set -eu
+          [ "$DEPLOYMENT_ELIGIBLE" = true ]
+          [ "$MIGRATION_GATE" = no-migration-files-changed ]
+          [ -n "$PRODUCTION_SHA" ]
+          git cat-file -e "$PRODUCTION_SHA^{commit}"
+          git merge-base --is-ancestor "$PRODUCTION_SHA" "$DEPLOY_SHA"
+          git fetch --no-tags origin main
+          [ "$DEPLOY_SHA" = "$(git rev-parse FETCH_HEAD)" ] || {
+            echo "Refusing to deploy: this workflow run is not the current main commit" >&2
+            exit 1
+          }
+      - name: Update and verify NEXO in Portainer
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          PORTAINER_STACK_ID: '30'
+          PORTAINER_ENDPOINT_ID: ${{ vars.NEXO_PORTAINER_ENDPOINT_ID }}
+          PORTAINER_DEPLOY_TIMEOUT: '300'
+          NEXO_IMAGE: ${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}
+          NEXO_HEALTHCHECK_URL: ${{ vars.NEXO_HEALTHCHECK_URL }}
+        run: python3 scripts/portainer_deploy.py
