@@ -1,12 +1,7 @@
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    restart: unless-stopped
-    volumes:
-      - qdrant-data:/qdrant/storage
-
   nexo-chat:
-    build: .
+    # Set only to the published immutable reference: ghcr.io/<owner>/nexo-chat@sha256:<digest>
+    image: "${NEXO_IMAGE:?Set NEXO_IMAGE to an immutable GHCR digest reference}"
     restart: unless-stopped
     ports:
       - "${NEXO_HTTP_PORT:-8787}:8787"
@@ -39,11 +34,17 @@ services:
       NEXO_DECISION_SHADOW: "${NEXO_DECISION_SHADOW:-false}"
     volumes:
       - nexo-data:/data
-    depends_on:
-      - qdrant
+    networks:
+      - nexo-assistant-shared
     mem_limit: ${NEXO_MEMORY_LIMIT:-768m}
     cpus: ${NEXO_CPU_LIMIT:-1.0}
 
+networks:
+  nexo-assistant-shared:
+    external: true
+    name: nexo-assistant-shared
+
 volumes:
   nexo-data:
-  qdrant-data:
+    external: true
+    name: nexo-assistant_nexo-data

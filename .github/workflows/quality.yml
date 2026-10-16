@@ -30,7 +30,9 @@ jobs:
       - name: Validate Compose files
         run: |
           docker compose -f docker-compose.yml config --quiet
-          docker compose -f docker-compose.portainer.yml config --quiet
+          NEXO_IMAGE=ghcr.io/example/nexo-chat@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            docker compose -f docker-compose.portainer.yml config --quiet
+          docker compose -f docker-compose.qdrant.yml config --quiet
       - name: Build application image
         run: docker build --tag nexo-chat:ci .
       - name: Classify SQLite migration changes

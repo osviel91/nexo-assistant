@@ -1,3 +1,4 @@
+# Local development aggregate. Portainer deployment uses the separate NEXO and Qdrant manifests.
 services:
   qdrant:
     image: qdrant/qdrant:latest

@@ -28,6 +28,12 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("DIGEST: ${{ steps.build.outputs.digest }}", PUBLISH_JOB)
         self.assertIn('"deployment_eligible": False', PUBLISH_JOB)
 
+    def test_split_stack_manifests_are_validated_without_running_services(self):
+        self.assertIn("docker-compose.portainer.yml config --quiet", CHECK_JOB)
+        self.assertIn("docker-compose.qdrant.yml config --quiet", CHECK_JOB)
+        self.assertNotIn("qdrant", PUBLISH_JOB)
+        self.assertNotIn("docker compose up", WORKFLOW)
+
 
 if __name__ == "__main__":
     unittest.main()
