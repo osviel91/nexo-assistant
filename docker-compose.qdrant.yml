@@ -1,0 +1,19 @@
+services:
+  qdrant:
+    image: qdrant/qdrant@sha256:b7b0444c4c351c970b98e90a6f89c2ee4287c65b44e52b4cb503fa5b2aa927ad
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      nexo-assistant-shared:
+        aliases: [qdrant]
+
+networks:
+  nexo-assistant-shared:
+    external: true
+    name: nexo-assistant-shared
+
+volumes:
+  qdrant-data:
+    external: true
+    name: nexo-assistant_qdrant-data
