@@ -97,7 +97,7 @@ jobs:
           import json
           import os
           from pathlib import Path
-          from scripts.deployment_eligibility import is_deployment_eligible
+          from scripts.deployment_eligibility import github_output_value, is_deployment_eligible
 
           migration_gate = os.environ["MIGRATION_GATE"]
           schema_version = os.environ["PRODUCTION_SCHEMA_VERSION"]
@@ -122,7 +122,7 @@ jobs:
           Path("release-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate"):
-                  output.write(f"{key}={contract[key]}\n")
+                  output.write(f"{key}={github_output_value(contract[key])}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("## GHCR publication contract\n\n")
               summary.write(f"- Commit: `{contract['commit']}`\n")

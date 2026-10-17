@@ -1,6 +1,8 @@
 from pathlib import Path
 import unittest
 
+from scripts.deployment_eligibility import github_output_value
+
 
 WORKFLOW = Path(".github/workflows/quality.yml").read_text()
 CHECK_JOB, PUBLISH_JOB = WORKFLOW.split("\n  publish:\n", maxsplit=1)
@@ -58,6 +60,13 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("is_deployment_eligible(migration_gate, schema_version)", PUBLISH_JOB)
         self.assertIn("vars.NEXO_PRODUCTION_SCHEMA_VERSION", PUBLISH_JOB)
         self.assertIn("vars.NEXO_PRODUCTION_COMMIT", CHECK_JOB)
+
+    def test_publish_serializes_boolean_outputs_for_release(self):
+        self.assertEqual(github_output_value(True), "true")
+        self.assertEqual(github_output_value(False), "false")
+        self.assertIn("github_output_value(contract[key])", PUBLISH_JOB)
+        self.assertIn("needs.publish.outputs.deployment_eligible == 'true'", RELEASE_JOB)
+        self.assertIn('[ "$DEPLOYMENT_ELIGIBLE" = true ]', RELEASE_JOB)
 
     def test_no_services_are_started_by_the_workflow(self):
         self.assertNotIn("docker compose up", WORKFLOW)
