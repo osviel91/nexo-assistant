@@ -26,6 +26,10 @@ def is_deployment_eligible(migration_gate: str, production_schema_version: str) 
     return migration_gate == "no-migration-files-changed" and production_schema_version == "31"
 
 
+def github_output_value(value: object) -> str:
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-known", action="store_true")
