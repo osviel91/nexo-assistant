@@ -62,6 +62,76 @@ The conversion changes the running stack and may change its Portainer stack
 ID. Complete and verify it only under the separate production change approval;
 this code change does not perform it.
 
+## Cutover and recovery procedure
+
+The Web Editor and Git source cannot own a stack with the same name on the same
+endpoint at the same time. The cutover therefore has a short outage:
+
+1. Before the window, verify the NEXO stack and endpoint in Portainer. Record
+   the complete Compose text and every stack environment variable in an
+   operator-controlled secret store; do not paste values into tickets or logs.
+   Record the current `NEXO_IMAGE` digest for rollback.
+2. Verify the external volume and network by their exact names. Make and
+   validate a consistent backup of the NEXO data volume. Plan a graceful stop
+   of NEXO before taking a file-level SQLite backup.
+3. Stop the Web Editor stack. Remove its Portainer stack object and containers
+   only, explicitly declining any option to remove volumes. Confirm the
+   external volume and network still exist before continuing.
+4. Create a Git stack on the same endpoint, with the same `nexo-chat` stack
+   name, repository/branch/path from above, the exact saved environment, and
+   the same Compose file. Initially use the recorded digest as `NEXO_IMAGE`;
+   this avoids combining the stack-source conversion with an unverified
+   application update.
+5. Start the Git stack and perform the verification below. If it passes, set
+   its `NEXO_IMAGE` to `latest`, enable only the stack webhook, and verify the
+   newly generated URL belongs to this NEXO stack. Do not enable scheduled Git
+   polling. The eventual first automatic release occurs only after S1-F is
+   merged; this branch does not contact the webhook.
+
+### If the Git stack fails
+
+- Do not remove, recreate, or restore over `nexo-assistant_nexo-data` as a first
+  response. Keep the backup and failed stack definition for diagnosis.
+- Stop and remove the failed Git stack object/containers, explicitly retaining
+  external volumes. Recreate the Web Editor stack from the saved Compose and
+  environment, using the recorded pre-cutover digest, and the same endpoint,
+  external volume, and external network. This restores the old source mode
+  without deleting the SQLite volume.
+- Confirm NEXO and Qdrant health. Restore the backup only if the database is
+  actually damaged and after verifying the intended source/target; never
+  overwrite a healthy current database with an older snapshot.
+- If the observed SQLite schema is newer than v31, leave the app stopped and
+  escalate for a separate migration/recovery decision. Do not try to recover
+  by starting an older image against that database.
+
+## Post-cutover verification
+
+These checks are prepared for the approved cutover; they have not been run
+against production:
+
+1. Portainer shows the NEXO Git stack `Active` and its `nexo-chat` container
+   running with the recorded digest. Verify the Qdrant stack remains active and
+   unchanged in Portainer.
+2. From the NEXO container console, query only the SQLite migration ledger in
+   read-only mode. This prints the version number, not application data:
+
+   ```sh
+   python3 -c 'import os, sqlite3; from pathlib import Path; p=Path(os.getenv("NEXO_DATA_DIR", "/data")) / "nexo.sqlite3"; db=sqlite3.connect(p.as_uri()+"?mode=ro", uri=True); db.execute("PRAGMA query_only=ON"); print(db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]); db.close()'
+   ```
+
+   Require `31`. The application source currently declares
+   `CURRENT_SCHEMA_VERSION = 31`; the repository's synthetic-fixture admin CLI
+   intentionally refuses to inspect production databases and is not a
+   production verification tool.
+3. Request `GET /api/health` through the approved NEXO URL. Require HTTP 200,
+   top-level `status: ok`, and `vector_store.status: ok`; with the configured
+   Qdrant store this verifies NEXO's Qdrant health check. Confirm Qdrant's
+   separate Portainer stack and digest are unchanged.
+4. After future webhook releases, a webhook 2xx only means Portainer accepted
+   the request: Portainer deploys asynchronously. Confirm stack/container state
+   and the requested image digest separately; do not treat the webhook status
+   alone as proof of a healthy rollout.
+
 ## GitHub configuration
 
 Create these repository variables before release eligibility can pass:
