@@ -5,13 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      confirm_production_deploy:
-        description: Confirm a production deployment of the current main commit
-        type: boolean
-        required: true
-        default: false
 
 permissions:
   contents: read
@@ -58,7 +51,7 @@ jobs:
   publish:
     needs: check
     runs-on: ubuntu-latest
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -69,7 +62,6 @@ jobs:
       ci_result: ${{ steps.contract.outputs.ci_result }}
       deployment_eligible: ${{ steps.contract.outputs.deployment_eligible }}
       migration_gate: ${{ steps.contract.outputs.migration_gate }}
-      deployment_lock: ${{ steps.contract.outputs.deployment_lock }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare immutable image reference
@@ -125,12 +117,11 @@ jobs:
               "migration_gate": migration_gate,
               "production_schema_version": schema_version or "unknown",
               "deployment_eligible": deployment_eligible,
-              "deployment_lock": "hard-disabled",
               "eligibility_reasons": reasons,
           }
           Path("release-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate", "deployment_lock"):
+              for key in ("commit", "image", "digest", "ci_result", "deployment_eligible", "migration_gate"):
                   output.write(f"{key}={contract[key]}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("## GHCR publication contract\n\n")
@@ -140,7 +131,6 @@ jobs:
               summary.write(f"- Migration gate: `{contract['migration_gate']}`\n")
               summary.write(f"- Production schema version: `{contract['production_schema_version']}`\n")
               summary.write(f"- Deployment eligible: `{str(contract['deployment_eligible']).lower()}`\n")
-              summary.write("- Deployment lock: `hard-disabled`\n")
               if reasons:
                   summary.write("- Eligibility blockers: " + ", ".join(f"`{reason}`" for reason in reasons) + "\n")
           PY
@@ -151,46 +141,65 @@ jobs:
           path: release-contract.json
           if-no-files-found: error
 
-  deploy:
+  release_latest_and_webhook:
     needs: [check, publish]
-    # Hard lock: only a reviewed code change can remove `false`; push/merge events remain excluded.
-    if: ${{ false && github.event_name == 'workflow_dispatch' && inputs.confirm_production_deploy && github.ref == 'refs/heads/main' && needs.publish.outputs.deployment_eligible == 'true' && needs.publish.outputs.migration_gate == 'no-migration-files-changed' }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check.outputs.migration_gate == 'no-migration-files-changed' && needs.publish.outputs.deployment_eligible == 'true'
     runs-on: ubuntu-latest
-    environment: nexo-production
     concurrency:
-      group: nexo-portainer-production
+      group: nexo-main-release
       cancel-in-progress: false
     permissions:
       contents: read
+      packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - name: Recheck release gates and reject stale dispatches
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR for the mutable alias
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Move latest to the tested immutable digest
         env:
-          DEPLOYMENT_ELIGIBLE: ${{ needs.publish.outputs.deployment_eligible }}
           MIGRATION_GATE: ${{ needs.publish.outputs.migration_gate }}
-          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOYMENT_ELIGIBLE: ${{ needs.publish.outputs.deployment_eligible }}
+          PRODUCTION_SCHEMA_VERSION: ${{ vars.NEXO_PRODUCTION_SCHEMA_VERSION }}
+          RELEASE_SHA: ${{ needs.publish.outputs.commit }}
           PRODUCTION_SHA: ${{ vars.NEXO_PRODUCTION_COMMIT }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -eu
           [ "$DEPLOYMENT_ELIGIBLE" = true ]
           [ "$MIGRATION_GATE" = no-migration-files-changed ]
+          [ "$PRODUCTION_SCHEMA_VERSION" = 31 ]
           [ -n "$PRODUCTION_SHA" ]
           git cat-file -e "$PRODUCTION_SHA^{commit}"
-          git merge-base --is-ancestor "$PRODUCTION_SHA" "$DEPLOY_SHA"
+          git merge-base --is-ancestor "$PRODUCTION_SHA" "$RELEASE_SHA"
           git fetch --no-tags origin main
-          [ "$DEPLOY_SHA" = "$(git rev-parse FETCH_HEAD)" ] || {
-            echo "Refusing to deploy: this workflow run is not the current main commit" >&2
+          [ "$RELEASE_SHA" = "$(git rev-parse FETCH_HEAD)" ] || {
+            echo "Refusing to advance latest: this release is not the current main commit" >&2
             exit 1
           }
-      - name: Update and verify NEXO in Portainer
+          case "$IMAGE" in ghcr.io/*) ;; *) exit 1 ;; esac
+          DIGEST_HEX=${DIGEST#sha256:}
+          [ "$DIGEST_HEX" != "$DIGEST" ]
+          [ "${#DIGEST_HEX}" -eq 64 ]
+          case "$DIGEST_HEX" in *[!0-9a-f]*|'') exit 1 ;; esac
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+      - name: Recheck main and notify the NEXO stack webhook
         env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          PORTAINER_STACK_ID: '30'
-          PORTAINER_ENDPOINT_ID: ${{ vars.NEXO_PORTAINER_ENDPOINT_ID }}
-          PORTAINER_DEPLOY_TIMEOUT: '300'
-          NEXO_IMAGE: ${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}
-          NEXO_HEALTHCHECK_URL: ${{ vars.NEXO_HEALTHCHECK_URL }}
-        run: python3 scripts/portainer_deploy.py
+          RELEASE_SHA: ${{ needs.publish.outputs.commit }}
+          NEXO_PORTAINER_WEBHOOK_URL: ${{ secrets.NEXO_PORTAINER_WEBHOOK_URL }}
+          NEXO_PORTAINER_WEBHOOK_TIMEOUT: '300'
+        run: |
+          set -eu
+          git fetch --no-tags origin main
+          [ "$RELEASE_SHA" = "$(git rev-parse FETCH_HEAD)" ] || {
+            echo "Skipping webhook: a newer main commit exists" >&2
+            exit 1
+          }
+          python3 scripts/portainer_webhook.py
